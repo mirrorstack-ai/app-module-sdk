@@ -1,0 +1,6 @@
+{
+  "handler": "Handler & HTTP",
+  "event": "Events & Communication",
+  "storage": "Storage & Database",
+  "meter": "Usage Metering"
+}

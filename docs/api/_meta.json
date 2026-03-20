@@ -1,0 +1,6 @@
+{
+  "handler": "handler",
+  "event": "event",
+  "storage": "storage",
+  "meter": "meter"
+}
