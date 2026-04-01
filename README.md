@@ -10,4 +10,4 @@ Under review — clean implementation coming soon.
 
 ## License
 
-MIT
+Apache 2.0
