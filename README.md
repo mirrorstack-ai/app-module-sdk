@@ -9,11 +9,19 @@ Built with Go, chi router, and designed for AWS Lambda + local dev.
 
 **[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
 
-> **Status:** Under active development. Nothing is implemented yet — see the roadmap below.
+> **Status:** Under active development. Core is implemented — see the roadmap below.
 >
 > The `reference/v2-restored` branch contains the original implementation (handler, event, meter, storage packages with tests) being restructured into the new configless design.
 
-## Design
+## Getting started
+
+### Install
+
+```bash
+go get github.com/mirrorstack-ai/app-module-sdk
+```
+
+### Usage
 
 ```go
 package main
@@ -45,13 +53,35 @@ func main() {
 
 No config files. No YAML. Code is the single source of truth.
 
+### Struct API (for testing)
+
+```go
+mod, err := ms.New(ms.Config{ID: "media", Name: "Media", Icon: "perm_media"})
+
+mod.Platform(func(r chi.Router) { ... })
+mod.Public(func(r chi.Router) { ... })
+
+mod.Start()
+```
+
+## Runtime
+
+`ms.Start()` auto-detects the environment. One binary, works everywhere:
+
+| Environment | What happens | How platform calls |
+|------------|-------------|-------------------|
+| **Local dev** | HTTP server on `:8080` | HTTP proxy |
+| **AWS Lambda** | Lambda handler | Lambda Invoke SDK (VPC-internal) |
+
+Port defaults to `8080`. Override with `PORT` env var.
+
 ## Roadmap
 
 ### Core
 
-- [ ] `ms.Init()` — module registration
-- [ ] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
-- [ ] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes
+- [x] `ms.Init()` / `ms.New()` — module registration
+- [x] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
+- [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes (middleware in #4)
 
 ### Platform resources
 
@@ -86,19 +116,15 @@ No config files. No YAML. Code is the single source of truth.
 
 ```
 app-module-sdk/
-  mirrorstack.go               Root API: Init(), Start(), DB(ctx), Storage(ctx)
-  config.go                    Config struct, defaults
-  scope.go                     Platform(), Public(), Internal()
-  internal/                    Shared plumbing (not features)
-    tenant/                    Tenant resolution, header parsing
-    runtime/                   Lambda/HTTP detection
-    registry/                  Route/event/cron collection for manifest
-  db/                          Multi-tenant PostgreSQL (schema-per-app)
-  storage/                     S3 primary + R2 CDN cache
-  cache/                       Scoped Redis (ElastiCache)
-  meter/                       Custom usage metrics
-  mcp/                         MCP tool/resource registration
-  system/                      __mirrorstack route handlers
+  mirrorstack.go               Config, Module, Init/Start, convenience API
+  mirrorstack_test.go          All tests
+  internal/
+    runtime/                   Lambda/HTTP detection, Lambda handler
+  db/                          Multi-tenant PostgreSQL (planned)
+  storage/                     S3 + R2 CDN cache (planned)
+  cache/                       Scoped Redis (planned)
+  meter/                       Custom usage metrics (planned)
+  mcp/                         MCP tool/resource registration (planned)
 ```
 
 ## Module structure
