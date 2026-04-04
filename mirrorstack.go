@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
+	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
 // Config holds the module identity. Passed to Init() or New().
@@ -34,11 +35,13 @@ func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
-	return &Module{
+	m := &Module{
 		config: cfg,
 		router: chi.NewRouter(),
 		logger: log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
-	}, nil
+	}
+	m.mountSystemRoutes()
+	return m, nil
 }
 
 func (m *Module) Config() Config   { return m.config }
@@ -67,10 +70,19 @@ func (m *Module) Start() error {
 	}
 	addr := ":" + port
 	m.logger.Printf("%s module (%s) listening on %s", m.config.Name, m.config.ID, addr)
-	if err := http.ListenAndServe(addr, m.router); !errors.Is(err, http.ErrServerClosed) {
+	if err := http.ListenAndServe(addr, m.router); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+func (m *Module) mountSystemRoutes() {
+	m.router.Route("/__mirrorstack", func(r chi.Router) {
+		r.Get("/health", system.Health)
+		r.Route("/platform", func(r chi.Router) {
+			// manifest, lifecycle — mounted by future issues
+		})
+	})
 }
 
 // ---------------------------------------------------------------------------
