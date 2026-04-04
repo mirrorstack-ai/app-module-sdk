@@ -106,6 +106,21 @@ func TestScopes(t *testing.T) {
 	}
 }
 
+func TestHealthAutoMounted(t *testing.T) {
+	m, err := New(Config{ID: "test", Name: "Test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := doRequest(t, m.Router(), "GET", "/__mirrorstack/health")
+	if rec.Code != 200 {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected application/json, got %q", ct)
+	}
+}
+
 // --- Convenience API (Init) ---
 
 func TestInit(t *testing.T) {
