@@ -82,7 +82,26 @@ No config files. No YAML. Code is the single source of truth.
 - [ ] `ms.MCPResource()` — register MCP resources
 - [ ] `/__mirrorstack/mcp/` — MCP protocol routes
 
-## Project structure
+## SDK structure
+
+```
+app-module-sdk/
+  mirrorstack.go               Root API: Init(), Start(), DB(ctx), Storage(ctx)
+  config.go                    Config struct, defaults
+  scope.go                     Platform(), Public(), Internal()
+  internal/                    Shared plumbing (not features)
+    tenant/                    Tenant resolution, header parsing
+    runtime/                   Lambda/HTTP detection
+    registry/                  Route/event/cron collection for manifest
+  db/                          Multi-tenant PostgreSQL (schema-per-app)
+  storage/                     S3 primary + R2 CDN cache
+  cache/                       Scoped Redis (ElastiCache)
+  meter/                       Custom usage metrics
+  mcp/                         MCP tool/resource registration
+  system/                      __mirrorstack route handlers
+```
+
+## Module structure
 
 ```
 app-mod-{name}/
