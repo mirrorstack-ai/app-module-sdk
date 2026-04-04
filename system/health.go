@@ -1,6 +1,10 @@
 package system
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+)
 
 type healthResponse struct {
 	Status string `json:"status"`
@@ -8,5 +12,5 @@ type healthResponse struct {
 
 // Health handles GET /__mirrorstack/health.
 func Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+	httputil.JSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
