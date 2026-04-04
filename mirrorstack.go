@@ -4,6 +4,7 @@
 package mirrorstack
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -28,6 +30,7 @@ type Module struct {
 	config Config
 	router *chi.Mux
 	logger *log.Logger
+	db     *db.DB
 }
 
 // New creates a new Module.
@@ -46,6 +49,24 @@ func New(cfg Config) (*Module, error) {
 
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
+
+// DB returns a scoped database connection. Schema is read from the request context
+// (injected by auth middleware from X-MS-App-Schema header).
+//
+//	conn, release, err := mod.DB(r.Context())
+//	if err != nil { ... }
+//	defer release()
+//	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
+func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
+	if m.db == nil {
+		d, err := db.Open(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		m.db = d
+	}
+	return m.db.Conn(ctx)
+}
 
 // Platform registers routes with platform auth scope (owner/admin only).
 func (m *Module) Platform(fn func(r chi.Router)) { m.router.Group(fn) }
@@ -74,6 +95,13 @@ func (m *Module) Start() error {
 		return err
 	}
 	return nil
+}
+
+// Close cleans up resources (DB connections, etc.).
+func (m *Module) Close() {
+	if m.db != nil {
+		m.db.Close()
+	}
 }
 
 func (m *Module) mountSystemRoutes() {
@@ -115,6 +143,11 @@ func Init(cfg Config) error {
 // Start starts the default module.
 func Start() error {
 	return mustDefault("Start").Start()
+}
+
+// DB returns a scoped database connection on the default module.
+func DB(ctx context.Context) (db.Querier, func(), error) {
+	return mustDefault("DB").DB(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.
