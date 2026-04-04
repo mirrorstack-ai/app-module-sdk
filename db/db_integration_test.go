@@ -4,6 +4,8 @@ package db
 
 import (
 	"context"
+	"net/url"
+	"os"
 	"testing"
 )
 
@@ -15,6 +17,18 @@ func testDB(t *testing.T) *DB {
 	}
 	t.Cleanup(db.Close)
 	return db
+}
+
+// connURLWithRole builds a connection URL using the same host/port/dbname
+// as the test DATABASE_URL but with a different user/password.
+func connURLWithRole(user, password string) string {
+	base := os.Getenv("DATABASE_URL")
+	if base == "" {
+		base = defaultDevURL
+	}
+	u, _ := url.Parse(base)
+	u.User = url.UserPassword(user, password)
+	return u.String()
 }
 
 func mustExec(t *testing.T, db *DB, ctx context.Context, sql string, args ...any) {
@@ -167,7 +181,11 @@ func TestIntegration_RoleIsolation(t *testing.T) {
 
 	t.Cleanup(func() {
 		admin.Exec(ctx, "DROP SCHEMA IF EXISTS test_role_app CASCADE")
+		admin.Exec(ctx, "REASSIGN OWNED BY mod_media_test TO CURRENT_USER")
+		admin.Exec(ctx, "DROP OWNED BY mod_media_test")
 		admin.Exec(ctx, "DROP ROLE IF EXISTS mod_media_test")
+		admin.Exec(ctx, "REASSIGN OWNED BY mod_oauth_test TO CURRENT_USER")
+		admin.Exec(ctx, "DROP OWNED BY mod_oauth_test")
 		admin.Exec(ctx, "DROP ROLE IF EXISTS mod_oauth_test")
 	})
 
@@ -190,7 +208,7 @@ func TestIntegration_RoleIsolation(t *testing.T) {
 	mustExec(t, admin, ctx, "GRANT USAGE ON ALL SEQUENCES IN SCHEMA test_role_app TO mod_oauth_test")
 
 	// Connect as media module
-	mediaDB, err := New(ctx, "postgres://mod_media_test:media@localhost:5433/module?sslmode=disable")
+	mediaDB, err := New(ctx, connURLWithRole("mod_media_test", "media"))
 	if err != nil {
 		t.Fatalf("media connect: %v", err)
 	}
