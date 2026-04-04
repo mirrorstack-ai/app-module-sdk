@@ -1,172 +1,121 @@
-# MirrorStack Module SDK
+# @mirrorstack-ai/app-module-sdk
 
-Go SDK for building modules on [MirrorStack](https://mirrorstack.com), the Agentic CMS platform.
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue.svg)](LICENSE)
+[![Good First Issues](https://img.shields.io/github/issues/mirrorstack-ai/app-module-sdk/good%20first%20issue?color=7057ff&label=good%20first%20issues)](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
 
-Write handlers. Drop in pages. The SDK handles the rest.
+Go SDK for building modules on [MirrorStack](https://mirrorstack.ai), the Agentic CMS platform.
 
-> **Status:** Under active development. See `reference/v2-restored` branch for the original implementation being restructured.
+Built with Go, chi router, and designed for AWS Lambda + local dev.
 
-## Quick Start
+**[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
 
-```bash
-mirrorstack init my-module
-cd app-mod-my-module
-mirrorstack dev
-```
+> **Status:** Under active development. Nothing is implemented yet — see the roadmap below.
+>
+> The `reference/v2-restored` branch contains the original implementation (handler, event, meter, storage packages with tests) being restructured into the new configless design.
 
-Your module is running and mounted on the platform.
-
-## Write a handler
+## Design
 
 ```go
-// api/handler/platform/items.go
-package platform
+package main
 
 import (
-    "net/http"
+    "github.com/go-chi/chi/v5"
     ms "github.com/mirrorstack-ai/app-module-sdk"
 )
 
-func ListItems(w http.ResponseWriter, r *http.Request) {
-    ctx := ms.Context(r)
-    rows, _ := ms.DB(ctx).Query(ctx, "SELECT id, title FROM items")
-    defer rows.Close()
-    ms.JSON(w, 200, ms.ScanAll[Item](rows))
+func main() {
+    ms.Init(ms.Config{
+        ID:   "media",
+        Name: "Media",
+        Icon: "perm_media",
+    })
+
+    ms.Platform(func(r chi.Router) {
+        r.Get("/items", platform.ListItems)
+        r.Post("/items", platform.CreateItem)
+    })
+
+    ms.Public(func(r chi.Router) {
+        r.Get("/items", public.ListItems)
+    })
+
+    ms.Start()
 }
 ```
 
-The SDK reads platform headers, scopes the database to the app's schema, and applies auth middleware automatically. You write business logic. Nothing else.
+No config files. No YAML. Code is the single source of truth.
 
-## Module structure
+## Roadmap
+
+### Core
+
+- [ ] `ms.Init()` — module registration
+- [ ] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
+- [ ] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes
+
+### Platform resources
+
+- [ ] `ms.DB(ctx)` — multi-tenant PostgreSQL (schema-per-app)
+- [ ] `ms.Storage(ctx)` — S3 primary + R2 CDN cache (`NoCache` for direct S3)
+- [ ] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
+- [ ] `ms.Meter(ctx)` — custom usage metrics for billing
+
+### Events & scheduling
+
+- [ ] `ms.OnEvent()` — subscribe to events from other modules
+- [ ] `ms.Emit()` — declare emitted events
+- [ ] `ms.Cron()` — register scheduled jobs
+
+### System routes (`/__mirrorstack/`)
+
+- [ ] `platform/health` — health check
+- [ ] `platform/manifest` — module identity + capabilities
+- [ ] `platform/usage` — usage metrics for billing
+- [ ] `platform/lifecycle/install` — fresh install on an app
+- [ ] `platform/lifecycle/upgrade` — upgrade between versions
+- [ ] `platform/lifecycle/downgrade` — rollback between versions
+- [ ] `platform/lifecycle/uninstall` — soft-delete removal
+
+### MCP integration
+
+- [ ] `ms.MCPTool()` — register MCP tools for AI agents
+- [ ] `ms.MCPResource()` — register MCP resources
+- [ ] `/__mirrorstack/mcp/` — MCP protocol routes
+
+## Project structure
 
 ```
 app-mod-{name}/
-  mirrorstack.yaml              # Identity (5 lines)
-  sql/                          # Migrations (auto-applied on install)
+  sql/                         Migrations (auto-applied)
     0000_initial.up.sql
-  api/                          # Go backend
+    0000_initial.down.sql
+  api/                         Go backend
+    cmd/main.go
     handler/
-      platform/                 # Dashboard routes  — auto-applies platform auth
-      admin/                    # Admin routes      — auto-applies admin auth
-      public/                   # Public routes     — optional auth
-      internal/                 # Events + cron     — internal auth
-    service/                    # Business logic (optional)
-    db/                         # sqlc queries (optional)
-  web/                          # React frontend
-    platform/
-      pages/                    # File-based routing
-        {resource}/page.tsx           → /{resource}
-        {resource}/[id]/page.tsx      → /{resource}/:id
-        settings/{name}/page.tsx      → /settings/{name}
-      contributions/            # UI injected into other modules
-        {slot}/{id}.tsx
-    app/
-      pages/                    # End-user pages (same conventions)
+      platform/                Dashboard routes
+      public/                  End-user routes
+      internal/                Events, cron
+    service/                   Business logic
+  web/                         React frontend (Module Federation)
+    platform/pages/
+    app/pages/
 ```
 
-Files are routes. Directories are auth scopes. SQL files are migrations.
+## Tech stack
 
-## mirrorstack.yaml
+- **Go 1.26** with [chi v5](https://github.com/go-chi/chi) router
+- **AWS Lambda** via auto-detection
+- **PostgreSQL** with schema-per-app isolation (Aurora Serverless v2)
+- **S3** + **Cloudflare R2** for storage (S3 primary, R2 CDN cache)
+- **Redis** via ElastiCache Serverless
+- **MCP** for AI agent integration
 
-Most modules need 5 lines:
+## Contributing
 
-```yaml
-id: bookmark
-name: Bookmarks
-description: Let users bookmark content
-icon: bookmark
-category: content
-```
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
-Pages, nav items, and contributions are derived from the file tree.
-Add explicit config only for events, schedules, dependencies, or resource declarations:
-
-```yaml
-id: video
-name: Video
-description: Video hosting and streaming
-icon: play_circle
-category: content
-
-dependencies: [media, oauth]
-
-events:
-  emits: [created, published, transcode_completed]
-  subscribes:
-    oauth.user_deleted: /events/on-user-deleted
-
-schedules:
-  - name: cleanup-temp
-    cron: "0 3 * * *"
-    handler: /cron/cleanup
-
-resources:
-  s3: true
-  redis: true
-```
-
-## Packages
-
-| Package | Purpose | Import when... |
-|---------|---------|----------------|
-| `mirrorstack` | Bootstrap, config, context | Always |
-| `db` | Multi-tenant PostgreSQL (schema-per-app) | Storing data |
-| `cache` | Scoped Redis cache | Caching |
-| `file` | S3/R2 presigned URLs | File uploads/downloads |
-| `event` | Inter-module emit/call/subscribe | Talking to other modules |
-| `meter` | Usage tracking | Custom metering |
-| `respond` | JSON, errors, pagination | HTTP responses |
-| `mcp` | MCP tool/resource registration | AI agent capabilities |
-| `sdktest` | Mock context, test harness | Writing tests |
-
-## Auth scopes
-
-The SDK applies auth based on handler directory:
-
-| Directory | Auth | Who |
-|-----------|------|-----|
-| `handler/platform/` | Platform user (JWT) | App owner on dashboard |
-| `handler/admin/` | Client JWT + admin role | App staff |
-| `handler/public/` | Optional client JWT | Anyone |
-| `handler/internal/` | Internal secret | Platform-to-module calls |
-
-No middleware code to write. Place your handler in the right directory.
-
-## Platform resources
-
-Modules never get raw credentials. Access is scoped and proxied:
-
-```go
-// Database — auto-scoped to app's schema
-db := ms.DB(ctx)
-rows, _ := db.Query(ctx, "SELECT * FROM items")
-
-// Object storage
-url, _ := ms.S3(ctx).PresignPut("uploads/photo.jpg", 15*time.Minute)
-
-// Cache
-ms.Cache(ctx).Set("views:"+id, "42", 5*time.Minute)
-
-// Events
-ms.Emit(ctx, "created", map[string]any{"itemId": id})
-```
-
-## For AI agents
-
-This SDK is designed to be used by Claude Code and other AI agents.
-
-- File paths encode routing, auth, and UI registration
-- `mirrorstack.yaml` is minimal (identity only)
-- No wiring code, no framework ceremony
-- Generate SQL, write handlers, drop in pages
-
-See [CLAUDE.md](CLAUDE.md) for the full agent guide.
-
-## Community
-
-- [Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)
-- [Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)
+Look for issues labeled [`good first issue`](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22) for beginner-friendly tasks.
 
 ## License
 
-Apache 2.0
+[FSL-1.1-ALv2](LICENSE) — free to use for any purpose except building a competing platform. Converts to Apache 2.0 after 2 years.
