@@ -7,14 +7,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 )
 
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
 type LambdaRequest struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
+	Method     string            `json:"method"`
+	Path       string            `json:"path"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"`
+	Credential *db.Credential    `json:"credential,omitempty"`
 }
 
 // LambdaResponse is returned to the platform after handling a request.
@@ -64,6 +67,16 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		for k, v := range req.Headers {
 			httpReq.Header.Set(k, v)
 		}
+
+		// Inject credential and schema into request context
+		reqCtx := httpReq.Context()
+		if req.Credential != nil {
+			reqCtx = db.WithCredential(reqCtx, *req.Credential)
+		}
+		if schema := req.Headers["X-MS-App-Schema"]; schema != "" {
+			reqCtx = db.WithSchema(reqCtx, schema)
+		}
+		httpReq = httpReq.WithContext(reqCtx)
 
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httpReq)

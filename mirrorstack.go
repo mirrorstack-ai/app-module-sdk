@@ -27,10 +27,11 @@ type Config struct {
 
 // Module is the core SDK instance.
 type Module struct {
-	config Config
-	router *chi.Mux
-	logger *log.Logger
-	db     *db.DB
+	config    Config
+	router    *chi.Mux
+	logger    *log.Logger
+	poolCache *db.PoolCache // production: per-app credential pools
+	devDB     *db.DB        // dev mode: single pool from DATABASE_URL
 }
 
 // New creates a new Module.
@@ -39,9 +40,10 @@ func New(cfg Config) (*Module, error) {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
 	m := &Module{
-		config: cfg,
-		router: chi.NewRouter(),
-		logger: log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		config:    cfg,
+		router:    chi.NewRouter(),
+		logger:    log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		poolCache: db.NewPoolCache(),
 	}
 	m.mountSystemRoutes()
 	return m, nil
@@ -50,22 +52,34 @@ func New(cfg Config) (*Module, error) {
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
 
-// DB returns a scoped database connection. Schema is read from the request context
-// (injected by auth middleware from X-MS-App-Schema header).
+// DB returns a scoped database connection.
+//
+// Production: uses per-app credentials injected by the platform via Lambda payload.
+// Dev: uses DATABASE_URL env var with localhost fallback.
 //
 //	conn, release, err := mod.DB(r.Context())
 //	if err != nil { ... }
 //	defer release()
 //	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
 func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
-	if m.db == nil {
+	// Production: credential injected per invocation
+	if cred := db.CredentialFrom(ctx); cred != nil {
+		pool, err := m.poolCache.Get(ctx, *cred)
+		if err != nil {
+			return nil, nil, err
+		}
+		return db.AcquireScoped(ctx, pool)
+	}
+
+	// Dev mode: single pool from DATABASE_URL
+	if m.devDB == nil {
 		d, err := db.Open(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		m.db = d
+		m.devDB = d
 	}
-	return m.db.Conn(ctx)
+	return m.devDB.Conn(ctx)
 }
 
 // Platform registers routes with platform auth scope (owner/admin only).
@@ -97,10 +111,13 @@ func (m *Module) Start() error {
 	return nil
 }
 
-// Close cleans up resources (DB connections, etc.).
+// Close cleans up resources.
 func (m *Module) Close() {
-	if m.db != nil {
-		m.db.Close()
+	if m.poolCache != nil {
+		m.poolCache.Close()
+	}
+	if m.devDB != nil {
+		m.devDB.Close()
 	}
 }
 
