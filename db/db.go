@@ -32,7 +32,11 @@ type DB struct {
 
 // Open creates a DB from DATABASE_URL env var, falling back to local dev default.
 // Use this for dev mode only. Production uses PoolCache with injected credentials.
+// Returns an error if called inside AWS Lambda (credentials should be injected per-invocation).
 func Open(ctx context.Context) (*DB, error) {
+	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+		return nil, fmt.Errorf("mirrorstack/db: Open() cannot be used in Lambda — credentials are injected per-invocation")
+	}
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		url = defaultDevURL
