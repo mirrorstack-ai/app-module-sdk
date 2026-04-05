@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -15,7 +16,7 @@ type Permission struct {
 }
 
 var (
-	registryMu  sync.Mutex
+	registryMu  sync.RWMutex
 	permissions []Permission
 )
 
@@ -30,16 +31,17 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 	for _, r := range roles {
 		roleSet[r] = true
 	}
+	joinedRoles := strings.Join(roles, ", ")
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := AppRole(r.Context())
 			if role == "" {
-				httputil.JSON(w, http.StatusUnauthorized, errorResponse{Error: "authentication required"})
+				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
 			}
 			if !roleSet[role] {
-				httputil.JSON(w, http.StatusForbidden, errorResponse{Error: "permission " + name + " requires role: " + joinRoles(roles)})
+				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{Error: "permission " + name + " requires role: " + joinedRoles})
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -51,7 +53,6 @@ func registerPermission(p Permission) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
-	// Skip duplicates
 	for _, existing := range permissions {
 		if existing.Name == p.Name {
 			return
@@ -61,10 +62,9 @@ func registerPermission(p Permission) {
 }
 
 // RegisteredPermissions returns a copy of all declared permissions.
-// Used by the manifest endpoint.
 func RegisteredPermissions() []Permission {
-	registryMu.Lock()
-	defer registryMu.Unlock()
+	registryMu.RLock()
+	defer registryMu.RUnlock()
 
 	result := make([]Permission, len(permissions))
 	copy(result, permissions)
@@ -76,15 +76,4 @@ func ResetPermissions() {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	permissions = nil
-}
-
-func joinRoles(roles []string) string {
-	s := ""
-	for i, r := range roles {
-		if i > 0 {
-			s += ", "
-		}
-		s += r
-	}
-	return s
 }

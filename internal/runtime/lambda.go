@@ -11,6 +11,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
 var schemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
@@ -36,12 +37,8 @@ type LambdaResponse struct {
 	Body       string              `json:"body"`
 }
 
-type errorBody struct {
-	Error string `json:"error"`
-}
-
 func jsonError(code int, msg string) LambdaResponse {
-	b, _ := json.Marshal(errorBody{Error: msg})
+	b, _ := json.Marshal(httputil.ErrorResponse{Error: msg})
 	return LambdaResponse{
 		StatusCode: code,
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
@@ -81,7 +78,7 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 
 		// Copy headers but strip X-MS-* to prevent spoofing
 		for k, v := range req.Headers {
-			if strings.HasPrefix(strings.ToUpper(k), "X-MS-") {
+			if len(k) >= 5 && strings.EqualFold(k[:5], "x-ms-") {
 				continue
 			}
 			httpReq.Header.Set(k, v)

@@ -2,25 +2,21 @@ package auth
 
 import (
 	"crypto/subtle"
+	"log"
 	"net/http"
 	"os"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
-type errorResponse struct {
-	Error string `json:"error"`
-}
-
 // PlatformAuth returns middleware that requires an authenticated user (role must exist).
 // Use RequirePermission per-route for authorization (which roles can access).
-// Routes without RequirePermission allow any authenticated role.
 func PlatformAuth() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := AppRole(r.Context())
 			if role == "" {
-				httputil.JSON(w, http.StatusUnauthorized, errorResponse{Error: "authentication required"})
+				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -39,12 +35,15 @@ func PublicAuth() func(http.Handler) http.Handler {
 // Reads MS_INTERNAL_SECRET env var at construction time.
 func InternalAuth() func(http.Handler) http.Handler {
 	expected := os.Getenv("MS_INTERNAL_SECRET")
+	if expected == "" {
+		log.Printf("mirrorstack: WARNING — MS_INTERNAL_SECRET not set, all internal routes will be rejected")
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			secret := r.Header.Get("X-MS-Internal-Secret")
 			if expected == "" || !constantTimeEqual(secret, expected) {
-				httputil.JSON(w, http.StatusUnauthorized, errorResponse{Error: "internal authentication required"})
+				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "internal authentication required"})
 				return
 			}
 			next.ServeHTTP(w, r)

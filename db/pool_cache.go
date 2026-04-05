@@ -38,7 +38,7 @@ func NewPoolCache() *PoolCache {
 
 // Get returns a pool for the given credential. Creates one if not cached.
 func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
-	key := cred.Username
+	key := fmt.Sprintf("%s:%d/%s/%s", cred.Host, cred.Port, cred.Database, cred.Username)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
