@@ -172,7 +172,7 @@ func (m *Module) Close() {
 
 func (m *Module) mountSystemRoutes() {
 	m.router.Route("/__mirrorstack", func(r chi.Router) {
-		r.Get("/health", system.Health)
+		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(auth.InternalAuth())
 			// manifest, lifecycle — mounted by future issues

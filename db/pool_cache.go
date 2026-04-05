@@ -51,6 +51,9 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, er
 	if len(c.pools) >= c.maxPools {
 		c.evictOldest()
 	}
+	if len(c.pools) >= c.maxPools {
+		return nil, fmt.Errorf("mirrorstack/db: pool limit reached (%d), all pools have active connections", c.maxPools)
+	}
 
 	connStr := fmt.Sprintf(
 		"host=%s port=%d dbname=%s user=%s password=%s sslmode=require",
@@ -68,6 +71,11 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, er
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mirrorstack/db: failed to connect: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("mirrorstack/db: credential rejected by database: %w", err)
 	}
 
 	c.pools[key] = &poolEntry{pool: pool, lastUsed: time.Now()}

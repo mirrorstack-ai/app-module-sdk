@@ -2,7 +2,6 @@ package auth
 
 import (
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -31,7 +30,6 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 	for _, r := range roles {
 		roleSet[r] = true
 	}
-	joinedRoles := strings.Join(roles, ", ")
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +39,7 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 				return
 			}
 			if !roleSet[a.AppRole] {
-				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{Error: "permission " + name + " requires role: " + joinedRoles})
+				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{Error: "forbidden"})
 				return
 			}
 			next.ServeHTTP(w, r)
