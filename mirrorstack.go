@@ -82,6 +82,33 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 	return m.devDB.Conn(ctx)
 }
 
+// Tx runs fn inside a transaction with schema isolation. Commits on success, rolls back on error.
+//
+//	err := mod.Tx(r.Context(), func(q db.Querier) error {
+//	    queries := generated.New(q)
+//	    item, err := queries.GetItem(ctx, id)
+//	    if err != nil { return err }
+//	    return queries.DeductBalance(ctx, params)
+//	})
+func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
+	if cred := db.CredentialFrom(ctx); cred != nil {
+		pool, err := m.poolCache.Get(ctx, *cred)
+		if err != nil {
+			return err
+		}
+		return db.Tx(ctx, pool, fn)
+	}
+
+	if m.devDB == nil {
+		d, err := db.Open(ctx)
+		if err != nil {
+			return err
+		}
+		m.devDB = d
+	}
+	return db.Tx(ctx, m.devDB.Pool(), fn)
+}
+
 // Platform registers routes with platform auth scope (owner/admin only).
 func (m *Module) Platform(fn func(r chi.Router)) { m.router.Group(fn) }
 
@@ -165,6 +192,11 @@ func Start() error {
 // DB returns a scoped database connection on the default module.
 func DB(ctx context.Context) (db.Querier, func(), error) {
 	return mustDefault("DB").DB(ctx)
+}
+
+// Tx runs fn inside a transaction on the default module.
+func Tx(ctx context.Context, fn func(q db.Querier) error) error {
+	return mustDefault("Tx").Tx(ctx, fn)
 }
 
 // Platform registers platform-scoped routes on the default module.

@@ -4,6 +4,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"testing"
@@ -326,6 +327,92 @@ func TestIntegration_AppIsolation_CRUD(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("app B: expected 1 item after app A delete, got %d", count)
+	}
+}
+
+func TestIntegration_TxCommit(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	mustExec(t, d, ctx, "DROP SCHEMA IF EXISTS test_tx CASCADE")
+	mustExec(t, d, ctx, "CREATE SCHEMA test_tx")
+	t.Cleanup(func() { d.Exec(ctx, "DROP SCHEMA IF EXISTS test_tx CASCADE") })
+
+	schemaCtx := WithSchema(ctx, "test_tx")
+	mustExec(t, d, schemaCtx, "CREATE TABLE accounts (id INT PRIMARY KEY, balance INT)")
+	mustExec(t, d, schemaCtx, "INSERT INTO accounts (id, balance) VALUES (1, 100), (2, 50)")
+
+	// Transfer 30 from account 1 to account 2 in a transaction
+	err := Tx(schemaCtx, d.Pool(), func(q Querier) error {
+		var balance int
+		if err := q.QueryRow(schemaCtx, "SELECT balance FROM accounts WHERE id = 1").Scan(&balance); err != nil {
+			return err
+		}
+		if balance < 30 {
+			return fmt.Errorf("insufficient balance")
+		}
+		if _, err := q.Exec(schemaCtx, "UPDATE accounts SET balance = balance - 30 WHERE id = 1"); err != nil {
+			return err
+		}
+		if _, err := q.Exec(schemaCtx, "UPDATE accounts SET balance = balance + 30 WHERE id = 2"); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("tx: %v", err)
+	}
+
+	// Verify both updated
+	conn, release, err := d.Conn(schemaCtx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer release()
+
+	var b1, b2 int
+	conn.QueryRow(schemaCtx, "SELECT balance FROM accounts WHERE id = 1").Scan(&b1)
+	conn.QueryRow(schemaCtx, "SELECT balance FROM accounts WHERE id = 2").Scan(&b2)
+	if b1 != 70 {
+		t.Errorf("account 1: expected 70, got %d", b1)
+	}
+	if b2 != 80 {
+		t.Errorf("account 2: expected 80, got %d", b2)
+	}
+}
+
+func TestIntegration_TxRollback(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	mustExec(t, d, ctx, "DROP SCHEMA IF EXISTS test_tx_rb CASCADE")
+	mustExec(t, d, ctx, "CREATE SCHEMA test_tx_rb")
+	t.Cleanup(func() { d.Exec(ctx, "DROP SCHEMA IF EXISTS test_tx_rb CASCADE") })
+
+	schemaCtx := WithSchema(ctx, "test_tx_rb")
+	mustExec(t, d, schemaCtx, "CREATE TABLE items (id SERIAL, title TEXT)")
+	mustExec(t, d, schemaCtx, "INSERT INTO items (title) VALUES ('original')")
+
+	// Transaction that fails — should rollback
+	err := Tx(schemaCtx, d.Pool(), func(q Querier) error {
+		q.Exec(schemaCtx, "UPDATE items SET title = 'modified'")
+		return fmt.Errorf("something went wrong")
+	})
+	if err == nil {
+		t.Fatal("expected error from failed transaction")
+	}
+
+	// Verify rollback — title should still be 'original'
+	conn, release, err := d.Conn(schemaCtx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer release()
+
+	var title string
+	conn.QueryRow(schemaCtx, "SELECT title FROM items LIMIT 1").Scan(&title)
+	if title != "original" {
+		t.Errorf("expected 'original' after rollback, got %q", title)
 	}
 }
 
