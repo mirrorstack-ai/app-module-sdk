@@ -5,39 +5,31 @@ import (
 	"testing"
 )
 
-func TestUserID(t *testing.T) {
-	ctx := context.Background()
-	if id := UserID(ctx); id != "" {
-		t.Errorf("expected empty, got %q", id)
-	}
-
-	ctx = WithUserID(ctx, "user-123")
-	if id := UserID(ctx); id != "user-123" {
-		t.Errorf("expected 'user-123', got %q", id)
+func TestGet_NotSet(t *testing.T) {
+	if id := Get(context.Background()); id != nil {
+		t.Errorf("expected nil, got %+v", id)
 	}
 }
 
-func TestAppID(t *testing.T) {
-	ctx := context.Background()
-	if id := AppID(ctx); id != "" {
-		t.Errorf("expected empty, got %q", id)
-	}
+func TestSetAndGet(t *testing.T) {
+	ctx := Set(context.Background(), Identity{
+		UserID:  "user-123",
+		AppID:   "app-456",
+		AppRole: RoleAdmin,
+	})
 
-	ctx = WithAppID(ctx, "app-456")
-	if id := AppID(ctx); id != "app-456" {
-		t.Errorf("expected 'app-456', got %q", id)
+	a := Get(ctx)
+	if a == nil {
+		t.Fatal("expected identity, got nil")
 	}
-}
-
-func TestAppRole(t *testing.T) {
-	ctx := context.Background()
-	if role := AppRole(ctx); role != "" {
-		t.Errorf("expected empty, got %q", role)
+	if a.UserID != "user-123" {
+		t.Errorf("expected UserID 'user-123', got %q", a.UserID)
 	}
-
-	ctx = WithAppRole(ctx, RoleAdmin)
-	if role := AppRole(ctx); role != RoleAdmin {
-		t.Errorf("expected %q, got %q", RoleAdmin, role)
+	if a.AppID != "app-456" {
+		t.Errorf("expected AppID 'app-456', got %q", a.AppID)
+	}
+	if a.AppRole != RoleAdmin {
+		t.Errorf("expected AppRole %q, got %q", RoleAdmin, a.AppRole)
 	}
 }
 

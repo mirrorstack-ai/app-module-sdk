@@ -27,7 +27,7 @@ func doRequestWithRole(t *testing.T, h http.Handler, method, path, role string) 
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	if role != "" {
-		req = req.WithContext(auth.WithAppRole(req.Context(), role))
+		req = req.WithContext(auth.Set(req.Context(), auth.Identity{AppRole: role}))
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

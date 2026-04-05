@@ -14,14 +14,14 @@ func okHandler(w http.ResponseWriter, r *http.Request) {
 func requestWithRole(method, path, role string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	if role != "" {
-		req = req.WithContext(WithAppRole(req.Context(), role))
+		req = req.WithContext(Set(req.Context(), Identity{AppRole: role}))
 	}
 	return req
 }
 
 func TestPlatformAuth_NoRole(t *testing.T) {
 	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-	req := requestWithRole("GET", "/items", "")
+	req := httptest.NewRequest("GET", "/items", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

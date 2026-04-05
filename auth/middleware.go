@@ -9,13 +9,13 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
-// PlatformAuth returns middleware that requires an authenticated user (role must exist).
+// PlatformAuth returns middleware that requires an authenticated user.
 // Use RequirePermission per-route for authorization (which roles can access).
 func PlatformAuth() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role := AppRole(r.Context())
-			if role == "" {
+			a := Get(r.Context())
+			if a == nil || a.AppRole == "" {
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
 			}

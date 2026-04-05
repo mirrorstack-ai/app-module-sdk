@@ -92,14 +92,12 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		if req.AppSchema != "" {
 			reqCtx = db.WithSchema(reqCtx, req.AppSchema)
 		}
-		if req.UserID != "" {
-			reqCtx = auth.WithUserID(reqCtx, req.UserID)
-		}
-		if req.AppID != "" {
-			reqCtx = auth.WithAppID(reqCtx, req.AppID)
-		}
-		if req.AppRole != "" {
-			reqCtx = auth.WithAppRole(reqCtx, req.AppRole)
+		if req.UserID != "" || req.AppID != "" || req.AppRole != "" {
+			reqCtx = auth.Set(reqCtx, auth.Identity{
+				UserID:  req.UserID,
+				AppID:   req.AppID,
+				AppRole: req.AppRole,
+			})
 		}
 		httpReq = httpReq.WithContext(reqCtx)
 

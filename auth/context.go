@@ -3,7 +3,6 @@ package auth
 
 import "context"
 
-// Roles
 const (
 	RoleAdmin  = "admin"
 	RoleMember = "member"
@@ -12,43 +11,29 @@ const (
 
 type contextKey string
 
-const (
-	userIDKey  = contextKey("ms-user-id")
-	appIDKey   = contextKey("ms-app-id")
-	appRoleKey = contextKey("ms-app-role")
-)
+const identityKey = contextKey("ms-identity")
 
-// WithUserID returns a context with the user ID set.
-func WithUserID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, userIDKey, id)
+// Identity holds the authenticated user's identity for the current request.
+type Identity struct {
+	UserID  string // Who
+	AppID   string // Which app
+	AppRole string // What access (admin, member, viewer)
 }
 
-// UserID reads the user ID from the context.
-func UserID(ctx context.Context) string {
-	s, _ := ctx.Value(userIDKey).(string)
-	return s
+// Set stores the identity in the context.
+func Set(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, identityKey, &id)
 }
 
-// WithAppID returns a context with the app ID set.
-func WithAppID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, appIDKey, id)
-}
-
-// AppID reads the app ID from the context.
-func AppID(ctx context.Context) string {
-	s, _ := ctx.Value(appIDKey).(string)
-	return s
-}
-
-// WithAppRole returns a context with the app role set.
-func WithAppRole(ctx context.Context, role string) context.Context {
-	return context.WithValue(ctx, appRoleKey, role)
-}
-
-// AppRole reads the app role from the context.
-func AppRole(ctx context.Context) string {
-	s, _ := ctx.Value(appRoleKey).(string)
-	return s
+// Get retrieves the identity from the context. Returns nil if not set.
+//
+//	a := auth.Get(r.Context())
+//	a.UserID   // "u-123"
+//	a.AppID    // "a-456"
+//	a.AppRole  // "admin"
+func Get(ctx context.Context) *Identity {
+	id, _ := ctx.Value(identityKey).(*Identity)
+	return id
 }
 
 // Roles is a convenience constructor for role lists.

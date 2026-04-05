@@ -35,12 +35,12 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role := AppRole(r.Context())
-			if role == "" {
+			a := Get(r.Context())
+			if a == nil || a.AppRole == "" {
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
 			}
-			if !roleSet[role] {
+			if !roleSet[a.AppRole] {
 				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{Error: "permission " + name + " requires role: " + joinedRoles})
 				return
 			}

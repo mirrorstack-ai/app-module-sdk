@@ -146,9 +146,10 @@ Permissions are auto-registered for manifest generation — the platform knows w
 
 ```go
 func handler(w http.ResponseWriter, r *http.Request) {
-    userID := auth.UserID(r.Context())   // who
-    appID  := auth.AppID(r.Context())    // which app
-    role   := auth.AppRole(r.Context())  // what access
+    a := auth.Get(r.Context())
+    a.UserID   // who
+    a.AppID    // which app
+    a.AppRole  // what access (admin, member, viewer)
 }
 ```
 

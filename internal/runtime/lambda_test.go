@@ -108,13 +108,14 @@ func TestNewLambdaHandler_QueryString(t *testing.T) {
 func TestNewLambdaHandler_TypedFieldsInjected(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		json.NewEncoder(w).Encode(map[string]string{
-			"userId":  auth.UserID(ctx),
-			"appId":   auth.AppID(ctx),
-			"appRole": auth.AppRole(ctx),
-			"schema":  db.SchemaFrom(ctx),
-		})
+		a := auth.Get(r.Context())
+		result := map[string]string{"schema": db.SchemaFrom(r.Context())}
+		if a != nil {
+			result["userId"] = a.UserID
+			result["appId"] = a.AppID
+			result["appRole"] = a.AppRole
+		}
+		json.NewEncoder(w).Encode(result)
 	})
 
 	handler := NewLambdaHandler(r)
