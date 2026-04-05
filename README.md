@@ -116,6 +116,42 @@ err := ms.Tx(r.Context(), func(q db.Querier) error {
 
 Module developers don't think about any of this — just call `ms.DB(ctx)`.
 
+## Auth & permissions
+
+Three scopes control who can call your routes:
+
+| Scope | Who | Default |
+|-------|-----|---------|
+| `ms.Platform()` | Dashboard users (authenticated) | Any authenticated role |
+| `ms.Public()` | Anyone (end users, anonymous) | No auth check |
+| `ms.Internal()` | Platform only (events, cron) | Validates `MS_INTERNAL_SECRET` |
+
+### Permissions
+
+Use `ms.RequirePermission` for fine-grained role control:
+
+```go
+ms.Platform(func(r chi.Router) {
+    r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
+    r.With(ms.RequirePermission("media.upload", "admin", "member")).Post("/items", uploadItem)
+    r.With(ms.RequirePermission("media.delete", "admin")).Delete("/items/{id}", deleteItem)
+})
+```
+
+3 roles: `admin` | `member` | `viewer`
+
+Permissions are auto-registered for manifest generation — the platform knows what each module requires.
+
+### Context helpers
+
+```go
+func handler(w http.ResponseWriter, r *http.Request) {
+    userID := auth.UserID(r.Context())   // who
+    appID  := auth.AppID(r.Context())    // which app
+    role   := auth.AppRole(r.Context())  // what access
+}
+```
+
 ### Query approach
 
 **sqlc as default** — write SQL, generate type-safe Go:
@@ -143,7 +179,8 @@ conn.Query(ctx, "SELECT * FROM items WHERE title ILIKE $1", "%"+search+"%")
 
 - [x] `ms.Init()` / `ms.New()` — module registration
 - [x] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
-- [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes (middleware in #4)
+- [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes with middleware
+- [x] `ms.RequirePermission()` — per-route permission with auto-registration for manifest
 
 ### Database
 
@@ -186,8 +223,12 @@ conn.Query(ctx, "SELECT * FROM items WHERE title ILIKE $1", "%"+search+"%")
 
 ```
 app-module-sdk/
-  mirrorstack.go               Config, Module, Init/Start, DB/Tx, convenience API
+  mirrorstack.go               Config, Module, Init/Start, DB/Tx, scopes, convenience API
   mirrorstack_test.go          All root tests
+  auth/
+    context.go                 WithUserID/WithAppID/WithAppRole, role constants
+    middleware.go              PlatformAuth, PublicAuth, InternalAuth
+    permission.go              RequirePermission with auto-registration
   db/
     credential.go              Credential struct, context helpers
     db.go                      Dev-mode client, Querier interface
