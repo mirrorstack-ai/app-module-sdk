@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -108,14 +109,36 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
 	return m.devDB.Pool(), nil
 }
 
-// Platform registers routes with platform auth scope (owner/admin only).
-func (m *Module) Platform(fn func(r chi.Router)) { m.router.Group(fn) }
+// Platform registers routes with platform auth scope.
+// Default: admin only. Use auth.RequirePermission for member/viewer access.
+func (m *Module) Platform(fn func(r chi.Router)) {
+	m.router.Group(func(r chi.Router) {
+		r.Use(auth.PlatformAuth())
+		fn(r)
+	})
+}
 
 // Public registers routes with public auth scope (anyone, including anonymous).
-func (m *Module) Public(fn func(r chi.Router)) { m.router.Group(fn) }
+func (m *Module) Public(fn func(r chi.Router)) {
+	m.router.Group(fn)
+}
 
 // Internal registers routes with internal auth scope (platform-to-module only).
-func (m *Module) Internal(fn func(r chi.Router)) { m.router.Group(fn) }
+// Validates X-MS-Internal-Secret via constant-time comparison.
+func (m *Module) Internal(fn func(r chi.Router)) {
+	m.router.Group(func(r chi.Router) {
+		r.Use(auth.InternalAuth())
+		fn(r)
+	})
+}
+
+// RequirePermission returns chi middleware that checks AppRole against allowed roles.
+// Auto-registers the permission for manifest generation.
+//
+//	r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
+func RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
+	return auth.RequirePermission(name, roles...)
+}
 
 // Start auto-detects Lambda vs HTTP and starts serving.
 func (m *Module) Start() error {
@@ -149,8 +172,9 @@ func (m *Module) Close() {
 
 func (m *Module) mountSystemRoutes() {
 	m.router.Route("/__mirrorstack", func(r chi.Router) {
-		r.Get("/health", system.Health)
+		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
+			r.Use(auth.InternalAuth())
 			// manifest, lifecycle — mounted by future issues
 		})
 	})

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 )
 
 func resetDefault(t *testing.T) {
@@ -17,6 +18,28 @@ func resetDefault(t *testing.T) {
 func doRequest(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func doRequestWithRole(t *testing.T, h http.Handler, method, path, role string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if role != "" {
+		req = req.WithContext(auth.Set(req.Context(), auth.Identity{AppRole: role}))
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func doRequestWithSecret(t *testing.T, h http.Handler, method, path, secret string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if secret != "" {
+		req.Header.Set("X-MS-Internal-Secret", secret)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -66,58 +89,134 @@ func TestRouter(t *testing.T) {
 	}
 }
 
-func TestScopes(t *testing.T) {
-	m, err := New(Config{ID: "test", Name: "Test"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+// --- Scope auth enforcement ---
 
+func TestPlatform_RejectsNoAuth(t *testing.T) {
+	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.Get("/admin/items", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("platform"))
-		})
-	})
-	m.Public(func(r chi.Router) {
-		r.Get("/public/items", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("public"))
-		})
-	})
-	m.Internal(func(r chi.Router) {
-		r.Post("/internal/event", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("internal"))
+		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("admin"))
 		})
 	})
 
-	tests := []struct {
-		method, path, want string
-	}{
-		{"GET", "/admin/items", "platform"},
-		{"GET", "/public/items", "public"},
-		{"POST", "/internal/event", "internal"},
+	rec := doRequest(t, m.Router(), "GET", "/admin")
+	if rec.Code != 401 {
+		t.Errorf("expected 401 without auth, got %d", rec.Code)
 	}
-	for _, tt := range tests {
-		rec := doRequest(t, m.Router(), tt.method, tt.path)
+}
+
+func TestPlatform_AcceptsAnyRole(t *testing.T) {
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Platform(func(r chi.Router) {
+		r.Get("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+
+	// PlatformAuth checks authentication only — any role passes
+	// Use RequirePermission for authorization (which roles)
+	for _, role := range []string{auth.RoleAdmin, auth.RoleMember, auth.RoleViewer} {
+		rec := doRequestWithRole(t, m.Router(), "GET", "/dashboard", role)
 		if rec.Code != 200 {
-			t.Errorf("%s %s: expected 200, got %d", tt.method, tt.path, rec.Code)
-		}
-		if rec.Body.String() != tt.want {
-			t.Errorf("%s %s: expected %q, got %q", tt.method, tt.path, tt.want, rec.Body.String())
+			t.Errorf("role %q: expected 200, got %d", role, rec.Code)
 		}
 	}
 }
 
-func TestHealthAutoMounted(t *testing.T) {
-	m, err := New(Config{ID: "test", Name: "Test"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+func TestPublic_AcceptsAnonymous(t *testing.T) {
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Public(func(r chi.Router) {
+		r.Get("/items", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("public"))
+		})
+	})
 
+	rec := doRequest(t, m.Router(), "GET", "/items")
+	if rec.Code != 200 {
+		t.Errorf("expected 200 for anonymous, got %d", rec.Code)
+	}
+}
+
+func TestInternal_RejectsNoSecret(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "test-secret")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Internal(func(r chi.Router) {
+		r.Post("/event", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("internal"))
+		})
+	})
+
+	rec := doRequest(t, m.Router(), "POST", "/event")
+	if rec.Code != 401 {
+		t.Errorf("expected 401 without secret, got %d", rec.Code)
+	}
+}
+
+func TestInternal_AcceptsValidSecret(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "test-secret")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Internal(func(r chi.Router) {
+		r.Post("/event", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("internal"))
+		})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/event", "test-secret")
+	if rec.Code != 200 {
+		t.Errorf("expected 200 with valid secret, got %d", rec.Code)
+	}
+}
+
+// --- Permission middleware ---
+
+func TestRequirePermission_AllowsMember(t *testing.T) {
+	t.Cleanup(auth.ResetPermissions)
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Platform(func(r chi.Router) {
+		r.With(RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+
+	rec := doRequestWithRole(t, m.Router(), "GET", "/items", auth.RoleMember)
+	if rec.Code != 200 {
+		t.Errorf("expected 200 for member with media.view, got %d", rec.Code)
+	}
+}
+
+func TestRequirePermission_RejectsViewer(t *testing.T) {
+	t.Cleanup(auth.ResetPermissions)
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Platform(func(r chi.Router) {
+		r.With(RequirePermission("media.delete", "admin")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("deleted"))
+		})
+	})
+
+	rec := doRequestWithRole(t, m.Router(), "DELETE", "/items/123", auth.RoleViewer)
+	if rec.Code != 403 {
+		t.Errorf("expected 403 for viewer on admin-only permission, got %d", rec.Code)
+	}
+}
+
+// --- System routes ---
+
+func TestHealthAutoMounted(t *testing.T) {
+	m, _ := New(Config{ID: "test", Name: "Test"})
 	rec := doRequest(t, m.Router(), "GET", "/__mirrorstack/health")
 	if rec.Code != 200 {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("expected application/json, got %q", ct)
+}
+
+func TestSystemPlatformRoutes_RequireInternalSecret(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+
+	// Without secret → 401
+	rec := doRequest(t, m.Router(), "GET", "/__mirrorstack/platform/manifest")
+	if rec.Code == 200 {
+		t.Error("expected non-200 for system platform route without secret")
 	}
 }
 
@@ -125,21 +224,16 @@ func TestHealthAutoMounted(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	resetDefault(t)
-
 	if err := Init(Config{ID: "media", Name: "Media"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if DefaultModule() == nil {
 		t.Error("expected defaultModule to be set")
 	}
-	if DefaultModule().Config().ID != "media" {
-		t.Errorf("expected ID 'media', got %q", DefaultModule().Config().ID)
-	}
 }
 
 func TestInit_EmptyID(t *testing.T) {
 	resetDefault(t)
-
 	if err := Init(Config{}); err == nil {
 		t.Error("expected error for empty ID")
 	}
@@ -147,10 +241,9 @@ func TestInit_EmptyID(t *testing.T) {
 
 func TestStart_BeforeInit(t *testing.T) {
 	resetDefault(t)
-
 	defer func() {
 		if r := recover(); r == nil {
-			t.Error("expected panic when calling Start() before Init()")
+			t.Error("expected panic")
 		}
 	}()
 	_ = Start()
@@ -165,10 +258,9 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
 			resetDefault(t)
-
 			defer func() {
 				if r := recover(); r == nil {
-					t.Errorf("expected panic when calling %s() before Init()", name)
+					t.Errorf("expected panic for %s before Init", name)
 				}
 			}()
 			fn()

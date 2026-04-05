@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 )
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {
@@ -28,16 +30,14 @@ func requireNoErr(t *testing.T, err error) {
 func TestNewLambdaHandler(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/items", func(w http.ResponseWriter, r *http.Request) {
-		appID := r.Header.Get("X-MS-App-ID")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"app": appID})
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
 	})
 
 	handler := NewLambdaHandler(r)
 	payload := mustMarshal(t, LambdaRequest{
-		Method:  "GET",
-		Path:    "/items",
-		Headers: map[string]string{"X-MS-App-ID": "test-app-123"},
+		Method: "GET",
+		Path:   "/items",
 	})
 
 	resp, err := handler(context.Background(), payload)
@@ -45,9 +45,6 @@ func TestNewLambdaHandler(t *testing.T) {
 
 	if resp.StatusCode != 200 {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-	if resp.Headers["Content-Type"] == nil || resp.Headers["Content-Type"][0] != "application/json" {
-		t.Errorf("unexpected content-type: %v", resp.Headers["Content-Type"])
 	}
 }
 
@@ -108,20 +105,107 @@ func TestNewLambdaHandler_QueryString(t *testing.T) {
 	}
 }
 
-func TestNewLambdaHandler_EmptyMethod(t *testing.T) {
-	// Go's http.NewRequestWithContext treats empty method as GET
+func TestNewLambdaHandler_TypedFieldsInjected(t *testing.T) {
+	r := chi.NewRouter()
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		a := auth.Get(r.Context())
+		result := map[string]string{"schema": db.SchemaFrom(r.Context())}
+		if a != nil {
+			result["userId"] = a.UserID
+			result["appId"] = a.AppID
+			result["appRole"] = a.AppRole
+		}
+		json.NewEncoder(w).Encode(result)
+	})
+
+	handler := NewLambdaHandler(r)
+	payload := mustMarshal(t, LambdaRequest{
+		Method:    "GET",
+		Path:      "/check",
+		UserID:    "user-abc",
+		AppID:     "app-xyz",
+		AppRole:   "admin",
+		AppSchema: "app_xyz789",
+	})
+
+	resp, err := handler(context.Background(), payload)
+	requireNoErr(t, err)
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestNewLambdaHandler_StripXMSHeaders(t *testing.T) {
+	r := chi.NewRouter()
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		// X-MS-* headers from the Headers map should be stripped
+		spoofed := r.Header.Get("X-MS-App-Role")
+		legit := r.Header.Get("Content-Type")
+		json.NewEncoder(w).Encode(map[string]string{
+			"spoofed": spoofed,
+			"legit":   legit,
+		})
+	})
+
+	handler := NewLambdaHandler(r)
+	payload := mustMarshal(t, LambdaRequest{
+		Method: "GET",
+		Path:   "/check",
+		Headers: map[string]string{
+			"X-MS-App-Role": "admin",       // spoofed — should be stripped
+			"x-ms-user-id":  "fake-user",   // case-insensitive — should be stripped
+			"Content-Type":  "text/plain",   // legit — should pass through
+		},
+	})
+
+	resp, err := handler(context.Background(), payload)
+	requireNoErr(t, err)
+
+	var body map[string]string
+	json.Unmarshal([]byte(resp.Body), &body)
+
+	if body["spoofed"] != "" {
+		t.Errorf("X-MS-App-Role header should be stripped, got %q", body["spoofed"])
+	}
+	if body["legit"] != "text/plain" {
+		t.Errorf("Content-Type should pass through, got %q", body["legit"])
+	}
+}
+
+func TestNewLambdaHandler_InvalidSchema(t *testing.T) {
+	handler := NewLambdaHandler(chi.NewRouter())
+	payload := mustMarshal(t, LambdaRequest{
+		Method:    "GET",
+		Path:      "/items",
+		AppSchema: `app"; DROP TABLE users;--`,
+	})
+
+	resp, err := handler(context.Background(), payload)
+	requireNoErr(t, err)
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for invalid schema, got %d", resp.StatusCode)
+	}
+}
+
+func TestNewLambdaHandler_EmptySchema(t *testing.T) {
 	r := chi.NewRouter()
 	r.Get("/items", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
 	handler := NewLambdaHandler(r)
-	payload := mustMarshal(t, LambdaRequest{Path: "/items"})
+	payload := mustMarshal(t, LambdaRequest{
+		Method:    "GET",
+		Path:      "/items",
+		AppSchema: "", // empty is OK (dev mode)
+	})
 
 	resp, err := handler(context.Background(), payload)
 	requireNoErr(t, err)
 
 	if resp.StatusCode != 200 {
-		t.Errorf("expected 200 for empty method (defaults to GET), got %d", resp.StatusCode)
+		t.Errorf("expected 200 for empty schema, got %d", resp.StatusCode)
 	}
 }

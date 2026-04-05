@@ -38,7 +38,7 @@ func NewPoolCache() *PoolCache {
 
 // Get returns a pool for the given credential. Creates one if not cached.
 func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
-	key := cred.Username
+	key := fmt.Sprintf("%s:%d/%s/%s", cred.Host, cred.Port, cred.Database, cred.Username)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -50,6 +50,9 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, er
 
 	if len(c.pools) >= c.maxPools {
 		c.evictOldest()
+	}
+	if len(c.pools) >= c.maxPools {
+		return nil, fmt.Errorf("mirrorstack/db: pool limit reached (%d), all pools have active connections", c.maxPools)
 	}
 
 	connStr := fmt.Sprintf(
@@ -68,6 +71,11 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, er
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mirrorstack/db: failed to connect: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("mirrorstack/db: credential rejected by database: %w", err)
 	}
 
 	c.pools[key] = &poolEntry{pool: pool, lastUsed: time.Now()}

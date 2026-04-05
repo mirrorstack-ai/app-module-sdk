@@ -6,10 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
+
+var schemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
 
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
 type LambdaRequest struct {
@@ -18,6 +23,11 @@ type LambdaRequest struct {
 	Headers    map[string]string `json:"headers"`
 	Body       string            `json:"body"`
 	Credential *db.Credential    `json:"credential,omitempty"`
+	// Trusted fields — injected by platform, not from user headers
+	UserID    string `json:"userId,omitempty"`
+	AppID     string `json:"appId,omitempty"`
+	AppRole   string `json:"appRole,omitempty"`
+	AppSchema string `json:"appSchema,omitempty"`
 }
 
 // LambdaResponse is returned to the platform after handling a request.
@@ -27,12 +37,8 @@ type LambdaResponse struct {
 	Body       string              `json:"body"`
 }
 
-type errorBody struct {
-	Error string `json:"error"`
-}
-
 func jsonError(code int, msg string) LambdaResponse {
-	b, _ := json.Marshal(errorBody{Error: msg})
+	b, _ := json.Marshal(httputil.ErrorResponse{Error: msg})
 	return LambdaResponse{
 		StatusCode: code,
 		Headers:    map[string][]string{"Content-Type": {"application/json"}},
@@ -47,6 +53,11 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		var req LambdaRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return jsonError(400, "invalid request payload"), nil
+		}
+
+		// Validate schema format if present
+		if req.AppSchema != "" && !schemaPattern.MatchString(req.AppSchema) {
+			return jsonError(400, "invalid app schema format"), nil
 		}
 
 		// Ensure path is relative to prevent host injection
@@ -64,17 +75,29 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		if err != nil {
 			return jsonError(500, "failed to build request"), nil
 		}
+
+		// Copy headers but strip X-MS-* to prevent spoofing
 		for k, v := range req.Headers {
+			if len(k) >= 5 && strings.EqualFold(k[:5], "x-ms-") {
+				continue
+			}
 			httpReq.Header.Set(k, v)
 		}
 
-		// Inject credential and schema into request context
+		// Inject trusted values from typed payload fields into context
 		reqCtx := httpReq.Context()
 		if req.Credential != nil {
 			reqCtx = db.WithCredential(reqCtx, *req.Credential)
 		}
-		if schema := req.Headers["X-MS-App-Schema"]; schema != "" {
-			reqCtx = db.WithSchema(reqCtx, schema)
+		if req.AppSchema != "" {
+			reqCtx = db.WithSchema(reqCtx, req.AppSchema)
+		}
+		if req.UserID != "" || req.AppID != "" || req.AppRole != "" {
+			reqCtx = auth.Set(reqCtx, auth.Identity{
+				UserID:  req.UserID,
+				AppID:   req.AppID,
+				AppRole: req.AppRole,
+			})
 		}
 		httpReq = httpReq.WithContext(reqCtx)
 
