@@ -44,6 +44,19 @@ func TestPlatformAuth_AnyRoleAllowed(t *testing.T) {
 	}
 }
 
+func TestPlatformAuth_CustomRole(t *testing.T) {
+	handler := PlatformAuth()(http.HandlerFunc(okHandler))
+
+	// Custom role passes PlatformAuth (authentication gate — any non-empty role)
+	req := requestWithRole("GET", "/items", "VideoManager")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for custom role, got %d", rec.Code)
+	}
+}
+
 func TestPublicAuth_Anonymous(t *testing.T) {
 	handler := PublicAuth()(http.HandlerFunc(okHandler))
 	req := httptest.NewRequest("GET", "/items", nil)

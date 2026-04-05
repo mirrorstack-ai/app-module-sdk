@@ -40,6 +40,8 @@ func TestRequirePermission_Denied(t *testing.T) {
 	}{
 		{RoleMember, 403},
 		{RoleViewer, 403},
+		{"VideoManager", 403},  // custom role not in allowed list
+		{"ADMIN", 403},         // case-sensitive — "ADMIN" ≠ "admin"
 		{"", 401},
 	}
 	for _, tt := range tests {
