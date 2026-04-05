@@ -9,7 +9,7 @@ Built with Go, chi router, and designed for AWS Lambda + local dev.
 
 **[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
 
-> **Status:** Under active development. Core is implemented — see the roadmap below.
+> **Status:** Under active development — see the roadmap below.
 >
 > The `reference/v2-restored` branch contains the original implementation (handler, event, meter, storage packages with tests) being restructured into the new configless design.
 
@@ -29,6 +29,7 @@ package main
 import (
     "github.com/go-chi/chi/v5"
     ms "github.com/mirrorstack-ai/app-module-sdk"
+    "github.com/mirrorstack-ai/app-module-sdk/db"
 )
 
 func main() {
@@ -39,15 +40,28 @@ func main() {
     })
 
     ms.Platform(func(r chi.Router) {
-        r.Get("/items", platform.ListItems)
-        r.Post("/items", platform.CreateItem)
-    })
-
-    ms.Public(func(r chi.Router) {
-        r.Get("/items", public.ListItems)
+        r.Get("/items", listItems)
+        r.Post("/items", createItem)
     })
 
     ms.Start()
+}
+
+func listItems(w http.ResponseWriter, r *http.Request) {
+    conn, release, err := ms.DB(r.Context())
+    if err != nil { ... }
+    defer release()
+
+    queries := generated.New(conn) // sqlc-generated, type-safe
+    items, err := queries.ListItems(r.Context(), params)
+}
+
+func createItem(w http.ResponseWriter, r *http.Request) {
+    err := ms.Tx(r.Context(), func(q db.Querier) error {
+        queries := generated.New(q)
+        // reads + writes inside a transaction — atomic
+        return queries.CreateItem(r.Context(), params)
+    })
 }
 ```
 
@@ -59,8 +73,6 @@ No config files. No YAML. Code is the single source of truth.
 mod, err := ms.New(ms.Config{ID: "media", Name: "Media", Icon: "perm_media"})
 
 mod.Platform(func(r chi.Router) { ... })
-mod.Public(func(r chi.Router) { ... })
-
 mod.Start()
 ```
 
@@ -75,6 +87,56 @@ mod.Start()
 
 Port defaults to `8080`. Override with `PORT` env var.
 
+## Database
+
+`ms.DB(ctx)` returns a scoped database connection with automatic tenant isolation:
+
+```go
+conn, release, err := ms.DB(r.Context())
+defer release()
+// queries run against this app's schema only
+```
+
+`ms.Tx(ctx, fn)` runs operations in a transaction — atomic commit or rollback:
+
+```go
+err := ms.Tx(r.Context(), func(q db.Querier) error {
+    // all reads + writes here are atomic
+    return nil // commit, or return error to rollback
+})
+```
+
+### Security (3-layer isolation)
+
+| Layer | What | How |
+|-------|------|-----|
+| **Credentials** | Each (module, app) pair gets its own DB role | Platform injects per-invocation via Lambda payload |
+| **Schema** | `SET search_path` per request | SDK sets/resets automatically |
+| **RLS** | Row-level policies on `app_id` column | Defense-in-depth, platform-managed |
+
+Module developers don't think about any of this — just call `ms.DB(ctx)`.
+
+### Query approach
+
+**sqlc as default** — write SQL, generate type-safe Go:
+
+```sql
+-- sql/queries/media.sql
+-- name: ListItems :many
+SELECT id, title FROM media_items ORDER BY created_at DESC LIMIT $1 OFFSET $2;
+```
+
+```go
+queries := generated.New(conn) // sqlc-generated
+items, err := queries.ListItems(ctx, params) // type-safe, no manual scanning
+```
+
+**Raw pgx as escape hatch** — for dynamic queries:
+
+```go
+conn.Query(ctx, "SELECT * FROM items WHERE title ILIKE $1", "%"+search+"%")
+```
+
 ## Roadmap
 
 ### Core
@@ -83,9 +145,17 @@ Port defaults to `8080`. Override with `PORT` env var.
 - [x] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
 - [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes (middleware in #4)
 
+### Database
+
+- [x] `ms.DB(ctx)` — scoped connection with schema-per-app isolation
+- [x] `ms.Tx(ctx, fn)` — atomic transactions
+- [x] Per-app credential pools (PoolCache with LRU eviction)
+- [x] Schema leak prevention (RESET on release, destroy dirty connections)
+- [x] RLS support (`ms.app_id` session variable)
+- [x] sqlc-compatible `Querier` interface
+
 ### Platform resources
 
-- [ ] `ms.DB(ctx)` — multi-tenant PostgreSQL (schema-per-app)
 - [ ] `ms.Storage(ctx)` — S3 primary + R2 CDN cache (`NoCache` for direct S3)
 - [ ] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
 - [ ] `ms.Meter(ctx)` — custom usage metrics for billing
@@ -98,9 +168,9 @@ Port defaults to `8080`. Override with `PORT` env var.
 
 ### System routes (`/__mirrorstack/`)
 
-- [ ] `platform/health` — health check
+- [x] `health` — health check
 - [ ] `platform/manifest` — module identity + capabilities
-- [ ] `platform/usage` — usage metrics for billing
+- [ ] `platform/meter` — custom business metrics
 - [ ] `platform/lifecycle/install` — fresh install on an app
 - [ ] `platform/lifecycle/upgrade` — upgrade between versions
 - [ ] `platform/lifecycle/downgrade` — rollback between versions
@@ -116,11 +186,23 @@ Port defaults to `8080`. Override with `PORT` env var.
 
 ```
 app-module-sdk/
-  mirrorstack.go               Config, Module, Init/Start, convenience API
-  mirrorstack_test.go          All tests
+  mirrorstack.go               Config, Module, Init/Start, DB/Tx, convenience API
+  mirrorstack_test.go          All root tests
+  db/
+    credential.go              Credential struct, context helpers
+    db.go                      Dev-mode client, Querier interface
+    pool_cache.go              PoolCache (LRU), AcquireScoped
+    scope.go                   applyScope/resetScope (batch SET/RESET)
+    tx.go                      Transaction support
+    db_test.go                 Unit tests
+    db_integration_test.go     Integration tests (build tag: integration)
   internal/
-    runtime/                   Lambda/HTTP detection, Lambda handler
-  db/                          Multi-tenant PostgreSQL (planned)
+    httputil/respond.go        JSON response helper
+    runtime/
+      detect.go                Lambda detection
+      lambda.go                Lambda handler, credential injection
+  system/
+    health.go                  Health endpoint
   storage/                     S3 + R2 CDN cache (planned)
   cache/                       Scoped Redis (planned)
   meter/                       Custom usage metrics (planned)
@@ -134,6 +216,7 @@ app-mod-{name}/
   sql/                         Migrations (auto-applied)
     0000_initial.up.sql
     0000_initial.down.sql
+    queries/                   sqlc query definitions
   api/                         Go backend
     cmd/main.go
     handler/
@@ -146,11 +229,25 @@ app-mod-{name}/
     app/pages/
 ```
 
+## Development
+
+```bash
+# Start local postgres
+docker compose up -d
+
+# Run unit tests
+go test ./...
+
+# Run integration tests (requires postgres)
+go test -tags integration ./...
+```
+
 ## Tech stack
 
 - **Go 1.26** with [chi v5](https://github.com/go-chi/chi) router
 - **AWS Lambda** via auto-detection
 - **PostgreSQL** with schema-per-app isolation (Aurora Serverless v2)
+- **pgx v5** for database access, **sqlc** for query generation
 - **S3** + **Cloudflare R2** for storage (S3 primary, R2 CDN cache)
 - **Redis** via ElastiCache Serverless
 - **MCP** for AI agent integration

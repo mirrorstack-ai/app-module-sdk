@@ -4,14 +4,19 @@
 package mirrorstack
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -25,9 +30,13 @@ type Config struct {
 
 // Module is the core SDK instance.
 type Module struct {
-	config Config
-	router *chi.Mux
-	logger *log.Logger
+	config    Config
+	router    *chi.Mux
+	logger    *log.Logger
+	poolCache *db.PoolCache // production: per-app credential pools
+	devDBOnce sync.Once     // dev mode: lazy init guard
+	devDB     *db.DB        // dev mode: single pool from DATABASE_URL
+	devDBErr  error
 }
 
 // New creates a new Module.
@@ -36,9 +45,10 @@ func New(cfg Config) (*Module, error) {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
 	m := &Module{
-		config: cfg,
-		router: chi.NewRouter(),
-		logger: log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		config:    cfg,
+		router:    chi.NewRouter(),
+		logger:    log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		poolCache: db.NewPoolCache(),
 	}
 	m.mountSystemRoutes()
 	return m, nil
@@ -46,6 +56,57 @@ func New(cfg Config) (*Module, error) {
 
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
+
+// DB returns a scoped database connection.
+//
+// Production: uses per-app credentials injected by the platform via Lambda payload.
+// Dev: uses DATABASE_URL env var with localhost fallback.
+//
+//	conn, release, err := mod.DB(r.Context())
+//	if err != nil { ... }
+//	defer release()
+//	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
+func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
+	pool, err := m.resolvePool(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db.AcquireScoped(ctx, pool)
+}
+
+// Tx runs fn inside a transaction with schema isolation. Commits on success, rolls back on error.
+//
+//	err := mod.Tx(r.Context(), func(q db.Querier) error {
+//	    queries := generated.New(q)
+//	    item, err := queries.GetItem(ctx, id)
+//	    if err != nil { return err }
+//	    return queries.DeductBalance(ctx, params)
+//	})
+func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
+	pool, err := m.resolvePool(ctx)
+	if err != nil {
+		return err
+	}
+	return db.Tx(ctx, pool, fn)
+}
+
+// resolvePool returns the right pool: per-app credential pool (production)
+// or dev-mode pool (DATABASE_URL). Thread-safe via sync.Once for dev init.
+func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
+	// Production: credential injected per invocation
+	if cred := db.CredentialFrom(ctx); cred != nil {
+		return m.poolCache.Get(ctx, *cred)
+	}
+
+	// Dev mode: single pool from DATABASE_URL, init once
+	m.devDBOnce.Do(func() {
+		m.devDB, m.devDBErr = db.Open(ctx)
+	})
+	if m.devDBErr != nil {
+		return nil, m.devDBErr
+	}
+	return m.devDB.Pool(), nil
+}
 
 // Platform registers routes with platform auth scope (owner/admin only).
 func (m *Module) Platform(fn func(r chi.Router)) { m.router.Group(fn) }
@@ -74,6 +135,16 @@ func (m *Module) Start() error {
 		return err
 	}
 	return nil
+}
+
+// Close cleans up resources.
+func (m *Module) Close() {
+	if m.poolCache != nil {
+		m.poolCache.Close()
+	}
+	if m.devDB != nil {
+		m.devDB.Close()
+	}
 }
 
 func (m *Module) mountSystemRoutes() {
@@ -115,6 +186,16 @@ func Init(cfg Config) error {
 // Start starts the default module.
 func Start() error {
 	return mustDefault("Start").Start()
+}
+
+// DB returns a scoped database connection on the default module.
+func DB(ctx context.Context) (db.Querier, func(), error) {
+	return mustDefault("DB").DB(ctx)
+}
+
+// Tx runs fn inside a transaction on the default module.
+func Tx(ctx context.Context, fn func(q db.Querier) error) error {
+	return mustDefault("Tx").Tx(ctx, fn)
 }
 
 // Platform registers platform-scoped routes on the default module.
