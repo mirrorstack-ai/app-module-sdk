@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-chi/chi/v5"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
@@ -31,7 +34,9 @@ type Module struct {
 	router    *chi.Mux
 	logger    *log.Logger
 	poolCache *db.PoolCache // production: per-app credential pools
+	devDBOnce sync.Once     // dev mode: lazy init guard
 	devDB     *db.DB        // dev mode: single pool from DATABASE_URL
+	devDBErr  error
 }
 
 // New creates a new Module.
@@ -62,24 +67,11 @@ func (m *Module) Router() *chi.Mux { return m.router }
 //	defer release()
 //	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
 func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
-	// Production: credential injected per invocation
-	if cred := db.CredentialFrom(ctx); cred != nil {
-		pool, err := m.poolCache.Get(ctx, *cred)
-		if err != nil {
-			return nil, nil, err
-		}
-		return db.AcquireScoped(ctx, pool)
+	pool, err := m.resolvePool(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	// Dev mode: single pool from DATABASE_URL
-	if m.devDB == nil {
-		d, err := db.Open(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		m.devDB = d
-	}
-	return m.devDB.Conn(ctx)
+	return db.AcquireScoped(ctx, pool)
 }
 
 // Tx runs fn inside a transaction with schema isolation. Commits on success, rolls back on error.
@@ -91,22 +83,29 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 //	    return queries.DeductBalance(ctx, params)
 //	})
 func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
+	pool, err := m.resolvePool(ctx)
+	if err != nil {
+		return err
+	}
+	return db.Tx(ctx, pool, fn)
+}
+
+// resolvePool returns the right pool: per-app credential pool (production)
+// or dev-mode pool (DATABASE_URL). Thread-safe via sync.Once for dev init.
+func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
+	// Production: credential injected per invocation
 	if cred := db.CredentialFrom(ctx); cred != nil {
-		pool, err := m.poolCache.Get(ctx, *cred)
-		if err != nil {
-			return err
-		}
-		return db.Tx(ctx, pool, fn)
+		return m.poolCache.Get(ctx, *cred)
 	}
 
-	if m.devDB == nil {
-		d, err := db.Open(ctx)
-		if err != nil {
-			return err
-		}
-		m.devDB = d
+	// Dev mode: single pool from DATABASE_URL, init once
+	m.devDBOnce.Do(func() {
+		m.devDB, m.devDBErr = db.Open(ctx)
+	})
+	if m.devDBErr != nil {
+		return nil, m.devDBErr
 	}
-	return db.Tx(ctx, m.devDB.Pool(), fn)
+	return m.devDB.Pool(), nil
 }
 
 // Platform registers routes with platform auth scope (owner/admin only).

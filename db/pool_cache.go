@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,7 +48,6 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, er
 		return entry.pool, nil
 	}
 
-	// Evict oldest if at capacity
 	if len(c.pools) >= c.maxPools {
 		c.evictOldest()
 	}
@@ -81,6 +79,10 @@ func (c *PoolCache) evictOldest() {
 	var oldestTime time.Time
 
 	for key, entry := range c.pools {
+		// Skip pools with active connections
+		if entry.pool.Stat().AcquiredConns() > 0 {
+			continue
+		}
 		if oldestKey == "" || entry.lastUsed.Before(oldestTime) {
 			oldestKey = key
 			oldestTime = entry.lastUsed
@@ -98,14 +100,15 @@ func (c *PoolCache) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for key, entry := range c.pools {
+	old := c.pools
+	c.pools = make(map[string]*poolEntry)
+	for _, entry := range old {
 		entry.pool.Close()
-		delete(c.pools, key)
 	}
 }
 
 // AcquireScoped acquires a connection from the pool, sets search_path and
-// ms.app_id from context via a single batch round trip. Resets both on release.
+// ms.app_id from context via a single batch round trip. Always resets on release.
 func AcquireScoped(ctx context.Context, pool *pgxpool.Pool) (Querier, func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -114,31 +117,15 @@ func AcquireScoped(ctx context.Context, pool *pgxpool.Pool) (Querier, func(), er
 
 	schema := SchemaFrom(ctx)
 	if schema != "" {
-		sanitized := pgx.Identifier{schema}.Sanitize()
-
-		batch := &pgx.Batch{}
-		batch.Queue("SET search_path TO " + sanitized)
-		batch.Queue("SELECT set_config('ms.app_id', $1, false)", schema)
-
-		br := conn.SendBatch(ctx, batch)
-		_, err1 := br.Exec()
-		_, err2 := br.Exec()
-		br.Close()
-
-		if err1 != nil || err2 != nil {
+		if err := applyScope(ctx, conn, schema); err != nil {
 			conn.Release()
-			if err1 != nil {
-				return nil, nil, fmt.Errorf("mirrorstack/db: failed to set search_path: %w", err1)
-			}
-			return nil, nil, fmt.Errorf("mirrorstack/db: failed to set ms.app_id: %w", err2)
+			return nil, nil, err
 		}
 	}
 
 	release := func() {
-		if schema != "" {
-			conn.Exec(context.Background(), "RESET search_path")
-			conn.Exec(context.Background(), "RESET ms.app_id")
-		}
+		// Always reset — prevents leaking previous tenant's scope
+		resetScope(conn)
 		conn.Release()
 	}
 

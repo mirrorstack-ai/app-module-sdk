@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Tx runs fn inside a transaction. Commits on success, rolls back on error or panic.
-// The Querier passed to fn is a transaction — all reads and writes are atomic.
+// Sets search_path and ms.app_id before BEGIN, resets after.
 //
 //	err := db.Tx(ctx, pool, func(q db.Querier) error {
 //	    queries := generated.New(q)
@@ -22,27 +21,15 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(q Querier) error) error
 	if err != nil {
 		return fmt.Errorf("mirrorstack/db: failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer func() {
+		resetScope(conn)
+		conn.Release()
+	}()
 
-	// Set search_path before starting transaction
 	schema := SchemaFrom(ctx)
 	if schema != "" {
-		sanitized := pgx.Identifier{schema}.Sanitize()
-
-		batch := &pgx.Batch{}
-		batch.Queue("SET search_path TO " + sanitized)
-		batch.Queue("SELECT set_config('ms.app_id', $1, false)", schema)
-
-		br := conn.SendBatch(ctx, batch)
-		_, err1 := br.Exec()
-		_, err2 := br.Exec()
-		br.Close()
-
-		if err1 != nil {
-			return fmt.Errorf("mirrorstack/db: failed to set search_path: %w", err1)
-		}
-		if err2 != nil {
-			return fmt.Errorf("mirrorstack/db: failed to set ms.app_id: %w", err2)
+		if err := applyScope(ctx, conn, schema); err != nil {
+			return err
 		}
 	}
 
@@ -52,10 +39,6 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(q Querier) error) error
 	}
 
 	defer func() {
-		if schema != "" {
-			conn.Exec(context.Background(), "RESET search_path")
-			conn.Exec(context.Background(), "RESET ms.app_id")
-		}
 		if p := recover(); p != nil {
 			tx.Rollback(ctx)
 			panic(p)
