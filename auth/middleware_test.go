@@ -30,36 +30,17 @@ func TestPlatformAuth_NoRole(t *testing.T) {
 	}
 }
 
-func TestPlatformAuth_Viewer(t *testing.T) {
+func TestPlatformAuth_AnyRoleAllowed(t *testing.T) {
 	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-	req := requestWithRole("GET", "/items", RoleViewer)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rec.Code)
-	}
-}
+	for _, role := range []string{RoleAdmin, RoleMember, RoleViewer} {
+		req := requestWithRole("GET", "/items", role)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
 
-func TestPlatformAuth_Member(t *testing.T) {
-	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-	req := requestWithRole("GET", "/items", RoleMember)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rec.Code)
-	}
-}
-
-func TestPlatformAuth_Admin(t *testing.T) {
-	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-	req := requestWithRole("GET", "/items", RoleAdmin)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Errorf("role %q: expected 200, got %d", role, rec.Code)
+		}
 	}
 }
 
