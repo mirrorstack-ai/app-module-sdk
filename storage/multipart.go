@@ -46,6 +46,9 @@ func (c *Client) CreateMultipart(ctx context.Context, key, contentType string) (
 	if err != nil {
 		return nil, fmt.Errorf("mirrorstack/storage: create multipart failed: %w", err)
 	}
+	if out.UploadId == nil {
+		return nil, fmt.Errorf("mirrorstack/storage: S3 returned nil UploadId")
+	}
 	return &MultipartUpload{
 		client:   c,
 		bucket:   c.bucket,
@@ -72,6 +75,9 @@ func (u *MultipartUpload) PresignPart(ctx context.Context, partNumber int32, exp
 // Complete finalizes the multipart upload with the list of completed parts.
 // Each part must include the PartNumber and the ETag returned by S3 after upload.
 func (u *MultipartUpload) Complete(ctx context.Context, parts []CompletedPart) error {
+	if len(parts) == 0 {
+		return fmt.Errorf("mirrorstack/storage: Complete called with no parts")
+	}
 	s3Parts := make([]types.CompletedPart, len(parts))
 	for i, p := range parts {
 		s3Parts[i] = types.CompletedPart{

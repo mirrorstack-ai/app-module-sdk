@@ -45,11 +45,9 @@ type Module struct {
 	devCacheErr  error
 	prodCacheMap map[string]*cache.Client // production: keyed by endpoint|username
 	prodCacheMu  sync.Mutex
-	devStorageOnce sync.Once               // dev mode: lazy storage init
+	devStorageOnce sync.Once // dev mode: lazy storage init
 	devStorage     *storage.Client
 	devStorageErr  error
-	prodStorageMap map[string]*storage.Client // production: keyed by credential
-	prodStorageMu  sync.Mutex
 }
 
 // New creates a new Module.
@@ -186,23 +184,11 @@ func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
-	// Production: STS credentials from Lambda payload
+	// Production: STS credentials from Lambda payload.
+	// No caching — S3 client creation is cheap (no I/O), and STS tokens rotate
+	// frequently. Caching by AccessKeyID risks using stale credentials.
 	if cred := storage.CredentialFrom(ctx); cred != nil {
-		key := cred.Bucket + "|" + cred.Region + "|" + cred.AccessKeyID
-		m.prodStorageMu.Lock()
-		defer m.prodStorageMu.Unlock()
-		if m.prodStorageMap == nil {
-			m.prodStorageMap = make(map[string]*storage.Client)
-		}
-		if c, ok := m.prodStorageMap[key]; ok {
-			return c, nil
-		}
-		c, err := storage.NewFromCredential(*cred)
-		if err != nil {
-			return nil, err
-		}
-		m.prodStorageMap[key] = c
-		return c, nil
+		return storage.NewFromCredential(*cred)
 	}
 	// Dev: env vars
 	m.devStorageOnce.Do(func() {
@@ -279,11 +265,6 @@ func (m *Module) Close() {
 	if m.devCache != nil {
 		m.devCache.Close()
 	}
-	m.prodStorageMu.Lock()
-	for k := range m.prodStorageMap {
-		delete(m.prodStorageMap, k)
-	}
-	m.prodStorageMu.Unlock()
 }
 
 func (m *Module) mountSystemRoutes() {
