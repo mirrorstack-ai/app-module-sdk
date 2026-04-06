@@ -114,8 +114,16 @@ func (c *Client) ForApp(prefix, cdnBase string) *Client {
 	}
 }
 
+// ErrNoCredential is returned when PresignPut/PresignGet is called without storage credentials.
+// This happens on Public routes where STS credentials are not injected.
+var ErrNoCredential = fmt.Errorf("mirrorstack/storage: no storage credentials — presigned URLs require authenticated context")
+
 // PresignPut generates a presigned S3 PUT URL for uploading a file.
+// Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignPut(ctx context.Context, key string, expires time.Duration) (string, error) {
+	if c.presigner == nil {
+		return "", ErrNoCredential
+	}
 	fullKey := c.prefix + key
 	req, err := c.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.bucket),
@@ -128,7 +136,11 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 }
 
 // PresignGet generates a presigned S3 GET URL for direct download (bypasses CDN).
+// Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignGet(ctx context.Context, key string, expires time.Duration) (string, error) {
+	if c.presigner == nil {
+		return "", ErrNoCredential
+	}
 	fullKey := c.prefix + key
 	req, err := c.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
