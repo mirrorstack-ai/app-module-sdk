@@ -39,9 +39,11 @@ type Module struct {
 	devDBOnce sync.Once      // dev mode: lazy DB init
 	devDB     *db.DB
 	devDBErr  error
-	cacheOnce sync.Once      // lazy cache init (shared across apps)
-	cacheClient *cache.Client
-	cacheErr  error
+	devCacheOnce sync.Once     // dev mode: lazy cache init
+	devCache     *cache.Client
+	devCacheErr  error
+	prodCache    *cache.Client // production: from injected credential
+	prodCacheMu  sync.Mutex
 }
 
 // New creates a new Module.
@@ -105,7 +107,7 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
 
 	// Dev mode: single pool from DATABASE_URL, init once
 	m.devDBOnce.Do(func() {
-		m.devDB, m.devDBErr = db.Open(ctx)
+		m.devDB, m.devDBErr = db.Open(context.Background())
 	})
 	if m.devDBErr != nil {
 		return nil, m.devDBErr
@@ -138,16 +140,22 @@ func (m *Module) Cache(ctx context.Context) (cache.Cacher, error) {
 func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
 	// Production: credential from Lambda payload
 	if cred := cache.CredentialFrom(ctx); cred != nil {
-		m.cacheOnce.Do(func() {
-			m.cacheClient, m.cacheErr = cache.NewFromCredential(ctx, *cred)
-		})
-		return m.cacheClient, m.cacheErr
+		m.prodCacheMu.Lock()
+		defer m.prodCacheMu.Unlock()
+		if m.prodCache == nil {
+			c, err := cache.NewFromCredential(context.Background(), *cred)
+			if err != nil {
+				return nil, err
+			}
+			m.prodCache = c
+		}
+		return m.prodCache, nil
 	}
 	// Dev: REDIS_URL env var
-	m.cacheOnce.Do(func() {
-		m.cacheClient, m.cacheErr = cache.Open(ctx)
+	m.devCacheOnce.Do(func() {
+		m.devCache, m.devCacheErr = cache.Open(context.Background())
 	})
-	return m.cacheClient, m.cacheErr
+	return m.devCache, m.devCacheErr
 }
 
 // Platform registers routes with platform auth scope.
@@ -209,8 +217,11 @@ func (m *Module) Close() {
 	if m.devDB != nil {
 		m.devDB.Close()
 	}
-	if m.cacheClient != nil {
-		m.cacheClient.Close()
+	if m.prodCache != nil {
+		m.prodCache.Close()
+	}
+	if m.devCache != nil {
+		m.devCache.Close()
 	}
 }
 

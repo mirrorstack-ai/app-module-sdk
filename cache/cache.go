@@ -36,6 +36,7 @@ type Client struct {
 // Open creates a Client from REDIS_URL env var, falling back to localhost.
 // Cannot be used in Lambda — credentials are injected per invocation.
 func Open(ctx context.Context) (*Client, error) {
+	// Cannot use runtime.IsLambda() here — import cycle (runtime → cache → runtime)
 	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
 		return nil, fmt.Errorf("mirrorstack/cache: Open() cannot be used in Lambda — credentials are injected per-invocation")
 	}
