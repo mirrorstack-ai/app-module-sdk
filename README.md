@@ -209,7 +209,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 ### Platform resources
 
-- [ ] `ms.Storage(ctx)` — S3 primary + R2 CDN cache (`NoCache` for direct S3)
+- [x] `ms.Storage(ctx)` — S3 presigned URLs + CDN (R2 cache) + multipart upload
 - [x] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
 - [ ] `ms.Meter(ctx)` — custom usage metrics for billing
 
@@ -263,7 +263,10 @@ app-module-sdk/
   cache/
     credential.go              Cache credential, context helpers
     cache.go                   Client with Set/Get/Del, key prefix, ForApp
-  storage/                     S3 + R2 CDN cache (planned)
+  storage/
+    credential.go              STS credential, context helpers
+    storage.go                 Client with PresignPut/Get, URL (CDN)
+    multipart.go               Multipart upload for large files
   meter/                       Custom usage metrics (planned)
   mcp/                         MCP tool/resource registration (planned)
 ```

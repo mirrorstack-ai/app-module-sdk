@@ -23,6 +23,7 @@ type Storer interface {
 	PresignPut(ctx context.Context, key string, expires time.Duration) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
 	URL(key string) string
+	CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error)
 }
 
 // Client wraps an S3 presigner with app-scoped key prefix and CDN base URL.
