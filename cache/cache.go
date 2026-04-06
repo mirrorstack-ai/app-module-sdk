@@ -6,13 +6,17 @@ package cache
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+var idPattern = regexp.MustCompile(`^[a-z0-9_]*$`)
 
 const defaultDevURL = "redis://localhost:6379"
 
@@ -62,11 +66,13 @@ func New(ctx context.Context, redisURL string) (*Client, error) {
 }
 
 // NewFromCredential creates a Client from platform-injected credentials.
+// Enforces TLS for production ElastiCache connections.
 func NewFromCredential(ctx context.Context, cred Credential) (*Client, error) {
 	opts := &redis.Options{
-		Addr:     cred.Endpoint,
-		Username: cred.Username,
-		Password: cred.Token,
+		Addr:      cred.Endpoint,
+		Username:  cred.Username,
+		Password:  cred.Token,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	rdb := redis.NewClient(opts)
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -78,7 +84,14 @@ func NewFromCredential(ctx context.Context, cred Credential) (*Client, error) {
 
 // ForApp returns a new Client sharing the same Redis connection but with an
 // app-scoped key prefix. Key pattern: {appID}:{moduleID}:{key}
+// Validates both IDs to prevent colon injection breaking prefix boundary.
 func (c *Client) ForApp(appID, moduleID string) *Client {
+	if appID != "" && !idPattern.MatchString(appID) {
+		panic(fmt.Sprintf("mirrorstack/cache: invalid appID %q — must match [a-z0-9_]+", appID))
+	}
+	if !idPattern.MatchString(moduleID) {
+		panic(fmt.Sprintf("mirrorstack/cache: invalid moduleID %q — must match [a-z0-9_]+", moduleID))
+	}
 	return &Client{
 		rdb:    c.rdb,
 		prefix: appID + ":" + moduleID + ":",

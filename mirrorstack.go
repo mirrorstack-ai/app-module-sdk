@@ -39,10 +39,10 @@ type Module struct {
 	devDBOnce sync.Once      // dev mode: lazy DB init
 	devDB     *db.DB
 	devDBErr  error
-	devCacheOnce sync.Once     // dev mode: lazy cache init
+	devCacheOnce sync.Once                // dev mode: lazy cache init
 	devCache     *cache.Client
 	devCacheErr  error
-	prodCache    *cache.Client // production: from injected credential
+	prodCacheMap map[string]*cache.Client // production: keyed by endpoint|username
 	prodCacheMu  sync.Mutex
 }
 
@@ -126,30 +126,32 @@ func (m *Module) Cache(ctx context.Context) (cache.Cacher, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Apply prefix from auth context
+	// Always apply prefix — never return unprefixed base client
 	appID := ""
 	if a := auth.Get(ctx); a != nil {
 		appID = a.AppID
 	}
-	if appID != "" {
-		return client.ForApp(appID, m.config.ID), nil
-	}
-	return client, nil
+	return client.ForApp(appID, m.config.ID), nil
 }
 
 func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
-	// Production: credential from Lambda payload
+	// Production: credential from Lambda payload, keyed by endpoint|username
 	if cred := cache.CredentialFrom(ctx); cred != nil {
+		key := cred.Endpoint + "|" + cred.Username
 		m.prodCacheMu.Lock()
 		defer m.prodCacheMu.Unlock()
-		if m.prodCache == nil {
-			c, err := cache.NewFromCredential(context.Background(), *cred)
-			if err != nil {
-				return nil, err
-			}
-			m.prodCache = c
+		if m.prodCacheMap == nil {
+			m.prodCacheMap = make(map[string]*cache.Client)
 		}
-		return m.prodCache, nil
+		if c, ok := m.prodCacheMap[key]; ok {
+			return c, nil
+		}
+		c, err := cache.NewFromCredential(context.Background(), *cred)
+		if err != nil {
+			return nil, err
+		}
+		m.prodCacheMap[key] = c
+		return c, nil
 	}
 	// Dev: REDIS_URL env var
 	m.devCacheOnce.Do(func() {
@@ -217,9 +219,12 @@ func (m *Module) Close() {
 	if m.devDB != nil {
 		m.devDB.Close()
 	}
-	if m.prodCache != nil {
-		m.prodCache.Close()
+	m.prodCacheMu.Lock()
+	for k, c := range m.prodCacheMap {
+		c.Close()
+		delete(m.prodCacheMap, k)
 	}
+	m.prodCacheMu.Unlock()
 	if m.devCache != nil {
 		m.devCache.Close()
 	}
