@@ -13,15 +13,16 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
 var schemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
 
 // Resources holds per-invocation credentials for all platform services.
 type Resources struct {
-	DB    *db.Credential    `json:"db,omitempty"`
-	Cache *cache.Credential `json:"cache,omitempty"`
-	// Storage *StorageCredential `json:"storage,omitempty"` // future
+	DB      *db.Credential      `json:"db,omitempty"`
+	Cache   *cache.Credential   `json:"cache,omitempty"`
+	Storage *storage.Credential `json:"storage,omitempty"`
 }
 
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
@@ -100,6 +101,9 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 			}
 			if req.Resources.Cache != nil {
 				reqCtx = cache.WithCredential(reqCtx, *req.Resources.Cache)
+			}
+			if req.Resources.Storage != nil {
+				reqCtx = storage.WithCredential(reqCtx, *req.Resources.Storage)
 			}
 		}
 		if req.AppSchema != "" {
