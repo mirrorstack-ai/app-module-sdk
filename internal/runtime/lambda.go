@@ -10,19 +10,27 @@ import (
 	"strings"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
 var schemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
 
+// Resources holds per-invocation credentials for all platform services.
+type Resources struct {
+	DB    *db.Credential    `json:"db,omitempty"`
+	Cache *cache.Credential `json:"cache,omitempty"`
+	// Storage *StorageCredential `json:"storage,omitempty"` // future
+}
+
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
 type LambdaRequest struct {
-	Method     string            `json:"method"`
-	Path       string            `json:"path"`
-	Headers    map[string]string `json:"headers"`
-	Body       string            `json:"body"`
-	Credential *db.Credential    `json:"credential,omitempty"`
+	Method    string            `json:"method"`
+	Path      string            `json:"path"`
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
+	Resources *Resources        `json:"resources,omitempty"`
 	// Trusted fields — injected by platform, not from user headers
 	UserID    string `json:"userId,omitempty"`
 	AppID     string `json:"appId,omitempty"`
@@ -86,8 +94,13 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 
 		// Inject trusted values from typed payload fields into context
 		reqCtx := httpReq.Context()
-		if req.Credential != nil {
-			reqCtx = db.WithCredential(reqCtx, *req.Credential)
+		if req.Resources != nil {
+			if req.Resources.DB != nil {
+				reqCtx = db.WithCredential(reqCtx, *req.Resources.DB)
+			}
+			if req.Resources.Cache != nil {
+				reqCtx = cache.WithCredential(reqCtx, *req.Resources.Cache)
+			}
 		}
 		if req.AppSchema != "" {
 			reqCtx = db.WithSchema(reqCtx, req.AppSchema)

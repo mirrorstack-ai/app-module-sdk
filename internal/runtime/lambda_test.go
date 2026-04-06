@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 )
 
@@ -207,5 +208,49 @@ func TestNewLambdaHandler_EmptySchema(t *testing.T) {
 
 	if resp.StatusCode != 200 {
 		t.Errorf("expected 200 for empty schema, got %d", resp.StatusCode)
+	}
+}
+
+func TestNewLambdaHandler_ResourcesInjected(t *testing.T) {
+	r := chi.NewRouter()
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		dbCred := db.CredentialFrom(ctx)
+		cacheCred := cache.CredentialFrom(ctx)
+		result := map[string]string{}
+		if dbCred != nil {
+			result["dbUser"] = dbCred.Username
+		}
+		if cacheCred != nil {
+			result["cacheUser"] = cacheCred.Username
+		}
+		json.NewEncoder(w).Encode(result)
+	})
+
+	handler := NewLambdaHandler(r)
+	payload := mustMarshal(t, LambdaRequest{
+		Method: "GET",
+		Path:   "/check",
+		Resources: &Resources{
+			DB:    &db.Credential{Username: "mod_media__app_abc"},
+			Cache: &cache.Credential{Endpoint: "localhost:6379", Username: "mod_media"},
+		},
+	})
+
+	resp, err := handler(context.Background(), payload)
+	requireNoErr(t, err)
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]string
+	json.Unmarshal([]byte(resp.Body), &body)
+
+	if body["dbUser"] != "mod_media__app_abc" {
+		t.Errorf("expected dbUser 'mod_media__app_abc', got %q", body["dbUser"])
+	}
+	if body["cacheUser"] != "mod_media" {
+		t.Errorf("expected cacheUser 'mod_media', got %q", body["cacheUser"])
 	}
 }
