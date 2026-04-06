@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -34,10 +35,15 @@ type Module struct {
 	config    Config
 	router    *chi.Mux
 	logger    *log.Logger
-	poolCache *db.PoolCache // production: per-app credential pools
-	devDBOnce sync.Once     // dev mode: lazy init guard
-	devDB     *db.DB        // dev mode: single pool from DATABASE_URL
+	poolCache *db.PoolCache  // production: per-app DB pools
+	devDBOnce sync.Once      // dev mode: lazy DB init
+	devDB     *db.DB
 	devDBErr  error
+	devCacheOnce sync.Once                // dev mode: lazy cache init
+	devCache     *cache.Client
+	devCacheErr  error
+	prodCacheMap map[string]*cache.Client // production: keyed by endpoint|username
+	prodCacheMu  sync.Mutex
 }
 
 // New creates a new Module.
@@ -101,12 +107,57 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
 
 	// Dev mode: single pool from DATABASE_URL, init once
 	m.devDBOnce.Do(func() {
-		m.devDB, m.devDBErr = db.Open(ctx)
+		m.devDB, m.devDBErr = db.Open(context.Background())
 	})
 	if m.devDBErr != nil {
 		return nil, m.devDBErr
 	}
 	return m.devDB.Pool(), nil
+}
+
+// Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
+//
+//	c, err := mod.Cache(r.Context())
+//	if err != nil { ... }
+//	c.Set("views:123", "42", 5*time.Minute)
+//	val, err := c.Get("views:123")
+func (m *Module) Cache(ctx context.Context) (cache.Cacher, error) {
+	client, err := m.resolveCache(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Always apply prefix — never return unprefixed base client
+	appID := ""
+	if a := auth.Get(ctx); a != nil {
+		appID = a.AppID
+	}
+	return client.ForApp(appID, m.config.ID), nil
+}
+
+func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
+	// Production: credential from Lambda payload, keyed by endpoint|username
+	if cred := cache.CredentialFrom(ctx); cred != nil {
+		key := cred.Endpoint + "|" + cred.Username
+		m.prodCacheMu.Lock()
+		defer m.prodCacheMu.Unlock()
+		if m.prodCacheMap == nil {
+			m.prodCacheMap = make(map[string]*cache.Client)
+		}
+		if c, ok := m.prodCacheMap[key]; ok {
+			return c, nil
+		}
+		c, err := cache.NewFromCredential(context.Background(), *cred)
+		if err != nil {
+			return nil, err
+		}
+		m.prodCacheMap[key] = c
+		return c, nil
+	}
+	// Dev: REDIS_URL env var
+	m.devCacheOnce.Do(func() {
+		m.devCache, m.devCacheErr = cache.Open(context.Background())
+	})
+	return m.devCache, m.devCacheErr
 }
 
 // Platform registers routes with platform auth scope.
@@ -168,6 +219,15 @@ func (m *Module) Close() {
 	if m.devDB != nil {
 		m.devDB.Close()
 	}
+	m.prodCacheMu.Lock()
+	for k, c := range m.prodCacheMap {
+		c.Close()
+		delete(m.prodCacheMap, k)
+	}
+	m.prodCacheMu.Unlock()
+	if m.devCache != nil {
+		m.devCache.Close()
+	}
 }
 
 func (m *Module) mountSystemRoutes() {
@@ -220,6 +280,11 @@ func DB(ctx context.Context) (db.Querier, func(), error) {
 // Tx runs fn inside a transaction on the default module.
 func Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	return mustDefault("Tx").Tx(ctx, fn)
+}
+
+// Cache returns a scoped cache client on the default module.
+func Cache(ctx context.Context) (cache.Cacher, error) {
+	return mustDefault("Cache").Cache(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.
