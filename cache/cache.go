@@ -16,7 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var idPattern = regexp.MustCompile(`^[a-z0-9_]*$`)
+var idPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 const defaultDevURL = "redis://localhost:6379"
 
