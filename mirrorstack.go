@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -34,10 +35,13 @@ type Module struct {
 	config    Config
 	router    *chi.Mux
 	logger    *log.Logger
-	poolCache *db.PoolCache // production: per-app credential pools
-	devDBOnce sync.Once     // dev mode: lazy init guard
-	devDB     *db.DB        // dev mode: single pool from DATABASE_URL
+	poolCache *db.PoolCache  // production: per-app DB pools
+	devDBOnce sync.Once      // dev mode: lazy DB init
+	devDB     *db.DB
 	devDBErr  error
+	cacheOnce sync.Once      // lazy cache init (shared across apps)
+	cacheClient *cache.Client
+	cacheErr  error
 }
 
 // New creates a new Module.
@@ -109,6 +113,43 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
 	return m.devDB.Pool(), nil
 }
 
+// Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
+//
+//	c, err := mod.Cache(r.Context())
+//	if err != nil { ... }
+//	c.Set("views:123", "42", 5*time.Minute)
+//	val, err := c.Get("views:123")
+func (m *Module) Cache(ctx context.Context) (cache.Cacher, error) {
+	client, err := m.resolveCache(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Apply prefix from auth context
+	appID := ""
+	if a := auth.Get(ctx); a != nil {
+		appID = a.AppID
+	}
+	if appID != "" {
+		return client.ForApp(appID, m.config.ID), nil
+	}
+	return client, nil
+}
+
+func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
+	// Production: credential from Lambda payload
+	if cred := cache.CredentialFrom(ctx); cred != nil {
+		m.cacheOnce.Do(func() {
+			m.cacheClient, m.cacheErr = cache.NewFromCredential(ctx, *cred)
+		})
+		return m.cacheClient, m.cacheErr
+	}
+	// Dev: REDIS_URL env var
+	m.cacheOnce.Do(func() {
+		m.cacheClient, m.cacheErr = cache.Open(ctx)
+	})
+	return m.cacheClient, m.cacheErr
+}
+
 // Platform registers routes with platform auth scope.
 // Default: admin only. Use auth.RequirePermission for member/viewer access.
 func (m *Module) Platform(fn func(r chi.Router)) {
@@ -168,6 +209,9 @@ func (m *Module) Close() {
 	if m.devDB != nil {
 		m.devDB.Close()
 	}
+	if m.cacheClient != nil {
+		m.cacheClient.Close()
+	}
 }
 
 func (m *Module) mountSystemRoutes() {
@@ -220,6 +264,11 @@ func DB(ctx context.Context) (db.Querier, func(), error) {
 // Tx runs fn inside a transaction on the default module.
 func Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	return mustDefault("Tx").Tx(ctx, fn)
+}
+
+// Cache returns a scoped cache client on the default module.
+func Cache(ctx context.Context) (cache.Cacher, error) {
+	return mustDefault("Cache").Cache(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.
