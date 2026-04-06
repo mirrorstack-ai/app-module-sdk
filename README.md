@@ -174,6 +174,21 @@ items, err := queries.ListItems(ctx, params) // type-safe, no manual scanning
 conn.Query(ctx, "SELECT * FROM items WHERE title ILIKE $1", "%"+search+"%")
 ```
 
+## Cache
+
+`ms.Cache(ctx)` returns a scoped Redis client with automatic key prefix isolation:
+
+```go
+c, err := ms.Cache(r.Context())
+if err != nil { ... }
+
+c.Set("views:123", "42", 5*time.Minute)   // Redis key: app_abc:mod_media:views:123
+val, err := c.Get("views:123")             // returns "42"
+c.Del("views:123")
+```
+
+Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mod_media:views:123"`. Each app sees only its own cache.
+
 ## Roadmap
 
 ### Core
@@ -195,7 +210,7 @@ conn.Query(ctx, "SELECT * FROM items WHERE title ILIKE $1", "%"+search+"%")
 ### Platform resources
 
 - [ ] `ms.Storage(ctx)` — S3 primary + R2 CDN cache (`NoCache` for direct S3)
-- [ ] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
+- [x] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
 - [ ] `ms.Meter(ctx)` — custom usage metrics for billing
 
 ### Events & scheduling
@@ -245,8 +260,10 @@ app-module-sdk/
       lambda.go                Lambda handler, credential injection
   system/
     health.go                  Health endpoint
+  cache/
+    credential.go              Cache credential, context helpers
+    cache.go                   Client with Set/Get/Del, key prefix, ForApp
   storage/                     S3 + R2 CDN cache (planned)
-  cache/                       Scoped Redis (planned)
   meter/                       Custom usage metrics (planned)
   mcp/                         MCP tool/resource registration (planned)
 ```
