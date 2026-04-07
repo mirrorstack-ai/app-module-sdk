@@ -20,6 +20,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
+	"github.com/mirrorstack-ai/app-module-sdk/storage"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
@@ -44,6 +45,9 @@ type Module struct {
 	devCacheErr  error
 	prodCacheMap map[string]*cache.Client // production: keyed by endpoint|username
 	prodCacheMu  sync.Mutex
+	devStorageOnce sync.Once // dev mode: lazy storage init
+	devStorage     *storage.Client
+	devStorageErr  error
 }
 
 // New creates a new Module.
@@ -158,6 +162,39 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
 		m.devCache, m.devCacheErr = cache.Open(context.Background())
 	})
 	return m.devCache, m.devCacheErr
+}
+
+// Storage returns a scoped storage client. Keys are auto-prefixed with the app/module path.
+//
+//	s, err := mod.Storage(r.Context())
+//	if err != nil { ... }
+//	url, err := s.PresignPut("photo.jpg", 15*time.Minute)
+//	cdnURL := s.URL("photo.jpg")
+func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
+	client, err := m.resolveStorage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Production: credential already has prefix and cdnBase
+	if cred := storage.CredentialFrom(ctx); cred != nil {
+		return client.ForApp(cred.Prefix, cred.CDNBase), nil
+	}
+	// Dev: no prefix scoping
+	return client, nil
+}
+
+func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
+	// Production: STS credentials from Lambda payload.
+	// No caching — S3 client creation is cheap (no I/O), and STS tokens rotate
+	// frequently. Caching by AccessKeyID risks using stale credentials.
+	if cred := storage.CredentialFrom(ctx); cred != nil {
+		return storage.NewFromCredential(*cred)
+	}
+	// Dev: env vars
+	m.devStorageOnce.Do(func() {
+		m.devStorage, m.devStorageErr = storage.Open(context.Background())
+	})
+	return m.devStorage, m.devStorageErr
 }
 
 // Platform registers routes with platform auth scope.
@@ -285,6 +322,11 @@ func Tx(ctx context.Context, fn func(q db.Querier) error) error {
 // Cache returns a scoped cache client on the default module.
 func Cache(ctx context.Context) (cache.Cacher, error) {
 	return mustDefault("Cache").Cache(ctx)
+}
+
+// Storage returns a scoped storage client on the default module.
+func Storage(ctx context.Context) (storage.Storer, error) {
+	return mustDefault("Storage").Storage(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.
