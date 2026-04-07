@@ -78,11 +78,19 @@ func (m *Module) Router() *chi.Mux { return m.router }
 //	defer release()
 //	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
 func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
-	pool, err := m.resolvePool(ctx)
+	pool, releasePool, err := m.resolvePool(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return db.AcquireScoped(ctx, pool)
+	querier, releaseConn, err := db.AcquireScoped(ctx, pool)
+	if err != nil {
+		releasePool()
+		return nil, nil, err
+	}
+	return querier, func() {
+		releaseConn()
+		releasePool()
+	}, nil
 }
 
 // Tx runs fn inside a transaction with schema isolation. Commits on success, rolls back on error.
@@ -94,29 +102,32 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 //	    return queries.DeductBalance(ctx, params)
 //	})
 func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
-	pool, err := m.resolvePool(ctx)
+	pool, releasePool, err := m.resolvePool(ctx)
 	if err != nil {
 		return err
 	}
+	defer releasePool()
 	return db.Tx(ctx, pool, fn)
 }
 
-// resolvePool returns the right pool: per-app credential pool (production)
-// or dev-mode pool (DATABASE_URL). Thread-safe via sync.Once for dev init.
-func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, error) {
-	// Production: credential injected per invocation
+// resolvePool returns the right pool plus a release closure: per-app credential
+// pool (production, refcount-pinned) or dev-mode pool (no-op release).
+// Thread-safe via sync.Once for dev init.
+func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
+	// Production: credential injected per invocation. PoolCache.Get returns
+	// a refcount-pinned pool — caller MUST run the release closure.
 	if cred := db.CredentialFrom(ctx); cred != nil {
 		return m.poolCache.Get(ctx, *cred)
 	}
 
-	// Dev mode: single pool from DATABASE_URL, init once
+	// Dev mode: single pool from DATABASE_URL, init once. No refcount needed.
 	m.devDBOnce.Do(func() {
 		m.devDB, m.devDBErr = db.Open(context.Background())
 	})
 	if m.devDBErr != nil {
-		return nil, m.devDBErr
+		return nil, nil, m.devDBErr
 	}
-	return m.devDB.Pool(), nil
+	return m.devDB.Pool(), func() {}, nil
 }
 
 // Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.

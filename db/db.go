@@ -45,9 +45,17 @@ func Open(ctx context.Context) (*DB, error) {
 	return New(ctx, url)
 }
 
-// New creates a DB with the given connection string.
+// New creates a DB with the given connection string. The pool gets the same
+// AfterRelease scope-reset hook as production pools so dev mode has identical
+// session-state guarantees.
 func New(ctx context.Context, connStr string) (*DB, error) {
-	pool, err := pgxpool.New(ctx, connStr)
+	cfg, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack/db: invalid connection string: %w", err)
+	}
+	configurePoolDefaults(cfg)
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mirrorstack/db: failed to connect: %w", err)
 	}
