@@ -1,12 +1,16 @@
 package mirrorstack
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
 func resetDefault(t *testing.T) {
@@ -213,10 +217,118 @@ func TestSystemPlatformRoutes_RequireInternalSecret(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
 	m, _ := New(Config{ID: "test", Name: "Test"})
 
-	// Without secret → 401
+	// Without secret → 401. Asserting exactly 401 (not just !=200) so an
+	// accidental route removal — which would return 404 — fails this test
+	// instead of providing false assurance about the auth boundary.
 	rec := doRequest(t, m.Router(), "GET", "/__mirrorstack/platform/manifest")
-	if rec.Code == 200 {
-		t.Error("expected non-200 for system platform route without secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without secret, got %d", rec.Code)
+	}
+}
+
+// --- Manifest endpoint ---
+
+func TestManifest_Returns200WithSecret(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
+	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "platform-secret")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if got.ID != "media" || got.Defaults.Name != "Media" || got.Defaults.Icon != "perm_media" {
+		t.Errorf("manifest identity wrong: %+v", got)
+	}
+}
+
+func TestManifest_RoutesFromAllScopes_RegisteredViaModule(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media", Name: "Media"})
+
+	m.Platform(func(r chi.Router) {
+		r.Get("/items", func(w http.ResponseWriter, r *http.Request) {})
+		r.Post("/items", func(w http.ResponseWriter, r *http.Request) {})
+	})
+	m.Public(func(r chi.Router) {
+		r.Get("/feed", func(w http.ResponseWriter, r *http.Request) {})
+	})
+	m.Internal(func(r chi.Router) {
+		r.Post("/events/on-user-deleted", func(w http.ResponseWriter, r *http.Request) {})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	if len(got.Routes[registry.ScopePlatform]) != 2 {
+		t.Errorf("platform routes = %d, want 2: %v", len(got.Routes[registry.ScopePlatform]), got.Routes[registry.ScopePlatform])
+	}
+	if len(got.Routes[registry.ScopePublic]) != 1 {
+		t.Errorf("public routes = %d, want 1: %v", len(got.Routes[registry.ScopePublic]), got.Routes[registry.ScopePublic])
+	}
+	if len(got.Routes[registry.ScopeInternal]) != 1 {
+		t.Errorf("internal routes = %d, want 1: %v", len(got.Routes[registry.ScopeInternal]), got.Routes[registry.ScopeInternal])
+	}
+}
+
+func TestManifest_MigrationFromConfig(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	sqlFS := fstest.MapFS{
+		"sql/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+	}
+	m, _ := New(Config{ID: "media", Name: "Media", SQL: sqlFS})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	if got.Migration != "0008" {
+		t.Errorf("migration = %q, want 0008", got.Migration)
+	}
+}
+
+func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
+	// Verify that the chi.Walk + re-register approach in scopedRoutes preserves
+	// the original routing behavior. Routes registered via Platform/Public/Internal
+	// must still be reachable AND still enforce auth.
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "test"})
+
+	m.Platform(func(r chi.Router) {
+		r.Get("/admin/items", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("admin"))
+		})
+	})
+	m.Public(func(r chi.Router) {
+		r.Get("/public/feed", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("public"))
+		})
+	})
+
+	// Public route — no auth needed
+	if rec := doRequest(t, m.Router(), "GET", "/public/feed"); rec.Code != 200 {
+		t.Errorf("public route: code = %d, want 200", rec.Code)
+	}
+	// Platform route without auth → 401
+	if rec := doRequest(t, m.Router(), "GET", "/admin/items"); rec.Code != 401 {
+		t.Errorf("platform route without auth: code = %d, want 401", rec.Code)
+	}
+	// Platform route with auth → 200
+	if rec := doRequestWithRole(t, m.Router(), "GET", "/admin/items", auth.RoleAdmin); rec.Code != 200 {
+		t.Errorf("platform route with admin: code = %d, want 200", rec.Code)
 	}
 }
 
