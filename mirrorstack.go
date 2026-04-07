@@ -168,19 +168,14 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
 //
 //	s, err := mod.Storage(r.Context())
 //	if err != nil { ... }
-//	url, err := s.PresignPut("photo.jpg", 15*time.Minute)
-//	cdnURL := s.URL("photo.jpg")
+//	url, err := s.PresignPut(ctx, "photo.jpg", 15*time.Minute)
+//	cdnURL, err := s.URL("photo.jpg")
+//
+// Prefix and CDN base come from the per-invocation STS credential in production,
+// or env vars in dev mode. resolveStorage handles both paths — NewFromCredential
+// already sets the prefix from cred.Prefix, so no separate ForApp scoping is needed.
 func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
-	client, err := m.resolveStorage(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Production: credential already has prefix and cdnBase
-	if cred := storage.CredentialFrom(ctx); cred != nil {
-		return client.ForApp(cred.Prefix, cred.CDNBase), nil
-	}
-	// Dev: no prefix scoping
-	return client, nil
+	return m.resolveStorage(ctx)
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {

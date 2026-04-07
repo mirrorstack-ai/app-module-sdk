@@ -22,8 +22,45 @@ import (
 type Storer interface {
 	PresignPut(ctx context.Context, key string, expires time.Duration) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
-	URL(key string) string
+	URL(key string) (string, error)
 	CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error)
+}
+
+// validateKey rejects keys that would escape the prefix scope. S3 treats keys
+// as opaque (no traversal), but CDN URLs are normalized by browsers and AWS
+// SDK percent-decodes during canonical request building — so a key like
+// "../../other_app/secret.jpg" or "%2F..%2F..%2Fetc" would resolve to a
+// different tenant's path. This is the only path where prefix isolation can
+// be bypassed by caller-controlled input.
+//
+// The "%" reject is conservative: S3 keys do not require percent-encoding
+// from the application layer (the SDK handles encoding). Filenames with "%"
+// or ".." should be normalized at ingest before being used as storage keys.
+func validateKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("mirrorstack/storage: key must not be empty")
+	}
+	if strings.HasPrefix(key, "/") {
+		return fmt.Errorf("mirrorstack/storage: key must not start with '/'")
+	}
+	if strings.Contains(key, "..") {
+		return fmt.Errorf("mirrorstack/storage: key must not contain '..'")
+	}
+	if strings.Contains(key, "%") {
+		return fmt.Errorf("mirrorstack/storage: key must not contain '%%' (percent-encoded traversal)")
+	}
+	return nil
+}
+
+// requireCredential returns ErrNoCredential if the client was constructed
+// without S3 credentials (e.g., on a Public route in production). Both fields
+// are checked together so a future constructor that decouples them cannot
+// reach a panic at the call site.
+func (c *Client) requireCredential() error {
+	if c.presigner == nil || c.s3Client == nil {
+		return ErrNoCredential
+	}
+	return nil
 }
 
 // Client wraps an S3 presigner with app-scoped key prefix and CDN base URL.
@@ -37,6 +74,9 @@ type Client struct {
 
 // NewFromCredential creates a Client from platform-injected STS credentials.
 func NewFromCredential(cred Credential) (*Client, error) {
+	if err := cred.validate(); err != nil {
+		return nil, err
+	}
 	cfg := aws.Config{
 		Region: cred.Region,
 		Credentials: credentials.NewStaticCredentialsProvider(
@@ -122,8 +162,11 @@ var ErrNoCredential = fmt.Errorf("mirrorstack/storage: no storage credentials �
 // PresignPut generates a presigned S3 PUT URL for uploading a file.
 // Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignPut(ctx context.Context, key string, expires time.Duration) (string, error) {
-	if c.presigner == nil {
-		return "", ErrNoCredential
+	if err := c.requireCredential(); err != nil {
+		return "", err
+	}
+	if err := validateKey(key); err != nil {
+		return "", err
 	}
 	fullKey := c.prefix + key
 	req, err := c.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
@@ -139,8 +182,11 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 // PresignGet generates a presigned S3 GET URL for direct download (bypasses CDN).
 // Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignGet(ctx context.Context, key string, expires time.Duration) (string, error) {
-	if c.presigner == nil {
-		return "", ErrNoCredential
+	if err := c.requireCredential(); err != nil {
+		return "", err
+	}
+	if err := validateKey(key); err != nil {
+		return "", err
 	}
 	fullKey := c.prefix + key
 	req, err := c.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
@@ -155,7 +201,14 @@ func (c *Client) PresignGet(ctx context.Context, key string, expires time.Durati
 
 // URL returns the CDN URL for a file. The Cloudflare Worker handles R2 caching:
 // R2 hit → serve, R2 miss → fetch from S3 → cache in R2 → serve.
-func (c *Client) URL(key string) string {
+// Returns an error if the key would escape the prefix scope when normalized by a browser.
+func (c *Client) URL(key string) (string, error) {
+	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	if c.cdnBase == "" {
+		return "", fmt.Errorf("mirrorstack/storage: cdnBase not configured")
+	}
 	base := strings.TrimRight(c.cdnBase, "/")
-	return base + "/" + c.prefix + key
+	return base + "/" + c.prefix + key, nil
 }
