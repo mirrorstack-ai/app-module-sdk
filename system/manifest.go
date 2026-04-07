@@ -12,14 +12,21 @@ import (
 
 // ManifestPayload is the JSON shape returned by GET /__mirrorstack/platform/manifest.
 // The platform reads this on deploy to discover module identity, capabilities,
-// and the current migration version.
+// migration version, and the semver→migration mapping it needs to translate
+// lifecycle calls.
 type ManifestPayload struct {
-	ID        string                            `json:"id"`
-	Defaults  ManifestDefaults                  `json:"defaults"`
-	Migration string                            `json:"migration"`
+	ID        string           `json:"id"`
+	Defaults  ManifestDefaults `json:"defaults"`
+	Migration string           `json:"migration"`
+	// Versions declares the mapping from human release tags (e.g., "v0.1.0")
+	// to migration numbers (e.g., "0008"). The platform reads this on deploy
+	// and uses it to translate semver release requests into the numeric
+	// migration numbers the lifecycle handlers expect. Empty map is valid:
+	// modules without formal releases just declare migration numbers directly.
+	Versions  map[string]string                   `json:"versions"`
 	Routes    map[registry.Scope][]registry.Route `json:"routes"`
-	Events    ManifestEvents                    `json:"events"`
-	Schedules []registry.Schedule               `json:"schedules"`
+	Events    ManifestEvents                      `json:"events"`
+	Schedules []registry.Schedule                 `json:"schedules"`
 }
 
 // ManifestDefaults is the default display name and icon. The platform may
@@ -40,10 +47,17 @@ type ManifestEvents struct {
 // build picks up new migrations without a restart. sqlFS may be nil — the
 // migration field will be empty.
 //
-// Empty-collection normalization (every scope present, no nil maps/slices) is
-// the Registry's responsibility — Routes/Emits/Subscribes/Schedules all return
-// non-nil zero values.
-func ManifestHandler(id, name, icon string, sqlFS fs.FS, reg *registry.Registry) http.HandlerFunc {
+// versions is the module's declared semver→migration map. It is exposed
+// read-only so the platform can translate semver release tags to the migration
+// numbers the lifecycle handlers require. A nil map is normalized to an empty
+// object so the JSON output is always `"versions":{}` instead of
+// `"versions":null` — the handler owns the output contract and normalizes
+// here the same way Registry normalizes Routes/Emits/Subscribes/Schedules at
+// their getters, so every manifest field is a non-nil zero value.
+func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]string, reg *registry.Registry) http.HandlerFunc {
+	if versions == nil {
+		versions = map[string]string{}
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		version, err := migration.LatestVersion(sqlFS)
 		if err != nil {
@@ -59,6 +73,7 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, reg *registry.Registry)
 			ID:        id,
 			Defaults:  ManifestDefaults{Name: name, Icon: icon},
 			Migration: version,
+			Versions:  versions,
 			Routes:    reg.Routes(),
 			Events:    ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
 			Schedules: reg.Schedules(),
