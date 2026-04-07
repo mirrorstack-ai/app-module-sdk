@@ -6,6 +6,7 @@ package mirrorstack
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -29,6 +31,12 @@ type Config struct {
 	ID   string // Unique module identifier (required)
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
+
+	// SQL is an optional filesystem containing the module's sql/ directory
+	// (typically an embed.FS from `//go:embed sql/*`). The manifest endpoint
+	// reads it to determine the latest migration version. The lifecycle
+	// routes (issue #8) will reuse it to apply migrations.
+	SQL fs.FS
 }
 
 // Module is the core SDK instance.
@@ -36,6 +44,7 @@ type Module struct {
 	config    Config
 	router    *chi.Mux
 	logger    *log.Logger
+	registry  *registry.Registry
 	poolCache *db.PoolCache // production: per-app DB pools
 	devDBOnce sync.Once     // dev mode: lazy DB init
 	devDB     *db.DB
@@ -58,6 +67,7 @@ func New(cfg Config) (*Module, error) {
 		config:     cfg,
 		router:     chi.NewRouter(),
 		logger:     log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		registry:   registry.New(),
 		poolCache:  db.NewPoolCache(),
 		cacheCache: cache.NewClientCache(),
 	}
@@ -197,23 +207,40 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 // Platform registers routes with platform auth scope.
 // Default: admin only. Use auth.RequirePermission for member/viewer access.
 func (m *Module) Platform(fn func(r chi.Router)) {
-	m.router.Group(func(r chi.Router) {
-		r.Use(auth.PlatformAuth())
-		fn(r)
-	})
+	m.scopedRoutes(registry.ScopePlatform, auth.PlatformAuth(), fn)
 }
 
 // Public registers routes with public auth scope (anyone, including anonymous).
 func (m *Module) Public(fn func(r chi.Router)) {
-	m.router.Group(fn)
+	m.scopedRoutes(registry.ScopePublic, nil, fn)
 }
 
 // Internal registers routes with internal auth scope (platform-to-module only).
 // Validates X-MS-Internal-Secret via constant-time comparison.
 func (m *Module) Internal(fn func(r chi.Router)) {
-	m.router.Group(func(r chi.Router) {
-		r.Use(auth.InternalAuth())
-		fn(r)
+	m.scopedRoutes(registry.ScopeInternal, auth.InternalAuth(), fn)
+}
+
+// scopedRoutes records every route fn registers under the given scope, then
+// re-attaches them to the main router with the scope's auth middleware.
+//
+// We use a sub-router + chi.Walk so the manifest endpoint can list every
+// declared route per scope. Walking after fn() returns gives us the full
+// route table (chi accumulates path prefixes from r.Route automatically) plus
+// each route's middleware chain, which we re-apply on the main router via
+// .With(...).Method(...) so the routing behavior is identical to the previous
+// .Group()-based implementation.
+func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
+	sub := chi.NewRouter()
+	if scopeMiddleware != nil {
+		sub.Use(scopeMiddleware)
+	}
+	fn(sub)
+
+	_ = chi.Walk(sub, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
+		m.registry.AddRoute(scope, method, route)
+		m.router.With(middlewares...).Method(method, route, handler)
+		return nil
 	})
 }
 
@@ -266,7 +293,11 @@ func (m *Module) mountSystemRoutes() {
 		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(auth.InternalAuth())
-			// manifest, lifecycle — mounted by future issues
+			r.Get("/manifest", system.ManifestHandler(
+				m.config.ID, m.config.Name, m.config.Icon,
+				m.config.SQL, m.registry,
+			))
+			// lifecycle — mounted by future issues
 		})
 	})
 }
