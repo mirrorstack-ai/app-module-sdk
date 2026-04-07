@@ -37,6 +37,33 @@ func TestAddRoute_DropsDuplicates(t *testing.T) {
 	}
 }
 
+func TestAddRoute_PanicsOnUnknownScope(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for unknown scope")
+		}
+	}()
+	r := New()
+	r.AddRoute(Scope("../etc/passwd"), "GET", "/x")
+}
+
+func TestScope_IsValid(t *testing.T) {
+	t.Parallel()
+
+	for _, valid := range []Scope{ScopePlatform, ScopePublic, ScopeInternal} {
+		if !valid.IsValid() {
+			t.Errorf("scope %q should be valid", valid)
+		}
+	}
+	for _, invalid := range []Scope{"", "Platform", "admin", "../etc"} {
+		if invalid.IsValid() {
+			t.Errorf("scope %q should NOT be valid", invalid)
+		}
+	}
+}
+
 func TestRoutes_AlwaysHasAllScopes(t *testing.T) {
 	t.Parallel()
 

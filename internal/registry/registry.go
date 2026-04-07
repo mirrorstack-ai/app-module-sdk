@@ -30,6 +30,14 @@ func AllScopes() []Scope {
 	return []Scope{ScopePlatform, ScopePublic, ScopeInternal}
 }
 
+// IsValid reports whether s is one of the three known scopes.
+// AddRoute panics on unknown scopes — the type accepts arbitrary strings,
+// but only ScopePlatform/ScopePublic/ScopeInternal are valid scope keys in
+// the manifest payload, and only SDK-internal code should be calling AddRoute.
+func (s Scope) IsValid() bool {
+	return s == ScopePlatform || s == ScopePublic || s == ScopeInternal
+}
+
 type Route struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
@@ -58,8 +66,12 @@ func New() *Registry {
 }
 
 // AddRoute records a route under the given scope. First-wins: duplicate
-// (scope, method, path) triples are dropped.
+// (scope, method, path) triples are dropped. Panics on an unknown scope —
+// only SDK-internal code calls this, so an unknown value is a programmer error.
 func (r *Registry) AddRoute(scope Scope, method, path string) {
+	if !scope.IsValid() {
+		panic("mirrorstack/registry: unknown scope " + string(scope))
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.routes[scope] {

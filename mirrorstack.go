@@ -230,6 +230,18 @@ func (m *Module) Internal(fn func(r chi.Router)) {
 // each route's middleware chain, which we re-apply on the main router via
 // .With(...).Method(...) so the routing behavior is identical to the previous
 // .Group()-based implementation.
+//
+// We rely on chi.Walk including the sub-router's Use() middlewares in the
+// callback's middlewares slice — this is how chi v5 propagates route-level
+// middleware chains. If a future chi version changes that behavior,
+// TestManifest_RegisteredScopesStillRouteCorrectly is the regression guard
+// (it asserts platform routes still return 401 without auth).
+//
+// chi.Walk only returns an error if the WalkFunc returns one — ours never
+// does. A non-nil error here would mean chi itself failed to walk its own
+// route tree, which indicates a misconfigured module that should not start.
+// Panic instead of silently leaving the registry and router in inconsistent
+// states (some routes recorded but not re-registered, or vice versa).
 func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
 	sub := chi.NewRouter()
 	if scopeMiddleware != nil {
@@ -237,11 +249,13 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 	}
 	fn(sub)
 
-	_ = chi.Walk(sub, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
+	if err := chi.Walk(sub, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
 		m.registry.AddRoute(scope, method, route)
 		m.router.With(middlewares...).Method(method, route, handler)
 		return nil
-	})
+	}); err != nil {
+		panic("mirrorstack: scopedRoutes(" + string(scope) + ") chi.Walk failed: " + err.Error())
+	}
 }
 
 // RequirePermission returns chi middleware that checks AppRole against allowed roles.

@@ -48,9 +48,11 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, reg *registry.Registry)
 		version, err := migration.LatestVersion(sqlFS)
 		if err != nil {
 			// Don't fail the manifest — return empty migration so the platform
-			// can still discover the module. Log so an unreadable sql/ dir
-			// surfaces in CloudWatch.
-			log.Printf("mirrorstack: manifest migration version: %v", err)
+			// can still discover the module. Log a sanitized message: in dev
+			// mode with os.DirFS the wrapped error would include the resolved
+			// filesystem path, which is dev-environment noise we don't want
+			// in CloudWatch. The operator can re-check Config.SQL locally.
+			log.Printf("mirrorstack: manifest migration version unavailable (check Config.SQL is set correctly)")
 		}
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{

@@ -217,10 +217,12 @@ func TestSystemPlatformRoutes_RequireInternalSecret(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
 	m, _ := New(Config{ID: "test", Name: "Test"})
 
-	// Without secret → 401
+	// Without secret → 401. Asserting exactly 401 (not just !=200) so an
+	// accidental route removal — which would return 404 — fails this test
+	// instead of providing false assurance about the auth boundary.
 	rec := doRequest(t, m.Router(), "GET", "/__mirrorstack/platform/manifest")
-	if rec.Code == 200 {
-		t.Error("expected non-200 for system platform route without secret")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without secret, got %d", rec.Code)
 	}
 }
 
