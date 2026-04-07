@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -292,7 +293,10 @@ func Slice(migrations []Migration, fromVersion, toVersion string) ([]Migration, 
 
 // SliceDown returns migrations to revert when going from fromVersion down to
 // toVersion (where toVersion < fromVersion), sorted descending so each is
-// applied newest-first. Both versions must exist in migrations.
+// applied newest-first. Both versions must be real migration numbers — unlike
+// Slice, there is no "" special case for "before everything" because a
+// downgrade always has a known current version (the caller is reversing
+// something that was installed).
 func SliceDown(migrations []Migration, fromVersion, toVersion string) ([]Migration, error) {
 	fromN, err := versionInt(fromVersion, -1)
 	if err != nil {
@@ -336,10 +340,7 @@ func versionInt(v string, empty int) (int, error) {
 }
 
 func versionExists(migrations []Migration, v string) bool {
-	for _, m := range migrations {
-		if m.Version == v {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(migrations, func(m Migration) bool {
+		return m.Version == v
+	})
 }
