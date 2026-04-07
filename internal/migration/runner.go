@@ -135,6 +135,18 @@ type TxRunner func(ctx context.Context, fn func(q db.Querier) error) error
 //
 // On the first failure, returns the partial applied/skipped lists plus the
 // error — the caller can report which migrations succeeded before the failure.
+//
+// Concurrency: two simultaneous Apply calls for the same (module, app) will
+// both read the tracking table, see the same "missing" set, and race to
+// insert. The version TEXT PRIMARY KEY constraint causes one to fail with a
+// unique violation — that caller's transaction rolls back (so the migration
+// SQL is not double-applied) and returns the error. A retry will see the
+// migration already recorded and skip it. Platform callers should treat
+// "duplicate key value violates unique constraint" on lifecycle endpoints as
+// a retryable condition. Adding an advisory lock would require holding it
+// across every per-migration transaction, which defeats the
+// resume-on-partial-failure property; the current design prefers retry over
+// serialization.
 func Apply(ctx context.Context, runTx TxRunner, fsys fs.FS, migrations []Migration) (applied, skipped []string, err error) {
 	if len(migrations) == 0 {
 		return nil, nil, nil
@@ -176,27 +188,49 @@ func Apply(ctx context.Context, runTx TxRunner, fsys fs.FS, migrations []Migrati
 
 // ApplyDown runs the .down.sql for each migration in the order given (callers
 // reverse the slice for downgrade). Each runs in its own transaction. The
-// tracking table entry is removed on success. Returns an error naming the
-// missing version if any migration has no down file.
+// tracking table entry is removed on success.
+//
+// Pre-validates BEFORE running any SQL:
+//  1. Every migration has a down file (missing → clear SDK error)
+//  2. Every migration appears in the tracking table (not in the table means
+//     the platform is asking to revert something that was never applied —
+//     likely state drift, and running the down SQL would produce a confusing
+//     Postgres error rather than a clear "not applied" signal)
+//
+// Half-applied downgrades are worse than failing fast — both guards exist to
+// surface state drift at request-time rather than mid-execution.
 func ApplyDown(ctx context.Context, runTx TxRunner, fsys fs.FS, migrations []Migration) (reverted []string, err error) {
 	if len(migrations) == 0 {
 		return nil, nil
 	}
 
-	// Verify all migrations have down files BEFORE running any of them.
-	// Half-applied downgrades are worse than failed-fast.
+	// Pre-check 1: every migration has a down file.
 	for _, mig := range migrations {
 		if mig.DownFile == "" {
 			return nil, fmt.Errorf("mirrorstack/migration: missing down file for version %s", mig.Version)
 		}
 	}
 
-	// Ensure the tracking table exists (defensive — downgrade against a
-	// never-installed module is a no-op rather than a missing-table error).
+	// Pre-check 2: every migration is recorded as applied. Read the tracking
+	// table in a short transaction; compare in Go.
+	var applied map[string]bool
 	if err := runTx(ctx, func(q db.Querier) error {
-		return EnsureTrackingTable(ctx, q)
+		if err := EnsureTrackingTable(ctx, q); err != nil {
+			return err
+		}
+		got, err := AppliedVersions(ctx, q)
+		if err != nil {
+			return err
+		}
+		applied = got
+		return nil
 	}); err != nil {
 		return nil, err
+	}
+	for _, mig := range migrations {
+		if !applied[mig.Version] {
+			return nil, fmt.Errorf("mirrorstack/migration: cannot revert %s: not recorded in tracking table (platform state may be out of sync)", mig.Version)
+		}
 	}
 
 	reverted = make([]string, 0, len(migrations))
