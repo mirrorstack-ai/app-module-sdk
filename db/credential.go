@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 type contextKey string
 
@@ -16,6 +19,20 @@ type Credential struct {
 	Database string `json:"database"`
 	Username string `json:"username"`
 	Token    string `json:"token"`
+}
+
+// validate checks that all required fields are populated.
+func (c Credential) validate() error {
+	if c.Host == "" || c.Port == 0 || c.Database == "" || c.Username == "" || c.Token == "" {
+		return fmt.Errorf("mirrorstack/db: credential missing required fields (host=%q port=%d db=%q user=%q)", c.Host, c.Port, c.Database, c.Username)
+	}
+	return nil
+}
+
+// cacheKey returns the PoolCache key for this credential. Token is intentionally
+// excluded so token rotation reuses the existing pool rather than churning it.
+func (c Credential) cacheKey() string {
+	return fmt.Sprintf("%s:%d/%s/%s", c.Host, c.Port, c.Database, c.Username)
 }
 
 // WithSchema returns a context with the app schema set.
