@@ -11,18 +11,26 @@
 package migration
 
 import (
-	"errors"
-	"fmt"
 	"io/fs"
 	"regexp"
-	"strconv"
 )
 
-// migrationFilePattern matches files named like "0000_initial.up.sql".
-// The leading numeric prefix is the version. Down-migration files
-// (".down.sql") are intentionally excluded — only up-files determine the
-// current schema version.
-var migrationFilePattern = regexp.MustCompile(`^(\d+)_.*\.up\.sql$`)
+// upFilePattern matches up-migration files named like "0000_initial.up.sql".
+// The leading numeric prefix is the version, the middle slug is the human name.
+var upFilePattern = regexp.MustCompile(`^(\d+)_(.+)\.up\.sql$`)
+
+// downFilePattern matches the corresponding down-migration files.
+var downFilePattern = regexp.MustCompile(`^(\d+)_(.+)\.down\.sql$`)
+
+// parseUpFilename extracts (version, name) from an up-migration filename.
+// Returns ok=false if the filename does not match the expected pattern.
+func parseUpFilename(name string) (version, slug string, ok bool) {
+	m := upFilePattern.FindStringSubmatch(name)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
 
 // LatestVersion returns the highest migration version string in the sql/
 // directory of fsys. Returns "" if fsys is nil, the sql/ directory does not
@@ -33,37 +41,10 @@ var migrationFilePattern = regexp.MustCompile(`^(\d+)_.*\.up\.sql$`)
 // module developer wrote. Versions are compared numerically — a module that
 // mixes widths ("9", "10") still resolves correctly.
 func LatestVersion(fsys fs.FS) (string, error) {
-	if fsys == nil {
-		return "", nil
+	migrations, err := List(fsys)
+	if err != nil || len(migrations) == 0 {
+		return "", err
 	}
-	entries, err := fs.ReadDir(fsys, "sql")
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", nil
-		}
-		return "", fmt.Errorf("mirrorstack/migration: read sql/ dir: %w", err)
-	}
-
-	var (
-		bestStr string
-		bestNum = -1
-	)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		m := migrationFilePattern.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue
-		}
-		n, err := strconv.Atoi(m[1])
-		if err != nil {
-			continue
-		}
-		if n > bestNum {
-			bestNum = n
-			bestStr = m[1]
-		}
-	}
-	return bestStr, nil
+	// List sorts ascending; the last entry is the highest.
+	return migrations[len(migrations)-1].Version, nil
 }

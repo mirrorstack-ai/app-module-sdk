@@ -34,9 +34,16 @@ type Config struct {
 
 	// SQL is an optional filesystem containing the module's sql/ directory
 	// (typically an embed.FS from `//go:embed sql/*`). The manifest endpoint
-	// reads it to determine the latest migration version. The lifecycle
-	// routes (issue #8) will reuse it to apply migrations.
+	// reads it to determine the latest migration version, and the lifecycle
+	// routes (install/upgrade/downgrade) read it to apply migrations.
 	SQL fs.FS
+
+	// Versions optionally maps semver release tags to migration numbers
+	// (e.g., {"v0.1.0": "0008", "v0.2.0": "0012"}). The platform-side
+	// lifecycle calls send semver in {from, to}; the SDK resolves them via
+	// this map. Inputs not in the map are used as migration numbers directly,
+	// so this field is optional.
+	Versions map[string]string
 }
 
 // Module is the core SDK instance.
@@ -311,7 +318,12 @@ func (m *Module) mountSystemRoutes() {
 				m.config.ID, m.config.Name, m.config.Icon,
 				m.config.SQL, m.registry,
 			))
-			// lifecycle — mounted by future issues
+			r.Route("/lifecycle", func(r chi.Router) {
+				r.Post("/install", system.InstallHandler(m.config.SQL, m.Tx))
+				r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, m.config.Versions, m.Tx))
+				r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, m.config.Versions, m.Tx))
+				r.Post("/uninstall", system.UninstallHandler())
+			})
 		})
 	})
 }
