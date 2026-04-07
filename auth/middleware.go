@@ -36,6 +36,9 @@ func PublicAuth() func(http.Handler) http.Handler {
 func InternalAuth() func(http.Handler) http.Handler {
 	expected := os.Getenv("MS_INTERNAL_SECRET")
 	if expected == "" {
+		// SECURITY: never echo the `expected` value (or any prefix/suffix of it)
+		// in this log line — Lambda log output goes to CloudWatch which is
+		// commonly accessible to many roles in the org.
 		log.Printf("mirrorstack: WARNING — MS_INTERNAL_SECRET not set, all internal routes will be rejected")
 	}
 

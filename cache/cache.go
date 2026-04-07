@@ -23,12 +23,13 @@ const defaultDevURL = "redis://localhost:6379"
 // ErrCacheMiss is returned by Get when the key does not exist.
 var ErrCacheMiss = errors.New("mirrorstack/cache: key not found")
 
-// Cacher is the interface for cache operations.
+// Cacher is the interface module developers see when they call Module.Cache(ctx).
+// Close is intentionally NOT exposed: the underlying *Client is owned by the SDK's
+// ClientCache and must not be closed by handler code.
 type Cacher interface {
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	Get(ctx context.Context, key string) (string, error)
 	Del(ctx context.Context, key string) error
-	Close() error
 }
 
 // Client wraps a go-redis client with app-scoped key prefixing.
@@ -68,6 +69,9 @@ func New(ctx context.Context, redisURL string) (*Client, error) {
 // NewFromCredential creates a Client from platform-injected credentials.
 // Enforces TLS for production ElastiCache connections.
 func NewFromCredential(ctx context.Context, cred Credential) (*Client, error) {
+	if err := cred.validate(); err != nil {
+		return nil, err
+	}
 	opts := &redis.Options{
 		Addr:      cred.Endpoint,
 		Username:  cred.Username,
