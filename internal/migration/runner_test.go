@@ -205,9 +205,11 @@ func TestSliceDown_RequiresFromGreaterThanTo(t *testing.T) {
 	}
 }
 
-// Apply / ApplyDown / EnsureTrackingTable / AppliedVersions are tested via
-// integration tests against a real Postgres in db_integration_test.go and via
-// the end-to-end lifecycle tests in mirrorstack_test.go.
+// Apply / ApplyDown are exercised end-to-end via the lifecycle HTTP tests in
+// mirrorstack_test.go (which stub the runner) and in-process against an empty
+// fs in system/lifecycle_test.go. The runner is a stateless executor — the
+// platform owns version tracking state, so there is no EnsureTrackingTable or
+// AppliedVersions equivalent to exercise here.
 
 func versions(migs []Migration) []string {
 	out := make([]string, len(migs))

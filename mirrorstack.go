@@ -39,10 +39,11 @@ type Config struct {
 	SQL fs.FS
 
 	// Versions optionally maps semver release tags to migration numbers
-	// (e.g., {"v0.1.0": "0008", "v0.2.0": "0012"}). The platform-side
-	// lifecycle calls send semver in {from, to}; the SDK resolves them via
-	// this map. Inputs not in the map are used as migration numbers directly,
-	// so this field is optional.
+	// (e.g., {"v0.1.0": "0008", "v0.2.0": "0012"}). Exposed to the platform
+	// via the manifest endpoint so the platform can translate its internal
+	// semver-based deploy state into the migration numbers the lifecycle
+	// handlers accept. The SDK itself never reads this map at lifecycle
+	// time — /lifecycle/{upgrade,downgrade} take migration numbers only.
 	Versions map[string]string
 }
 
@@ -316,12 +317,12 @@ func (m *Module) mountSystemRoutes() {
 			r.Use(auth.InternalAuth())
 			r.Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Name, m.config.Icon,
-				m.config.SQL, m.registry,
+				m.config.SQL, m.config.Versions, m.registry,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
 				r.Post("/install", system.InstallHandler(m.config.SQL, m.Tx))
-				r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, m.config.Versions, m.Tx))
-				r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, m.config.Versions, m.Tx))
+				r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, m.Tx))
+				r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, m.Tx))
 				r.Post("/uninstall", system.UninstallHandler())
 			})
 		})

@@ -1,6 +1,12 @@
-// Package migration reads the module's sql/ directory to determine the
-// latest migration version. The version is exposed via the manifest endpoint
-// so the platform can map module versions to migration numbers on deploy.
+// Package migration reads the module's sql/ directory, exposes the latest
+// migration version for the manifest endpoint, and applies up/down migrations
+// as a stateless executor.
+//
+// The SDK does NOT maintain a tracking table and does NOT know which
+// migrations were previously applied. The platform's control plane owns that
+// state and passes explicit {from, to} ranges to the lifecycle handlers; this
+// package just reads the requested slice of SQL files and runs them inside a
+// per-migration transaction.
 //
 // Module developers embed their migrations via:
 //
@@ -22,11 +28,21 @@ var upFilePattern = regexp.MustCompile(`^(\d+)_(.+)\.up\.sql$`)
 // downFilePattern matches the corresponding down-migration files.
 var downFilePattern = regexp.MustCompile(`^(\d+)_(.+)\.down\.sql$`)
 
+// maxSlugLen caps the human-readable portion of a migration filename. The
+// slug has no functional purpose beyond documentation; a 255-byte limit is
+// plenty for descriptive names and prevents unbounded slug storage if a
+// developer ever ships absurdly long filenames.
+const maxSlugLen = 255
+
 // parseUpFilename extracts (version, name) from an up-migration filename.
-// Returns ok=false if the filename does not match the expected pattern.
+// Returns ok=false if the filename does not match the expected pattern or
+// if the slug portion exceeds maxSlugLen.
 func parseUpFilename(name string) (version, slug string, ok bool) {
 	m := upFilePattern.FindStringSubmatch(name)
 	if m == nil {
+		return "", "", false
+	}
+	if len(m[2]) > maxSlugLen {
 		return "", "", false
 	}
 	return m[1], m[2], true

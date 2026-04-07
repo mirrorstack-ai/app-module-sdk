@@ -19,9 +19,9 @@ import (
 // Tests in this file use empty (or near-empty) sqlFS specifically so that
 // List/Slice return empty slices and Apply/ApplyDown short-circuit BEFORE
 // touching the runner. The stub asserts that contract: if a future refactor
-// makes Apply call runTx unconditionally (e.g., to pre-warm the tracking
-// table outside the slice loop), these tests will fail loudly rather than
-// silently exercise an unintended SQL path.
+// makes Apply call runTx unconditionally (e.g., to pre-warm state outside
+// the slice loop), these tests will fail loudly rather than silently
+// exercise an unintended SQL path.
 //
 // For tests that legitimately need to drive the runner (Apply/ApplyDown
 // against a real DB), use integration-tagged tests with a real Postgres,
@@ -31,27 +31,6 @@ func noopTxRunner(t *testing.T) migration.TxRunner {
 		t.Helper()
 		t.Errorf("TxRunner unexpectedly called — test assumed empty sqlFS would short-circuit before SQL execution")
 		return nil
-	}
-}
-
-func TestResolveVersion(t *testing.T) {
-	t.Parallel()
-
-	versions := map[string]string{"v0.1.0": "0008", "v0.2.0": "0012"}
-
-	if got := resolveVersion(versions, "v0.1.0"); got != "0008" {
-		t.Errorf("resolveVersion(v0.1.0) = %q, want 0008", got)
-	}
-	if got := resolveVersion(versions, "v0.2.0"); got != "0012" {
-		t.Errorf("resolveVersion(v0.2.0) = %q, want 0012", got)
-	}
-	// Pass-through: unknown input returned as-is (callers can pass migration numbers).
-	if got := resolveVersion(versions, "0042"); got != "0042" {
-		t.Errorf("resolveVersion(0042) = %q, want 0042 (pass-through)", got)
-	}
-	// Nil map: pass-through.
-	if got := resolveVersion(nil, "v0.1.0"); got != "v0.1.0" {
-		t.Errorf("resolveVersion(nil, v0.1.0) = %q, want v0.1.0", got)
 	}
 }
 
@@ -92,12 +71,44 @@ func TestUpgradeHandler_RequiresFromTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(nil, nil, noopTxRunner(t))
+			h := UpgradeHandler(nil, noopTxRunner(t))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
 			if rec.Code != 400 {
 				t.Errorf("status = %d, want 400 for body %q", rec.Code, tc.body)
+			}
+		})
+	}
+}
+
+func TestUpgradeHandler_RejectsSemver(t *testing.T) {
+	t.Parallel()
+
+	// The platform is responsible for semver→migration translation before
+	// calling the SDK — the handler must refuse non-numeric versions rather
+	// than silently pass them through. Error message hints at the fix so a
+	// caller who wired the pipe wrong sees it immediately.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"semver from", `{"from": "v0.1.0", "to": "0008"}`},
+		{"semver to", `{"from": "0000", "to": "v0.1.0"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := UpgradeHandler(nil, noopTxRunner(t))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for semver input", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), "migration number") {
+				t.Errorf("error body = %q, want hint about migration numbers", rec.Body.String())
 			}
 		})
 	}
@@ -110,7 +121,7 @@ func TestUpgradeHandler_UnknownTarget(t *testing.T) {
 	// doesn't exist in the (empty) migrations list. The handler must
 	// translate the runner's error into a 400 (caller asked for something
 	// the module doesn't have).
-	h := UpgradeHandler(nil, nil, noopTxRunner(t))
+	h := UpgradeHandler(nil, noopTxRunner(t))
 	body := strings.NewReader(`{"from": "0000", "to": "0001"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -120,26 +131,22 @@ func TestUpgradeHandler_UnknownTarget(t *testing.T) {
 	}
 }
 
-func TestUpgradeHandler_ResolvesSemver(t *testing.T) {
+func TestUpgradeHandler_NoOp(t *testing.T) {
 	t.Parallel()
 
-	// Use a tiny sqlFS so Slice can find the target version.
+	// from == to (both present in sqlFS) → Slice returns empty → Apply
+	// short-circuits before the runner is called → 200 with empty Applied.
+	// This exercises the happy-path wiring without needing a real DB.
 	fsys := fstest.MapFS{
 		"sql/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	versions := map[string]string{"v0.1.0": "0008"}
-
-	// Upgrade from "" (no current) to "v0.1.0" → resolves to 0008 → Slice returns [0008]
-	// → Apply tries to run it. We can't actually execute SQL without a real DB,
-	// so this test verifies the *resolution* path by passing an explicit "from"
-	// at 0008 too — Slice returns empty → Apply short-circuits → 200 OK.
-	h := UpgradeHandler(fsys, versions, noopTxRunner(t))
-	body := strings.NewReader(`{"from": "v0.1.0", "to": "v0.1.0"}`)
+	h := UpgradeHandler(fsys, noopTxRunner(t))
+	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
 
 	if rec.Code != 200 {
-		t.Errorf("status = %d, want 200 (no-op upgrade after semver resolution)", rec.Code)
+		t.Errorf("status = %d, want 200 (no-op upgrade)", rec.Code)
 	}
 	var got LifecycleResult
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
@@ -155,7 +162,7 @@ func TestDowngradeHandler_RequiresFromGreaterThanTo(t *testing.T) {
 		"sql/0001_a.up.sql":   &fstest.MapFile{Data: []byte("")},
 		"sql/0001_a.down.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	h := DowngradeHandler(fsys, nil, noopTxRunner(t))
+	h := DowngradeHandler(fsys, noopTxRunner(t))
 
 	// from=0001, to=0001 → not a downgrade → 400
 	body := strings.NewReader(`{"from": "0001", "to": "0001"}`)
