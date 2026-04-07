@@ -222,12 +222,12 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 ### System routes (`/__mirrorstack/`)
 
 - [x] `health` — health check
-- [ ] `platform/manifest` — module identity + capabilities
+- [x] `platform/manifest` — module identity + capabilities
 - [ ] `platform/meter` — custom business metrics
-- [ ] `platform/lifecycle/install` — fresh install on an app
-- [ ] `platform/lifecycle/upgrade` — upgrade between versions
-- [ ] `platform/lifecycle/downgrade` — rollback between versions
-- [ ] `platform/lifecycle/uninstall` — soft-delete removal
+- [x] `platform/lifecycle/install` — fresh install on an app
+- [x] `platform/lifecycle/upgrade` — upgrade between versions
+- [x] `platform/lifecycle/downgrade` — rollback between versions
+- [x] `platform/lifecycle/uninstall` — soft-delete removal
 
 ### MCP integration
 
