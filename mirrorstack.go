@@ -36,15 +36,14 @@ type Module struct {
 	config    Config
 	router    *chi.Mux
 	logger    *log.Logger
-	poolCache *db.PoolCache  // production: per-app DB pools
-	devDBOnce sync.Once      // dev mode: lazy DB init
+	poolCache *db.PoolCache // production: per-app DB pools
+	devDBOnce sync.Once     // dev mode: lazy DB init
 	devDB     *db.DB
 	devDBErr  error
-	devCacheOnce sync.Once                // dev mode: lazy cache init
+	cacheCache   *cache.ClientCache // production: per-app Redis clients
+	devCacheOnce sync.Once          // dev mode: lazy cache init
 	devCache     *cache.Client
 	devCacheErr  error
-	prodCacheMap map[string]*cache.Client // production: keyed by endpoint|username
-	prodCacheMu  sync.Mutex
 	devStorageOnce sync.Once // dev mode: lazy storage init
 	devStorage     *storage.Client
 	devStorageErr  error
@@ -56,10 +55,11 @@ func New(cfg Config) (*Module, error) {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
 	m := &Module{
-		config:    cfg,
-		router:    chi.NewRouter(),
-		logger:    log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
-		poolCache: db.NewPoolCache(),
+		config:     cfg,
+		router:     chi.NewRouter(),
+		logger:     log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		poolCache:  db.NewPoolCache(),
+		cacheCache: cache.NewClientCache(),
 	}
 	m.mountSystemRoutes()
 	return m, nil
@@ -132,47 +132,38 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error)
 
 // Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
 //
-//	c, err := mod.Cache(r.Context())
+//	c, release, err := mod.Cache(r.Context())
 //	if err != nil { ... }
-//	c.Set("views:123", "42", 5*time.Minute)
-//	val, err := c.Get("views:123")
-func (m *Module) Cache(ctx context.Context) (cache.Cacher, error) {
-	client, err := m.resolveCache(ctx)
+//	defer release()
+//	c.Set(ctx, "views:123", "42", 5*time.Minute)
+//	val, err := c.Get(ctx, "views:123")
+func (m *Module) Cache(ctx context.Context) (cache.Cacher, func(), error) {
+	client, releaseClient, err := m.resolveCache(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Always apply prefix — never return unprefixed base client
 	appID := ""
 	if a := auth.Get(ctx); a != nil {
 		appID = a.AppID
 	}
-	return client.ForApp(appID, m.config.ID), nil
+	return client.ForApp(appID, m.config.ID), releaseClient, nil
 }
 
-func (m *Module) resolveCache(ctx context.Context) (*cache.Client, error) {
-	// Production: credential from Lambda payload, keyed by endpoint|username
+// resolveCache returns the underlying cache client and a release closure.
+// Production uses ClientCache (refcount-pinned). Dev uses a single shared
+// client (no-op release).
+func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error) {
 	if cred := cache.CredentialFrom(ctx); cred != nil {
-		key := cred.Endpoint + "|" + cred.Username
-		m.prodCacheMu.Lock()
-		defer m.prodCacheMu.Unlock()
-		if m.prodCacheMap == nil {
-			m.prodCacheMap = make(map[string]*cache.Client)
-		}
-		if c, ok := m.prodCacheMap[key]; ok {
-			return c, nil
-		}
-		c, err := cache.NewFromCredential(context.Background(), *cred)
-		if err != nil {
-			return nil, err
-		}
-		m.prodCacheMap[key] = c
-		return c, nil
+		return m.cacheCache.Get(ctx, *cred)
 	}
-	// Dev: REDIS_URL env var
 	m.devCacheOnce.Do(func() {
 		m.devCache, m.devCacheErr = cache.Open(context.Background())
 	})
-	return m.devCache, m.devCacheErr
+	if m.devCacheErr != nil {
+		return nil, nil, m.devCacheErr
+	}
+	return m.devCache, func() {}, nil
 }
 
 // Storage returns a scoped storage client. Keys are auto-prefixed with the app/module path.
@@ -262,12 +253,9 @@ func (m *Module) Close() {
 	if m.devDB != nil {
 		m.devDB.Close()
 	}
-	m.prodCacheMu.Lock()
-	for k, c := range m.prodCacheMap {
-		c.Close()
-		delete(m.prodCacheMap, k)
+	if m.cacheCache != nil {
+		m.cacheCache.Close()
 	}
-	m.prodCacheMu.Unlock()
 	if m.devCache != nil {
 		m.devCache.Close()
 	}
@@ -326,7 +314,7 @@ func Tx(ctx context.Context, fn func(q db.Querier) error) error {
 }
 
 // Cache returns a scoped cache client on the default module.
-func Cache(ctx context.Context) (cache.Cacher, error) {
+func Cache(ctx context.Context) (cache.Cacher, func(), error) {
 	return mustDefault("Cache").Cache(ctx)
 }
 
