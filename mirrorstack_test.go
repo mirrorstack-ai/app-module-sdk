@@ -1,6 +1,7 @@
 package mirrorstack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -556,6 +558,8 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
 		"Emits":             func() { Emits("created") },
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
+		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
+		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -566,6 +570,31 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 				}
 			}()
 			fn()
+		})
+	}
+}
+
+func TestModule_ModuleSchema(t *testing.T) {
+	t.Parallel()
+
+	// Pin the schema-naming convention: mod_<id>. The platform's per-module
+	// DB role provisioning depends on this exact format being predictable
+	// from Config.ID alone — a future change here would require lockstep
+	// updates to platform-side role-creation scripts.
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"media", "mod_media"},
+		{"oauth", "mod_oauth"},
+		{"billing_engine", "mod_billing_engine"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			m, _ := New(Config{ID: tc.id})
+			if got := m.moduleSchema(); got != tc.want {
+				t.Errorf("moduleSchema() = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }
