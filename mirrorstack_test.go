@@ -484,6 +484,9 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
 		"RequirePermission": func() { RequirePermission("media.view", "admin") },
+		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
+		"Emit":              func() { Emit("created") },
+		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {

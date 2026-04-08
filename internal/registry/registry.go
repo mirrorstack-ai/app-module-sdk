@@ -45,9 +45,13 @@ type Route struct {
 	Path   string `json:"path"`
 }
 
+// Schedule is a cron job declaration. Path is the URL the platform's
+// scheduler invokes (POSTs to) when the cron fires; the SDK auto-derives
+// it as /crons/{name} on the module's Internal scope.
 type Schedule struct {
 	Name string `json:"name"`
 	Cron string `json:"cron"`
+	Path string `json:"path"`
 }
 
 // Permission is a declared module permission. Exposed in the manifest so the
@@ -153,7 +157,7 @@ func (r *Registry) Subscribes() map[string]string {
 
 // AddSchedule registers a cron job. First-wins by name: a second
 // AddSchedule with the same name is dropped.
-func (r *Registry) AddSchedule(name, cron string) {
+func (r *Registry) AddSchedule(name, cron, path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.schedules {
@@ -161,7 +165,39 @@ func (r *Registry) AddSchedule(name, cron string) {
 			return
 		}
 	}
-	r.schedules = append(r.schedules, Schedule{Name: name, Cron: cron})
+	r.schedules = append(r.schedules, Schedule{Name: name, Cron: cron, Path: path})
+}
+
+// HasSubscribe reports whether an event subscription is already registered
+// under the given name. Used by Module.OnEvent to fail loudly on duplicate
+// registrations rather than letting the silent first-wins behavior hide a
+// programmer mistake.
+func (r *Registry) HasSubscribe(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, exists := r.subscribes[name]
+	return exists
+}
+
+// HasEmit reports whether an emit declaration is already registered under
+// the given name. See HasSubscribe for the rationale.
+func (r *Registry) HasEmit(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return slices.Contains(r.emits, name)
+}
+
+// HasSchedule reports whether a cron job is already registered under the
+// given name. See HasSubscribe for the rationale.
+func (r *Registry) HasSchedule(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.schedules {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Schedules returns a non-nil copy of all scheduled jobs.

@@ -1,0 +1,204 @@
+package mirrorstack
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/mirrorstack-ai/app-module-sdk/system"
+)
+
+func TestOnEvent_HandlerReachableViaInternalScope(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media"})
+
+	called := false
+	m.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/events/oauth.user_deleted", "secret")
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if !called {
+		t.Error("OnEvent handler was not invoked")
+	}
+}
+
+func TestOnEvent_RequiresInternalSecret(t *testing.T) {
+	// Defense-in-depth: events are mounted on the Internal scope, so the
+	// InternalAuth gate must reject unauthenticated callers. If a future
+	// refactor accidentally moves OnEvent to a public-scope mount, this
+	// test fails immediately.
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media"})
+
+	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not run without internal secret")
+	})
+
+	rec := doRequest(t, m.Router(), "POST", "/events/user.created")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (no secret)", rec.Code)
+	}
+}
+
+func TestOnEvent_AppearsInManifestSubscribes(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media"})
+
+	m.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {})
+	m.OnEvent("billing.payment_succeeded", func(w http.ResponseWriter, r *http.Request) {})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	if got.Events.Subscribes["oauth.user_deleted"] != "/events/oauth.user_deleted" {
+		t.Errorf("subscribes[oauth.user_deleted] = %q, want /events/oauth.user_deleted", got.Events.Subscribes["oauth.user_deleted"])
+	}
+	if got.Events.Subscribes["billing.payment_succeeded"] != "/events/billing.payment_succeeded" {
+		t.Errorf("subscribes[billing.payment_succeeded] = %q", got.Events.Subscribes["billing.payment_succeeded"])
+	}
+}
+
+func TestOnEvent_PanicsOnDuplicate(t *testing.T) {
+	m, _ := New(Config{ID: "media"})
+	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {})
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on duplicate OnEvent")
+		}
+	}()
+	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {})
+}
+
+func TestEmit_AppearsInManifestEmits(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media"})
+
+	m.Emit("created")
+	m.Emit("deleted")
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	if len(got.Events.Emits) != 2 {
+		t.Fatalf("emits = %v, want 2", got.Events.Emits)
+	}
+	want := map[string]bool{"created": true, "deleted": true}
+	for _, e := range got.Events.Emits {
+		if !want[e] {
+			t.Errorf("unexpected emit %q", e)
+		}
+	}
+}
+
+func TestEmit_PanicsOnDuplicate(t *testing.T) {
+	m, _ := New(Config{ID: "media"})
+	m.Emit("created")
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on duplicate Emit")
+		}
+	}()
+	m.Emit("created")
+}
+
+func TestEvent_TopLevelPanicsBeforeInit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   func()
+	}{
+		{"OnEvent", func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) }},
+		{"Emit", func() { Emit("created") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetDefault(t)
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("expected panic for top-level %s before Init", tc.name)
+				}
+			}()
+			tc.fn()
+		})
+	}
+}
+
+func TestOnEvent_PanicsOnPathInjection(t *testing.T) {
+	// SECURITY regression guard: a name like "../admin" used to chi-normalize
+	// the registered pattern to "/admin", letting the handler escape the
+	// /events/ namespace AND making the manifest disagree with the actual
+	// route. validateRegistrationName now blocks this at the API boundary.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"space", "foo bar"},
+		{"newline", "foo\nbar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := New(Config{ID: "media"})
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("expected panic for event name %q", tc.bad)
+				}
+			}()
+			m.OnEvent(tc.bad, func(w http.ResponseWriter, r *http.Request) {})
+		})
+	}
+}
+
+func TestEmit_PanicsOnPathInjection(t *testing.T) {
+	// Emit doesn't mount a route, but its name is still developer-facing in
+	// the manifest payload — same validation rules apply for consistency
+	// and to catch typos at startup.
+	m, _ := New(Config{ID: "media"})
+	for _, bad := range []string{"", "../admin", "foo/bar", "foo bar"} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("expected panic for emit name %q", bad)
+				}
+			}()
+			m.Emit(bad)
+		}()
+	}
+}
+
+func TestModulesIsolated_OnEvent(t *testing.T) {
+	// Two modules in the same process must not see each other's event
+	// subscriptions in the manifest. This mirrors the test isolation
+	// guarantee from #28 (per-Module registry, no package globals).
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m1, _ := New(Config{ID: "media"})
+	m2, _ := New(Config{ID: "billing"})
+
+	m1.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {})
+	m2.OnEvent("media.uploaded", func(w http.ResponseWriter, r *http.Request) {})
+
+	rec := doRequestWithSecret(t, m1.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+
+	if _, ok := got.Events.Subscribes["media.uploaded"]; ok {
+		t.Error("m1 manifest leaked m2's event subscription")
+	}
+	if _, ok := got.Events.Subscribes["oauth.user_deleted"]; !ok {
+		t.Error("m1 manifest missing its own subscription")
+	}
+}

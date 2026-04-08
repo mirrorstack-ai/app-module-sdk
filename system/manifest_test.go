@@ -86,7 +86,7 @@ func TestManifest_EventsAndSchedules(t *testing.T) {
 	reg := registry.New()
 	reg.AddEmit("created")
 	reg.AddSubscribe("oauth.user_deleted", "/internal/events/on-user-deleted")
-	reg.AddSchedule("cleanup-temp", "0 3 * * *")
+	reg.AddSchedule("cleanup-temp", "0 3 * * *", "/crons/cleanup-temp")
 
 	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
 
@@ -96,8 +96,8 @@ func TestManifest_EventsAndSchedules(t *testing.T) {
 	if got.Events.Subscribes["oauth.user_deleted"] != "/internal/events/on-user-deleted" {
 		t.Errorf("events.subscribes mismatch: %v", got.Events.Subscribes)
 	}
-	if len(got.Schedules) != 1 || got.Schedules[0].Name != "cleanup-temp" {
-		t.Errorf("schedules = %v, want [{cleanup-temp ...}]", got.Schedules)
+	if len(got.Schedules) != 1 || got.Schedules[0].Name != "cleanup-temp" || got.Schedules[0].Path != "/crons/cleanup-temp" {
+		t.Errorf("schedules = %v, want [{cleanup-temp 0 3 * * * /crons/cleanup-temp}]", got.Schedules)
 	}
 }
 

@@ -175,15 +175,15 @@ func TestSchedules_Recorded(t *testing.T) {
 	t.Parallel()
 
 	r := New()
-	r.AddSchedule("cleanup-temp", "0 3 * * *")
-	r.AddSchedule("daily-report", "0 9 * * *")
+	r.AddSchedule("cleanup-temp", "0 3 * * *", "/crons/cleanup-temp")
+	r.AddSchedule("daily-report", "0 9 * * *", "/crons/daily-report")
 
 	got := r.Schedules()
 	if len(got) != 2 {
 		t.Fatalf("schedules = %v, want 2", got)
 	}
-	if got[0].Name != "cleanup-temp" || got[0].Cron != "0 3 * * *" {
-		t.Errorf("schedules[0] = %+v, want {cleanup-temp, 0 3 * * *}", got[0])
+	if got[0].Name != "cleanup-temp" || got[0].Cron != "0 3 * * *" || got[0].Path != "/crons/cleanup-temp" {
+		t.Errorf("schedules[0] = %+v, want {cleanup-temp, 0 3 * * *, /crons/cleanup-temp}", got[0])
 	}
 }
 
@@ -193,8 +193,8 @@ func TestSchedules_DropsDuplicateNames(t *testing.T) {
 	// Two schedules with the same name (even with different crons) is a
 	// configuration mistake — first-wins matches AddRoute / AddEmit.
 	r := New()
-	r.AddSchedule("cleanup", "0 3 * * *")
-	r.AddSchedule("cleanup", "0 5 * * *")
+	r.AddSchedule("cleanup", "0 3 * * *", "/crons/cleanup")
+	r.AddSchedule("cleanup", "0 5 * * *", "/crons/cleanup-other")
 
 	got := r.Schedules()
 	if len(got) != 1 {
@@ -209,6 +209,43 @@ func TestSchedules_EmptyReturnsNonNil(t *testing.T) {
 	t.Parallel()
 	if got := New().Schedules(); got == nil {
 		t.Error("empty Schedules() returned nil, want []Schedule{}")
+	}
+}
+
+func TestHasSubscribe_HasEmit_HasSchedule(t *testing.T) {
+	t.Parallel()
+
+	// Has* helpers exist so the user-facing event/cron API can panic on
+	// duplicate registrations cheaply, without paying for a deep clone of
+	// the whole map/slice.
+	r := New()
+	if r.HasSubscribe("user.created") {
+		t.Error("empty registry should not report HasSubscribe")
+	}
+	if r.HasEmit("media.uploaded") {
+		t.Error("empty registry should not report HasEmit")
+	}
+	if r.HasSchedule("nightly") {
+		t.Error("empty registry should not report HasSchedule")
+	}
+
+	r.AddSubscribe("user.created", "/events/user.created")
+	r.AddEmit("media.uploaded")
+	r.AddSchedule("nightly", "0 3 * * *", "/crons/nightly")
+
+	if !r.HasSubscribe("user.created") {
+		t.Error("HasSubscribe should return true after AddSubscribe")
+	}
+	if !r.HasEmit("media.uploaded") {
+		t.Error("HasEmit should return true after AddEmit")
+	}
+	if !r.HasSchedule("nightly") {
+		t.Error("HasSchedule should return true after AddSchedule")
+	}
+
+	// Spot-check non-matches stay false (no false positives via prefix etc.)
+	if r.HasSubscribe("user") {
+		t.Error("HasSubscribe should not match prefixes")
 	}
 }
 

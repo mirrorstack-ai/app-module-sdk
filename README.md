@@ -215,9 +215,9 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 ### Events & scheduling
 
-- [ ] `ms.OnEvent()` — subscribe to events from other modules
-- [ ] `ms.Emit()` — declare emitted events
-- [ ] `ms.Cron()` — register scheduled jobs
+- [x] `ms.OnEvent()` — subscribe to events from other modules
+- [x] `ms.Emit()` — declare emitted events
+- [x] `ms.Cron()` — register scheduled jobs
 
 ### System routes (`/__mirrorstack/`)
 
