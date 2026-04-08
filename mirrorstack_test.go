@@ -355,8 +355,8 @@ func TestManifest_RoutesFromAllScopes_RegisteredViaModule(t *testing.T) {
 func TestManifest_MigrationFromConfig(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	sqlFS := fstest.MapFS{
-		"sql/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
-		"sql/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+		"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/app/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
 	m, _ := New(Config{ID: "media", Name: "Media", SQL: sqlFS})
 

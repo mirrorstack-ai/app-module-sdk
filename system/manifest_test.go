@@ -121,8 +121,8 @@ func TestManifest_MigrationVersion(t *testing.T) {
 	t.Parallel()
 
 	fsys := fstest.MapFS{
-		"sql/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
-		"sql/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+		"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/app/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
 
 	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", fsys, nil, registry.New()))

@@ -60,7 +60,7 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]str
 		versions = map[string]string{}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		version, err := migration.LatestVersion(sqlFS)
+		version, err := migration.LatestVersion(sqlFS, migration.ScopeApp)
 		if err != nil {
 			// Don't fail the manifest — return empty migration so the platform
 			// can still discover the module. Log a sanitized message: in dev

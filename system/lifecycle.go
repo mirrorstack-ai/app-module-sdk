@@ -52,7 +52,7 @@ type UninstallResult struct {
 // for preventing that.
 func InstallHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		migrations, err := migration.List(sqlFS)
+		migrations, err := migration.List(sqlFS, migration.ScopeApp)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
@@ -80,7 +80,7 @@ func UpgradeHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
 			return
 		}
 
-		migrations, err := migration.List(sqlFS)
+		migrations, err := migration.List(sqlFS, migration.ScopeApp)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
@@ -113,7 +113,7 @@ func DowngradeHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
 			return
 		}
 
-		migrations, err := migration.List(sqlFS)
+		migrations, err := migration.List(sqlFS, migration.ScopeApp)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
