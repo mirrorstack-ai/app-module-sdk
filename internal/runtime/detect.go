@@ -1,10 +1,10 @@
 package runtime
 
-import "os"
+import "github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 
 // isLambda is evaluated once at process start. The Lambda environment
 // variable is set by the runtime and never changes.
-var isLambda = os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != ""
+var isLambda = lambdaenv.IsSet()
 
 // IsLambda reports whether the process is running inside AWS Lambda.
 func IsLambda() bool { return isLambda }

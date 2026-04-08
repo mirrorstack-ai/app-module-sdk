@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
 // Storer is the interface for storage operations.
@@ -98,7 +100,7 @@ func NewFromCredential(cred Credential) (*Client, error) {
 // Open creates a Client from env vars for dev mode.
 // Cannot be used in Lambda — credentials are injected per invocation.
 func Open(ctx context.Context) (*Client, error) {
-	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+	if lambdaenv.IsSet() {
 		return nil, fmt.Errorf("mirrorstack/storage: Open() cannot be used in Lambda — credentials are injected per-invocation")
 	}
 
