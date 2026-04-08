@@ -212,40 +212,94 @@ func TestSchedules_EmptyReturnsNonNil(t *testing.T) {
 	}
 }
 
-func TestHasSubscribe_HasEmit_HasSchedule(t *testing.T) {
+func TestAddX_ReturnBoolForFirstWins(t *testing.T) {
 	t.Parallel()
 
-	// Has* helpers exist so the user-facing event/cron API can panic on
-	// duplicate registrations cheaply, without paying for a deep clone of
-	// the whole map/slice.
+	// Add* methods return true on first registration, false on duplicate.
+	// This is the contract Module.OnEvent / Cron / Emits rely on to panic
+	// on duplicates without a separate Has*-then-Add two-step.
 	r := New()
-	if r.HasSubscribe("user.created") {
-		t.Error("empty registry should not report HasSubscribe")
+	if !r.AddSubscribe("user.created", "/events/user.created") {
+		t.Error("first AddSubscribe should return true")
 	}
-	if r.HasEmit("media.uploaded") {
-		t.Error("empty registry should not report HasEmit")
-	}
-	if r.HasSchedule("nightly") {
-		t.Error("empty registry should not report HasSchedule")
+	if r.AddSubscribe("user.created", "/events/user.created") {
+		t.Error("duplicate AddSubscribe should return false")
 	}
 
-	r.AddSubscribe("user.created", "/events/user.created")
-	r.AddEmit("media.uploaded")
-	r.AddSchedule("nightly", "0 3 * * *", "/crons/nightly")
-
-	if !r.HasSubscribe("user.created") {
-		t.Error("HasSubscribe should return true after AddSubscribe")
+	if !r.AddEmit("media.uploaded") {
+		t.Error("first AddEmit should return true")
 	}
-	if !r.HasEmit("media.uploaded") {
-		t.Error("HasEmit should return true after AddEmit")
-	}
-	if !r.HasSchedule("nightly") {
-		t.Error("HasSchedule should return true after AddSchedule")
+	if r.AddEmit("media.uploaded") {
+		t.Error("duplicate AddEmit should return false")
 	}
 
-	// Spot-check non-matches stay false (no false positives via prefix etc.)
-	if r.HasSubscribe("user") {
-		t.Error("HasSubscribe should not match prefixes")
+	if !r.AddSchedule("nightly", "0 3 * * *", "/crons/nightly") {
+		t.Error("first AddSchedule should return true")
+	}
+	if r.AddSchedule("nightly", "0 5 * * *", "/crons/nightly-other") {
+		t.Error("duplicate AddSchedule should return false")
+	}
+}
+
+func TestValidateRegistrationName_Rejects(t *testing.T) {
+	t.Parallel()
+
+	// SECURITY regression guard for the registry-level validation. The
+	// rules apply uniformly to AddSubscribe / AddSchedule / AddEmit because
+	// the validator is called from each Add*. Without this guard, names
+	// like "../admin" would let chi normalize the registered pattern to
+	// "/admin", silently escaping the /events/ or /crons/ namespace.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"space", "foo bar"},
+		{"tab", "foo\tbar"},
+		{"newline", "foo\nbar"},
+		{"carriage-return", "foo\rbar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddSubscribe(%q)", tc.bad)
+				}
+			}()
+			r.AddSubscribe(tc.bad, "/events/x")
+		})
+	}
+}
+
+func TestValidateRegistrationName_AcceptsValidNames(t *testing.T) {
+	t.Parallel()
+
+	// Reasonable names must NOT panic — the validator is a deny-list, not
+	// an allow-list. If someone tightens it later this test catches the
+	// over-rejection.
+	good := []string{
+		"created",
+		"user.created",
+		"oauth.user_deleted",
+		"billing.payment_succeeded",
+		"media-uploaded",
+		"Module.Action",
+	}
+	for _, name := range good {
+		t.Run(name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Errorf("name %q unexpectedly rejected: %v", name, rec)
+				}
+			}()
+			r.AddSubscribe(name, "/events/"+name)
+		})
 	}
 }
 

@@ -9,8 +9,7 @@ import (
 )
 
 func TestCron_HandlerReachableViaInternalScope(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	called := false
 	m.Cron("cleanup-temp", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {
@@ -30,8 +29,7 @@ func TestCron_HandlerReachableViaInternalScope(t *testing.T) {
 func TestCron_RequiresInternalSecret(t *testing.T) {
 	// Defense-in-depth: cron handlers are platform-only. If a future
 	// refactor moves /crons/* to a public scope, this test fails.
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	m.Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not run without internal secret")
@@ -44,8 +42,7 @@ func TestCron_RequiresInternalSecret(t *testing.T) {
 }
 
 func TestCron_AppearsInManifestSchedules(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	m.Cron("cleanup-temp", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
 	m.Cron("daily-report", "0 9 * * *", func(w http.ResponseWriter, r *http.Request) {})
@@ -79,74 +76,57 @@ func TestCron_PanicsOnDuplicate(t *testing.T) {
 	m, _ := New(Config{ID: "media"})
 	m.Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on duplicate Cron name")
-		}
-	}()
-	m.Cron("cleanup", "0 5 * * *", func(w http.ResponseWriter, r *http.Request) {})
-}
-
-func TestCron_PanicsOnEmptyName(t *testing.T) {
-	m, _ := New(Config{ID: "media"})
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on empty Cron name")
-		}
-	}()
-	m.Cron("", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
+	assertPanics(t, "expected panic on duplicate Cron name", func() {
+		m.Cron("cleanup", "0 5 * * *", func(w http.ResponseWriter, r *http.Request) {})
+	})
 }
 
 func TestCron_PanicsOnEmptySchedule(t *testing.T) {
 	m, _ := New(Config{ID: "media"})
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on empty Cron schedule string")
-		}
-	}()
-	m.Cron("cleanup", "", func(w http.ResponseWriter, r *http.Request) {})
+	assertPanics(t, "expected panic on empty Cron schedule string", func() {
+		m.Cron("cleanup", "", func(w http.ResponseWriter, r *http.Request) {})
+	})
 }
 
 func TestCron_TopLevelPanicsBeforeInit(t *testing.T) {
 	resetDefault(t)
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for top-level Cron before Init")
-		}
-	}()
-	Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
+	assertPanics(t, "expected panic for top-level Cron before Init", func() {
+		Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
+	})
 }
 
-// Note: registry isolation across modules is already tested by
+// Note: per-Module registry isolation is already verified by
 // TestModulesIsolated_OnEvent in event_test.go and
 // TestRequirePermission_AppearsInManifest in mirrorstack_test.go (#28).
-// Schedules use the same per-Module Registry as Subscribes, so a separate
-// cron isolation test would be redundant.
+// Schedules use the same per-Module Registry, so a separate cron isolation
+// test would be redundant.
 
-func TestCron_PanicsOnPathInjection(t *testing.T) {
-	// SECURITY regression guard: a name like "../admin" used to chi-normalize
+func TestCron_PanicsOnInvalidName(t *testing.T) {
+	// SECURITY regression guard: a name like "../admin" would let chi normalize
 	// the registered pattern to "/admin", letting the handler escape the
 	// /crons/ namespace AND making the manifest disagree with the actual
-	// route. validateRegistrationName now blocks this at the API boundary.
+	// route. The empty case is covered separately by registry validation
+	// (also TestCron_PanicsOnEmptyName above for the schedule string).
 	cases := []struct {
 		name string
 		bad  string
 	}{
+		{"empty", ""},
 		{"dot-segment", "../admin"},
 		{"slash", "foo/bar"},
 		{"backslash", "foo\\bar"},
 		{"space", "foo bar"},
 		{"tab", "foo\tbar"},
+		{"newline", "foo\nbar"},
+		{"carriage-return", "foo\rbar"},
+		{"null-byte", "foo\x00bar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := New(Config{ID: "media"})
-			defer func() {
-				if r := recover(); r == nil {
-					t.Errorf("expected panic for cron name %q", tc.bad)
-				}
-			}()
-			m.Cron(tc.bad, "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
+			assertPanics(t, "expected panic for cron name "+tc.bad, func() {
+				m.Cron(tc.bad, "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {})
+			})
 		})
 	}
 }

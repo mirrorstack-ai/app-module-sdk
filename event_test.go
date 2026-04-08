@@ -9,8 +9,7 @@ import (
 )
 
 func TestOnEvent_HandlerReachableViaInternalScope(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	called := false
 	m.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {
@@ -32,8 +31,7 @@ func TestOnEvent_RequiresInternalSecret(t *testing.T) {
 	// InternalAuth gate must reject unauthenticated callers. If a future
 	// refactor accidentally moves OnEvent to a public-scope mount, this
 	// test fails immediately.
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not run without internal secret")
@@ -46,8 +44,7 @@ func TestOnEvent_RequiresInternalSecret(t *testing.T) {
 }
 
 func TestOnEvent_AppearsInManifestSubscribes(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	m.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {})
 	m.OnEvent("billing.payment_succeeded", func(w http.ResponseWriter, r *http.Request) {})
@@ -70,20 +67,16 @@ func TestOnEvent_PanicsOnDuplicate(t *testing.T) {
 	m, _ := New(Config{ID: "media"})
 	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {})
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on duplicate OnEvent")
-		}
-	}()
-	m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {})
+	assertPanics(t, "expected panic on duplicate OnEvent", func() {
+		m.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {})
+	})
 }
 
-func TestEmit_AppearsInManifestEmits(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media"})
+func TestEmits_AppearsInManifestEmits(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
 
-	m.Emit("created")
-	m.Emit("deleted")
+	m.Emits("created")
+	m.Emits("deleted")
 
 	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
 	var got system.ManifestPayload
@@ -102,16 +95,13 @@ func TestEmit_AppearsInManifestEmits(t *testing.T) {
 	}
 }
 
-func TestEmit_PanicsOnDuplicate(t *testing.T) {
+func TestEmits_PanicsOnDuplicate(t *testing.T) {
 	m, _ := New(Config{ID: "media"})
-	m.Emit("created")
+	m.Emits("created")
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on duplicate Emit")
-		}
-	}()
-	m.Emit("created")
+	assertPanics(t, "expected panic on duplicate Emits", func() {
+		m.Emits("created")
+	})
 }
 
 func TestEvent_TopLevelPanicsBeforeInit(t *testing.T) {
@@ -120,25 +110,21 @@ func TestEvent_TopLevelPanicsBeforeInit(t *testing.T) {
 		fn   func()
 	}{
 		{"OnEvent", func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) }},
-		{"Emit", func() { Emit("created") }},
+		{"Emits", func() { Emits("created") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetDefault(t)
-			defer func() {
-				if r := recover(); r == nil {
-					t.Errorf("expected panic for top-level %s before Init", tc.name)
-				}
-			}()
-			tc.fn()
+			assertPanics(t, "expected panic for top-level "+tc.name+" before Init", tc.fn)
 		})
 	}
 }
 
-func TestOnEvent_PanicsOnPathInjection(t *testing.T) {
-	// SECURITY regression guard: a name like "../admin" used to chi-normalize
+func TestOnEvent_PanicsOnInvalidName(t *testing.T) {
+	// SECURITY regression guard: a name like "../admin" would let chi normalize
 	// the registered pattern to "/admin", letting the handler escape the
 	// /events/ namespace AND making the manifest disagree with the actual
-	// route. validateRegistrationName now blocks this at the API boundary.
+	// route. validateRegistrationName (in internal/registry) blocks this at
+	// the API boundary.
 	cases := []struct {
 		name string
 		bad  string
@@ -148,44 +134,52 @@ func TestOnEvent_PanicsOnPathInjection(t *testing.T) {
 		{"slash", "foo/bar"},
 		{"backslash", "foo\\bar"},
 		{"space", "foo bar"},
+		{"tab", "foo\tbar"},
 		{"newline", "foo\nbar"},
+		{"carriage-return", "foo\rbar"},
+		{"null-byte", "foo\x00bar"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := New(Config{ID: "media"})
-			defer func() {
-				if r := recover(); r == nil {
-					t.Errorf("expected panic for event name %q", tc.bad)
-				}
-			}()
-			m.OnEvent(tc.bad, func(w http.ResponseWriter, r *http.Request) {})
+			assertPanics(t, "expected panic for event name "+tc.bad, func() {
+				m.OnEvent(tc.bad, func(w http.ResponseWriter, r *http.Request) {})
+			})
 		})
 	}
 }
 
-func TestEmit_PanicsOnPathInjection(t *testing.T) {
-	// Emit doesn't mount a route, but its name is still developer-facing in
+func TestEmits_PanicsOnInvalidName(t *testing.T) {
+	// Emits doesn't mount a route, but its name is still developer-facing in
 	// the manifest payload — same validation rules apply for consistency
-	// and to catch typos at startup.
-	m, _ := New(Config{ID: "media"})
-	for _, bad := range []string{"", "../admin", "foo/bar", "foo bar"} {
-		func() {
-			defer func() {
-				if r := recover(); r == nil {
-					t.Errorf("expected panic for emit name %q", bad)
-				}
-			}()
-			m.Emit(bad)
-		}()
+	// and to catch typos at startup. Subset of the OnEvent matrix.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"whitespace", "foo bar"},
+		{"newline", "foo\nbar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := New(Config{ID: "media"})
+			assertPanics(t, "expected panic for emits name "+tc.bad, func() {
+				m.Emits(tc.bad)
+			})
+		})
 	}
 }
 
 func TestModulesIsolated_OnEvent(t *testing.T) {
 	// Two modules in the same process must not see each other's event
-	// subscriptions in the manifest. This mirrors the test isolation
-	// guarantee from #28 (per-Module registry, no package globals).
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m1, _ := New(Config{ID: "media"})
+	// subscriptions in the manifest. Mirrors the test isolation guarantee
+	// from #28 (per-Module registry, no package globals).
+	m1 := newTestModuleWithSecret(t, "media")
 	m2, _ := New(Config{ID: "billing"})
 
 	m1.OnEvent("oauth.user_deleted", func(w http.ResponseWriter, r *http.Request) {})

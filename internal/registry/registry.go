@@ -113,14 +113,17 @@ func (r *Registry) Routes() map[Scope][]Route {
 }
 
 // AddEmit declares that the module emits an event of the given name.
-// First-wins: duplicate names are dropped.
-func (r *Registry) AddEmit(name string) {
+// Returns true if added, false if a declaration for that name already exists
+// (first-wins). Panics on an invalid name (see validateRegistrationName).
+func (r *Registry) AddEmit(name string) bool {
+	validateRegistrationName("Emits", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if slices.Contains(r.emits, name) {
-		return
+		return false
 	}
 	r.emits = append(r.emits, name)
+	return true
 }
 
 // Emits returns a non-nil copy of all declared emit events.
@@ -134,15 +137,18 @@ func (r *Registry) Emits() []string {
 }
 
 // AddSubscribe declares that the module subscribes to an event from another
-// module. The handler is mounted at path on the Internal scope. First-wins:
-// a second AddSubscribe for the same event name is dropped.
-func (r *Registry) AddSubscribe(name, path string) {
+// module. The handler is mounted at path on the Internal scope. Returns true
+// if added, false if a subscription for that event name already exists
+// (first-wins). Panics on an invalid name (see validateRegistrationName).
+func (r *Registry) AddSubscribe(name, path string) bool {
+	validateRegistrationName("OnEvent", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.subscribes[name]; exists {
-		return
+		return false
 	}
 	r.subscribes[name] = path
+	return true
 }
 
 // Subscribes returns a non-nil copy of all event subscriptions.
@@ -155,49 +161,20 @@ func (r *Registry) Subscribes() map[string]string {
 	return maps.Clone(r.subscribes)
 }
 
-// AddSchedule registers a cron job. First-wins by name: a second
-// AddSchedule with the same name is dropped.
-func (r *Registry) AddSchedule(name, cron, path string) {
+// AddSchedule registers a cron job. Returns true if added, false if a job
+// with the same name already exists (first-wins). Panics on an invalid name
+// (see validateRegistrationName).
+func (r *Registry) AddSchedule(name, cron, path string) bool {
+	validateRegistrationName("Cron", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.schedules {
 		if existing.Name == name {
-			return
+			return false
 		}
 	}
 	r.schedules = append(r.schedules, Schedule{Name: name, Cron: cron, Path: path})
-}
-
-// HasSubscribe reports whether an event subscription is already registered
-// under the given name. Used by Module.OnEvent to fail loudly on duplicate
-// registrations rather than letting the silent first-wins behavior hide a
-// programmer mistake.
-func (r *Registry) HasSubscribe(name string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, exists := r.subscribes[name]
-	return exists
-}
-
-// HasEmit reports whether an emit declaration is already registered under
-// the given name. See HasSubscribe for the rationale.
-func (r *Registry) HasEmit(name string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return slices.Contains(r.emits, name)
-}
-
-// HasSchedule reports whether a cron job is already registered under the
-// given name. See HasSubscribe for the rationale.
-func (r *Registry) HasSchedule(name string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, s := range r.schedules {
-		if s.Name == name {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 // Schedules returns a non-nil copy of all scheduled jobs.

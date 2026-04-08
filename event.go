@@ -2,7 +2,6 @@ package mirrorstack
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -13,36 +12,38 @@ const eventPathPrefix = "/events/"
 // Mounts the handler on this module's Internal scope at /events/{name} and
 // records the subscription in the manifest's events.subscribes map.
 //
-// Event names follow the "module.action" convention (e.g., "oauth.user_deleted").
-// Names are validated — see validateRegistrationName for the rules.
+// The platform guarantees AT-LEAST-ONCE delivery — handlers must be
+// idempotent or implement their own deduplication. Do not rely on
+// r.RemoteAddr to identify the sender; in Lambda + API Gateway it is
+// always the AGW IP, not the original event source.
 //
-// Call from startup code (init / main), NOT from inside a request handler.
-// The registry is append-only and the auth middleware closure is captured at
-// registration time.
+// Names must not contain path separators (/, \), whitespace, dot-segments
+// (..), or null bytes. Call from startup code (init / main), not from
+// inside a request handler.
+//
+// Panics on duplicate registration with the same name.
 func (m *Module) OnEvent(name string, handler http.HandlerFunc) {
-	validateRegistrationName("OnEvent", name)
-	if m.registry.HasSubscribe(name) {
+	path := eventPathPrefix + name
+	if !m.registry.AddSubscribe(name, path) {
 		panic("mirrorstack: OnEvent(" + name + ") registered twice")
 	}
-	path := eventPathPrefix + name
 	m.Internal(func(r chi.Router) {
 		r.Post(path, handler)
 	})
-	m.registry.AddSubscribe(name, path)
 }
 
-// Emit declares that this module emits an event of the given name. The
+// Emits declares that this module emits an event of the given name. The
 // declaration appears in the manifest's events.emits list so the platform
-// knows the event belongs to this module's vocabulary and other modules can
-// subscribe to it. Runtime emission is a separate API (TBD).
+// knows the event belongs to this module's vocabulary and other modules
+// can subscribe to it. Runtime emission is a separate API (TBD); this
+// method is purely a declaration.
 //
-// Call from startup code. Panics on empty name or duplicate declaration.
-func (m *Module) Emit(name string) {
-	validateRegistrationName("Emit", name)
-	if m.registry.HasEmit(name) {
-		panic("mirrorstack: Emit(" + name + ") registered twice")
+// Panics on an invalid name (see OnEvent for the rules) or duplicate
+// declaration. Call from startup code.
+func (m *Module) Emits(name string) {
+	if !m.registry.AddEmit(name) {
+		panic("mirrorstack: Emits(" + name + ") registered twice")
 	}
-	m.registry.AddEmit(name)
 }
 
 // OnEvent registers an event handler on the default Module created by Init().
@@ -51,35 +52,7 @@ func OnEvent(name string, handler http.HandlerFunc) {
 	mustDefault("OnEvent").OnEvent(name, handler)
 }
 
-// Emit declares an emitted event on the default Module. Panics before Init.
-func Emit(name string) {
-	mustDefault("Emit").Emit(name)
-}
-
-// validateRegistrationName rejects names that are empty or that would
-// produce an unsafe URL path when appended to /events/ or /crons/. Specifically:
-// path separators (/, \), dot-segments (..), and whitespace are blocked.
-//
-// SECURITY: without this check, OnEvent("../admin", h) would let chi
-// normalize the registered pattern to "/admin", silently escaping the
-// /events/ namespace. The manifest payload would still carry the un-cleaned
-// path "/events/../admin" — making the SDK and platform's view of the
-// route disagree, and the platform-fired events would land in the wrong
-// handler. The same applies to Cron and Emit (Emit doesn't mount a route
-// but the name still appears in the manifest payload as a developer-facing
-// identifier).
-//
-// The check is intentionally a deny-list, not a strict allow-list, so that
-// reasonable conventions like "media-uploaded" or "Module.Action" remain
-// valid. If stricter validation becomes necessary, tighten this in one place.
-func validateRegistrationName(kind, name string) {
-	if name == "" {
-		panic("mirrorstack: " + kind + "() name cannot be empty")
-	}
-	if strings.ContainsAny(name, "/\\ \t\n\r") {
-		panic("mirrorstack: " + kind + "(" + name + ") contains a path separator or whitespace")
-	}
-	if strings.Contains(name, "..") {
-		panic("mirrorstack: " + kind + "(" + name + ") contains '..'")
-	}
+// Emits declares an emitted event on the default Module. Panics before Init.
+func Emits(name string) {
+	mustDefault("Emits").Emits(name)
 }
