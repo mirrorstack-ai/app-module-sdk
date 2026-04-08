@@ -227,7 +227,9 @@ func (m *Module) Public(fn func(r chi.Router)) {
 }
 
 // Internal registers routes with internal auth scope (platform-to-module only).
-// Validates X-MS-Internal-Secret via constant-time comparison.
+// Validates X-MS-Internal-Secret via constant-time comparison. The middleware
+// is cached on the Module at New() so OnEvent / Cron registrations reuse a
+// single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
 	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
 }

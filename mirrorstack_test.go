@@ -24,6 +24,13 @@ func resetDefault(t *testing.T) {
 // "secret" — the canonical setup for tests that exercise internal-scope
 // routes (manifest, lifecycle, events, crons). Use the lowercase id for
 // stable manifest assertions.
+//
+// IMPORTANT: t.Setenv MUST run before New(), which is why this helper
+// bundles them. Module.New() captures auth.InternalAuth() at construction;
+// the cached middleware closure reads MS_INTERNAL_SECRET once and never
+// re-reads. A test that calls New() then sets the env afterward will
+// silently produce a module with the wrong secret and fail with
+// confusing 401/503 responses.
 func newTestModuleWithSecret(t *testing.T, id string) *Module {
 	t.Helper()
 	t.Setenv("MS_INTERNAL_SECRET", "secret")

@@ -6,7 +6,13 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-const eventPathPrefix = "/events/"
+// eventPathPrefix mounts under /__mirrorstack/ to reserve a platform-owned
+// namespace. Mounting at the bare module root would let a developer-defined
+// route like m.Public(func(r){ r.Get("/events/list", h) }) collide with
+// OnEvent("list"), with chi's duplicate-pattern panic depending on
+// registration order. The /__mirrorstack/ prefix is the same convention
+// /__mirrorstack/health, /__mirrorstack/platform/* already use.
+const eventPathPrefix = "/__mirrorstack/events/"
 
 // OnEvent registers handler for events of the given name from another module.
 // Mounts the handler on this module's Internal scope at /events/{name} and

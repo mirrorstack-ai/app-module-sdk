@@ -17,7 +17,7 @@ func TestOnEvent_HandlerReachableViaInternalScope(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/events/oauth.user_deleted", "secret")
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/events/oauth.user_deleted", "secret")
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
@@ -37,7 +37,7 @@ func TestOnEvent_RequiresInternalSecret(t *testing.T) {
 		t.Error("handler should not run without internal secret")
 	})
 
-	rec := doRequest(t, m.Router(), "POST", "/events/user.created")
+	rec := doRequest(t, m.Router(), "POST", "/__mirrorstack/events/user.created")
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (no secret)", rec.Code)
 	}
@@ -55,10 +55,10 @@ func TestOnEvent_AppearsInManifestSubscribes(t *testing.T) {
 		t.Fatalf("decode manifest: %v", err)
 	}
 
-	if got.Events.Subscribes["oauth.user_deleted"] != "/events/oauth.user_deleted" {
-		t.Errorf("subscribes[oauth.user_deleted] = %q, want /events/oauth.user_deleted", got.Events.Subscribes["oauth.user_deleted"])
+	if got.Events.Subscribes["oauth.user_deleted"] != "/__mirrorstack/events/oauth.user_deleted" {
+		t.Errorf("subscribes[oauth.user_deleted] = %q, want /__mirrorstack/events/oauth.user_deleted", got.Events.Subscribes["oauth.user_deleted"])
 	}
-	if got.Events.Subscribes["billing.payment_succeeded"] != "/events/billing.payment_succeeded" {
+	if got.Events.Subscribes["billing.payment_succeeded"] != "/__mirrorstack/events/billing.payment_succeeded" {
 		t.Errorf("subscribes[billing.payment_succeeded] = %q", got.Events.Subscribes["billing.payment_succeeded"])
 	}
 }
@@ -122,7 +122,7 @@ func TestEvent_TopLevelPanicsBeforeInit(t *testing.T) {
 func TestOnEvent_PanicsOnInvalidName(t *testing.T) {
 	// SECURITY regression guard: a name like "../admin" would let chi normalize
 	// the registered pattern to "/admin", letting the handler escape the
-	// /events/ namespace AND making the manifest disagree with the actual
+	// /__mirrorstack/events/ namespace AND making the manifest disagree with the actual
 	// route. validateRegistrationName (in internal/registry) blocks this at
 	// the API boundary.
 	cases := []struct {

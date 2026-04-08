@@ -288,7 +288,7 @@ func TestValidateRegistrationName_AcceptsValidNames(t *testing.T) {
 		"oauth.user_deleted",
 		"billing.payment_succeeded",
 		"media-uploaded",
-		"Module.Action",
+		"v1.user.created", // versioned event names should still pass
 	}
 	for _, name := range good {
 		t.Run(name, func(t *testing.T) {
@@ -390,14 +390,34 @@ func TestPermissions_RolesAreCloned(t *testing.T) {
 	}
 }
 
-func TestAddPermission_PanicsOnEmptyName(t *testing.T) {
+func TestAddPermission_PanicsOnInvalidName(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for empty permission name")
-		}
-	}()
-	r := New()
-	r.AddPermission("", []string{"admin"})
+	// Permissions don't end up in URL paths, but they DO appear in the
+	// manifest payload which platform-side consumers may use as identifiers
+	// for grant UI, RBAC tables, log fields, etc. Sharing the registry's
+	// validateRegistrationName guard with AddSubscribe/AddEmit/AddSchedule
+	// prevents inconsistent behavior across the four registration sites
+	// and keeps malformed strings (null bytes, dot-segments) out of the
+	// manifest regardless of which Add* the developer called.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddPermission(%q)", tc.bad)
+				}
+			}()
+			r.AddPermission(tc.bad, []string{"admin"})
+		})
+	}
 }

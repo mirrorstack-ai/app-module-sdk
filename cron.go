@@ -6,7 +6,9 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-const cronPathPrefix = "/crons/"
+// cronPathPrefix mounts under /__mirrorstack/ to reserve a platform-owned
+// namespace. See eventPathPrefix in event.go for the rationale.
+const cronPathPrefix = "/__mirrorstack/crons/"
 
 // Cron registers a handler to run on a cron schedule. The handler is mounted
 // on this module's Internal scope at /crons/{name}. The schedule is recorded

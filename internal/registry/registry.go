@@ -190,11 +190,14 @@ func (r *Registry) Schedules() []Schedule {
 // AddPermission records a declared permission. First-wins by name: a second
 // AddPermission for the same name is dropped (matches AddRoute / AddEmit /
 // AddSchedule semantics). The roles slice is cloned so caller mutations
-// after the call cannot leak into the stored copy.
+// after the call cannot leak into the stored copy. Panics on an invalid
+// name (see validateRegistrationName) — permissions don't end up in URL
+// paths, so the path-separator check is purely cosmetic for permissions,
+// but the consistency with AddSubscribe/AddEmit/AddSchedule prevents
+// downstream consumers (DB columns, log parsers) from receiving malformed
+// strings via the manifest.
 func (r *Registry) AddPermission(name string, roles []string) {
-	if name == "" {
-		panic("mirrorstack/registry: AddPermission called with empty name")
-	}
+	validateRegistrationName("RequirePermission", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.permissions {

@@ -17,7 +17,7 @@ func TestCron_HandlerReachableViaInternalScope(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/crons/cleanup-temp", "secret")
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/crons/cleanup-temp", "secret")
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
@@ -28,14 +28,14 @@ func TestCron_HandlerReachableViaInternalScope(t *testing.T) {
 
 func TestCron_RequiresInternalSecret(t *testing.T) {
 	// Defense-in-depth: cron handlers are platform-only. If a future
-	// refactor moves /crons/* to a public scope, this test fails.
+	// refactor moves /__mirrorstack/crons/* to a public scope, this test fails.
 	m := newTestModuleWithSecret(t, "media")
 
 	m.Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not run without internal secret")
 	})
 
-	rec := doRequest(t, m.Router(), "POST", "/crons/cleanup")
+	rec := doRequest(t, m.Router(), "POST", "/__mirrorstack/crons/cleanup")
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (no secret)", rec.Code)
 	}
@@ -59,11 +59,11 @@ func TestCron_AppearsInManifestSchedules(t *testing.T) {
 	for _, s := range got.Schedules {
 		switch s.Name {
 		case "cleanup-temp":
-			if s.Cron != "0 3 * * *" || s.Path != "/crons/cleanup-temp" {
+			if s.Cron != "0 3 * * *" || s.Path != "/__mirrorstack/crons/cleanup-temp" {
 				t.Errorf("cleanup-temp = %+v", s)
 			}
 		case "daily-report":
-			if s.Cron != "0 9 * * *" || s.Path != "/crons/daily-report" {
+			if s.Cron != "0 9 * * *" || s.Path != "/__mirrorstack/crons/daily-report" {
 				t.Errorf("daily-report = %+v", s)
 			}
 		default:
@@ -104,7 +104,7 @@ func TestCron_TopLevelPanicsBeforeInit(t *testing.T) {
 func TestCron_PanicsOnInvalidName(t *testing.T) {
 	// SECURITY regression guard: a name like "../admin" would let chi normalize
 	// the registered pattern to "/admin", letting the handler escape the
-	// /crons/ namespace AND making the manifest disagree with the actual
+	// /__mirrorstack/crons/ namespace AND making the manifest disagree with the actual
 	// route. The empty case is covered separately by registry validation
 	// (also TestCron_PanicsOnEmptyName above for the schedule string).
 	cases := []struct {
