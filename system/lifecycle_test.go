@@ -37,7 +37,7 @@ func noopTxRunner(t *testing.T) migration.TxRunner {
 func TestInstallHandler_EmptyFS(t *testing.T) {
 	t.Parallel()
 
-	h := InstallHandler(nil, noopTxRunner(t))
+	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t))
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
@@ -71,7 +71,7 @@ func TestUpgradeHandler_RequiresFromTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(nil, noopTxRunner(t))
+			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
@@ -100,7 +100,7 @@ func TestUpgradeHandler_RejectsSemver(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(nil, noopTxRunner(t))
+			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
@@ -121,7 +121,7 @@ func TestUpgradeHandler_UnknownTarget(t *testing.T) {
 	// doesn't exist in the (empty) migrations list. The handler must
 	// translate the runner's error into a 400 (caller asked for something
 	// the module doesn't have).
-	h := UpgradeHandler(nil, noopTxRunner(t))
+	h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
 	body := strings.NewReader(`{"from": "0000", "to": "0001"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -140,7 +140,7 @@ func TestUpgradeHandler_NoOp(t *testing.T) {
 	fsys := fstest.MapFS{
 		"sql/app/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	h := UpgradeHandler(fsys, noopTxRunner(t))
+	h := UpgradeHandler(fsys, migration.ScopeApp, noopTxRunner(t))
 	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -162,7 +162,7 @@ func TestDowngradeHandler_RequiresFromGreaterThanTo(t *testing.T) {
 		"sql/app/0001_a.up.sql":   &fstest.MapFile{Data: []byte("")},
 		"sql/app/0001_a.down.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	h := DowngradeHandler(fsys, noopTxRunner(t))
+	h := DowngradeHandler(fsys, migration.ScopeApp, noopTxRunner(t))
 
 	// from=0001, to=0001 → not a downgrade → 400
 	body := strings.NewReader(`{"from": "0001", "to": "0001"}`)
@@ -193,12 +193,35 @@ func TestUninstallHandler_AlwaysSucceeds(t *testing.T) {
 	}
 }
 
+func TestUpgradeHandler_ModuleScope(t *testing.T) {
+	t.Parallel()
+
+	// Same shape as TestUpgradeHandler_NoOp but for the module scope.
+	// Pins that the scope parameter is wired all the way through:
+	// the handler reads sql/module/ when scope=ScopeModule, NOT sql/app/.
+	// If the wiring is wrong, ScopeModule would read sql/app/0008_a.up.sql,
+	// find the version, and the test still passes — so the fixture has
+	// 0008 ONLY in sql/module/ to make a misrouted read fail with
+	// "unknown target version 0008".
+	fsys := fstest.MapFS{
+		"sql/module/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
+	}
+	h := UpgradeHandler(fsys, migration.ScopeModule, noopTxRunner(t))
+	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
+
+	if rec.Code != 200 {
+		t.Errorf("status = %d, want 200 (no-op upgrade on module scope)", rec.Code)
+	}
+}
+
 func TestInstallHandler_BadFS_500(t *testing.T) {
 	t.Parallel()
 
 	// fs.FS that returns an error on every Open. fs.ReadDir wraps and
 	// surfaces the error — the handler should respond 500.
-	h := InstallHandler(errFS{}, noopTxRunner(t))
+	h := InstallHandler(errFS{}, migration.ScopeApp, noopTxRunner(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
 

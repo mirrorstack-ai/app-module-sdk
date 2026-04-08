@@ -21,6 +21,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -370,10 +371,17 @@ func (m *Module) mountSystemRoutes() {
 				m.config.SQL, m.config.Versions, m.registry,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
-				r.Post("/install", system.InstallHandler(m.config.SQL, m.Tx))
-				r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, m.Tx))
-				r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, m.Tx))
-				r.Post("/uninstall", system.UninstallHandler())
+				// App and module migrations are separate tracks on disjoint
+				// directories; mount the same four endpoints under each scope
+				// so the platform can drive them independently.
+				for _, scope := range migration.AllScopes() {
+					r.Route("/"+string(scope), func(r chi.Router) {
+						r.Post("/install", system.InstallHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
+					})
+				}
 			})
 		})
 	})

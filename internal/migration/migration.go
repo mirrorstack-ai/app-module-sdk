@@ -38,6 +38,13 @@ func (s Scope) Dir() string {
 	return "sql/" + string(s)
 }
 
+// AllScopes returns the canonical ordering of migration scopes. Callers that
+// iterate every scope (manifest reporting, lifecycle endpoint mounting, etc.)
+// should use this so a future scope addition is picked up automatically.
+func AllScopes() []Scope {
+	return []Scope{ScopeApp, ScopeModule}
+}
+
 // upFilePattern matches up-migration files named like "0000_initial.up.sql".
 // The leading numeric prefix is the version, the middle slug is the human name.
 var upFilePattern = regexp.MustCompile(`^(\d+)_(.+)\.up\.sql$`)

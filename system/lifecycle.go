@@ -46,13 +46,13 @@ type UninstallResult struct {
 //
 // The SDK does NOT track which migrations were previously applied — it is a
 // stateless executor. The platform decides when install is appropriate (a
-// fresh app) based on its own state store and only calls install once per
-// app. Calling install twice will re-run every migration and likely fail
-// with "relation already exists" — platform-side saga logic is responsible
-// for preventing that.
-func InstallHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
+// fresh app, or first deploy of a module) based on its own state store and
+// calls install at most once per (scope, target). Calling install twice
+// will re-run every migration and likely fail with "relation already exists"
+// — platform-side saga logic is responsible for preventing that.
+func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		migrations, err := migration.List(sqlFS, migration.ScopeApp)
+		migrations, err := migration.List(sqlFS, scope)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
@@ -72,15 +72,15 @@ func InstallHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
 // UpgradeHandler applies the migrations strictly between (req.From, req.To].
 // Both fields must be migration numbers; semver must be translated by the
 // platform before calling this endpoint (the platform reads the Versions map
-// from the manifest endpoint to do the translation).
-func UpgradeHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
+// from the manifest and uses the scope-matching field of MigrationVersions).
+func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, ok := decodeVersionRequest(w, r)
 		if !ok {
 			return
 		}
 
-		migrations, err := migration.List(sqlFS, migration.ScopeApp)
+		migrations, err := migration.List(sqlFS, scope)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
@@ -106,14 +106,14 @@ func UpgradeHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
 // DowngradeHandler reverts migrations between (req.To, req.From] in newest-first
 // order. Each migration must have a .down.sql or the request fails before any
 // SQL runs. Both fields must be migration numbers (see UpgradeHandler).
-func DowngradeHandler(sqlFS fs.FS, runTx migration.TxRunner) http.HandlerFunc {
+func DowngradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, ok := decodeVersionRequest(w, r)
 		if !ok {
 			return
 		}
 
-		migrations, err := migration.List(sqlFS, migration.ScopeApp)
+		migrations, err := migration.List(sqlFS, scope)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
