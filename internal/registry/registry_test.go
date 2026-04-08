@@ -175,15 +175,15 @@ func TestSchedules_Recorded(t *testing.T) {
 	t.Parallel()
 
 	r := New()
-	r.AddSchedule("cleanup-temp", "0 3 * * *")
-	r.AddSchedule("daily-report", "0 9 * * *")
+	r.AddSchedule("cleanup-temp", "0 3 * * *", "/crons/cleanup-temp")
+	r.AddSchedule("daily-report", "0 9 * * *", "/crons/daily-report")
 
 	got := r.Schedules()
 	if len(got) != 2 {
 		t.Fatalf("schedules = %v, want 2", got)
 	}
-	if got[0].Name != "cleanup-temp" || got[0].Cron != "0 3 * * *" {
-		t.Errorf("schedules[0] = %+v, want {cleanup-temp, 0 3 * * *}", got[0])
+	if got[0].Name != "cleanup-temp" || got[0].Cron != "0 3 * * *" || got[0].Path != "/crons/cleanup-temp" {
+		t.Errorf("schedules[0] = %+v, want {cleanup-temp, 0 3 * * *, /crons/cleanup-temp}", got[0])
 	}
 }
 
@@ -193,8 +193,8 @@ func TestSchedules_DropsDuplicateNames(t *testing.T) {
 	// Two schedules with the same name (even with different crons) is a
 	// configuration mistake — first-wins matches AddRoute / AddEmit.
 	r := New()
-	r.AddSchedule("cleanup", "0 3 * * *")
-	r.AddSchedule("cleanup", "0 5 * * *")
+	r.AddSchedule("cleanup", "0 3 * * *", "/crons/cleanup")
+	r.AddSchedule("cleanup", "0 5 * * *", "/crons/cleanup-other")
 
 	got := r.Schedules()
 	if len(got) != 1 {
@@ -209,6 +209,97 @@ func TestSchedules_EmptyReturnsNonNil(t *testing.T) {
 	t.Parallel()
 	if got := New().Schedules(); got == nil {
 		t.Error("empty Schedules() returned nil, want []Schedule{}")
+	}
+}
+
+func TestAddX_ReturnBoolForFirstWins(t *testing.T) {
+	t.Parallel()
+
+	// Add* methods return true on first registration, false on duplicate.
+	// This is the contract Module.OnEvent / Cron / Emits rely on to panic
+	// on duplicates without a separate Has*-then-Add two-step.
+	r := New()
+	if !r.AddSubscribe("user.created", "/events/user.created") {
+		t.Error("first AddSubscribe should return true")
+	}
+	if r.AddSubscribe("user.created", "/events/user.created") {
+		t.Error("duplicate AddSubscribe should return false")
+	}
+
+	if !r.AddEmit("media.uploaded") {
+		t.Error("first AddEmit should return true")
+	}
+	if r.AddEmit("media.uploaded") {
+		t.Error("duplicate AddEmit should return false")
+	}
+
+	if !r.AddSchedule("nightly", "0 3 * * *", "/crons/nightly") {
+		t.Error("first AddSchedule should return true")
+	}
+	if r.AddSchedule("nightly", "0 5 * * *", "/crons/nightly-other") {
+		t.Error("duplicate AddSchedule should return false")
+	}
+}
+
+func TestValidateRegistrationName_Rejects(t *testing.T) {
+	t.Parallel()
+
+	// SECURITY regression guard for the registry-level validation. The
+	// rules apply uniformly to AddSubscribe / AddSchedule / AddEmit because
+	// the validator is called from each Add*. Without this guard, names
+	// like "../admin" would let chi normalize the registered pattern to
+	// "/admin", silently escaping the /events/ or /crons/ namespace.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"backslash", "foo\\bar"},
+		{"space", "foo bar"},
+		{"tab", "foo\tbar"},
+		{"newline", "foo\nbar"},
+		{"carriage-return", "foo\rbar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddSubscribe(%q)", tc.bad)
+				}
+			}()
+			r.AddSubscribe(tc.bad, "/events/x")
+		})
+	}
+}
+
+func TestValidateRegistrationName_AcceptsValidNames(t *testing.T) {
+	t.Parallel()
+
+	// Reasonable names must NOT panic — the validator is a deny-list, not
+	// an allow-list. If someone tightens it later this test catches the
+	// over-rejection.
+	good := []string{
+		"created",
+		"user.created",
+		"oauth.user_deleted",
+		"billing.payment_succeeded",
+		"media-uploaded",
+		"v1.user.created", // versioned event names should still pass
+	}
+	for _, name := range good {
+		t.Run(name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Errorf("name %q unexpectedly rejected: %v", name, rec)
+				}
+			}()
+			r.AddSubscribe(name, "/events/"+name)
+		})
 	}
 }
 
@@ -258,8 +349,8 @@ func TestPermissions_FirstWinsBlocksPrivilegeEscalation(t *testing.T) {
 	// First-wins must block this — a buggy or malicious second call cannot
 	// replace the original tight ruleset with a wider one.
 	r := New()
-	r.AddPermission("media.delete", []string{"admin"})                            // strict first
-	r.AddPermission("media.delete", []string{"admin", "member", "viewer"})        // looser second — must be dropped
+	r.AddPermission("media.delete", []string{"admin"})                     // strict first
+	r.AddPermission("media.delete", []string{"admin", "member", "viewer"}) // looser second — must be dropped
 
 	got := r.Permissions()
 	if len(got) != 1 {
@@ -299,14 +390,34 @@ func TestPermissions_RolesAreCloned(t *testing.T) {
 	}
 }
 
-func TestAddPermission_PanicsOnEmptyName(t *testing.T) {
+func TestAddPermission_PanicsOnInvalidName(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for empty permission name")
-		}
-	}()
-	r := New()
-	r.AddPermission("", []string{"admin"})
+	// Permissions don't end up in URL paths, but they DO appear in the
+	// manifest payload which platform-side consumers may use as identifiers
+	// for grant UI, RBAC tables, log fields, etc. Sharing the registry's
+	// validateRegistrationName guard with AddSubscribe/AddEmit/AddSchedule
+	// prevents inconsistent behavior across the four registration sites
+	// and keeps malformed strings (null bytes, dot-segments) out of the
+	// manifest regardless of which Add* the developer called.
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../admin"},
+		{"slash", "foo/bar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddPermission(%q)", tc.bad)
+				}
+			}()
+			r.AddPermission(tc.bad, []string{"admin"})
+		})
+	}
 }

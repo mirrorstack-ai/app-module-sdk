@@ -20,6 +20,41 @@ func resetDefault(t *testing.T) {
 	defaultModule = nil
 }
 
+// newTestModuleWithSecret creates a Module with MS_INTERNAL_SECRET set to
+// "secret" — the canonical setup for tests that exercise internal-scope
+// routes (manifest, lifecycle, events, crons). Use the lowercase id for
+// stable manifest assertions.
+//
+// IMPORTANT: t.Setenv MUST run before New(), which is why this helper
+// bundles them. Module.New() captures auth.InternalAuth() at construction;
+// the cached middleware closure reads MS_INTERNAL_SECRET once and never
+// re-reads. A test that calls New() then sets the env afterward will
+// silently produce a module with the wrong secret and fail with
+// confusing 401/503 responses.
+func newTestModuleWithSecret(t *testing.T, id string) *Module {
+	t.Helper()
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, err := New(Config{ID: id})
+	if err != nil {
+		t.Fatalf("New(%q): %v", id, err)
+	}
+	return m
+}
+
+// assertPanics runs fn and fails the test if fn does not panic. msg is the
+// error message used when no panic occurred. Mirrors the recover-pattern
+// previously duplicated across event_test.go, cron_test.go,
+// permission_test.go, and registry_test.go.
+func assertPanics(t *testing.T, msg string, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error(msg)
+		}
+	}()
+	fn()
+}
+
 func doRequest(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
@@ -501,6 +536,9 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
 		"RequirePermission": func() { RequirePermission("media.view", "admin") },
+		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
+		"Emits":             func() { Emits("created") },
+		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {

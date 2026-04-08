@@ -49,19 +49,25 @@ type Config struct {
 }
 
 // Module is the core SDK instance.
+//
+// internalAuth is captured at New() time so OnEvent/Cron registrations can
+// reuse a single middleware closure. auth.InternalAuth() reads
+// MS_INTERNAL_SECRET once at construction; constructing it per registration
+// would re-read the env var and re-allocate the closure on every call.
 type Module struct {
-	config    Config
-	router    *chi.Mux
-	logger    *log.Logger
-	registry  *registry.Registry
-	poolCache *db.PoolCache // production: per-app DB pools
-	devDBOnce sync.Once     // dev mode: lazy DB init
-	devDB     *db.DB
-	devDBErr  error
-	cacheCache   *cache.ClientCache // production: per-app Redis clients
-	devCacheOnce sync.Once          // dev mode: lazy cache init
-	devCache     *cache.Client
-	devCacheErr  error
+	config         Config
+	router         *chi.Mux
+	logger         *log.Logger
+	registry       *registry.Registry
+	internalAuth   func(http.Handler) http.Handler
+	poolCache      *db.PoolCache // production: per-app DB pools
+	devDBOnce      sync.Once     // dev mode: lazy DB init
+	devDB          *db.DB
+	devDBErr       error
+	cacheCache     *cache.ClientCache // production: per-app Redis clients
+	devCacheOnce   sync.Once          // dev mode: lazy cache init
+	devCache       *cache.Client
+	devCacheErr    error
 	devStorageOnce sync.Once // dev mode: lazy storage init
 	devStorage     *storage.Client
 	devStorageErr  error
@@ -73,12 +79,13 @@ func New(cfg Config) (*Module, error) {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
 	m := &Module{
-		config:     cfg,
-		router:     chi.NewRouter(),
-		logger:     log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
-		registry:   registry.New(),
-		poolCache:  db.NewPoolCache(),
-		cacheCache: cache.NewClientCache(),
+		config:       cfg,
+		router:       chi.NewRouter(),
+		logger:       log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		registry:     registry.New(),
+		internalAuth: auth.InternalAuth(),
+		poolCache:    db.NewPoolCache(),
+		cacheCache:   cache.NewClientCache(),
 	}
 	m.mountSystemRoutes()
 	return m, nil
@@ -225,9 +232,11 @@ func (m *Module) Public(fn func(r chi.Router)) {
 }
 
 // Internal registers routes with internal auth scope (platform-to-module only).
-// Validates X-MS-Internal-Secret via constant-time comparison.
+// Validates X-MS-Internal-Secret via constant-time comparison. The middleware
+// is cached on the Module at New() so OnEvent / Cron registrations reuse a
+// single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopeInternal, auth.InternalAuth(), fn)
+	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
 }
 
 // scopedRoutes records every route fn registers under the given scope, then
@@ -348,7 +357,7 @@ func (m *Module) mountSystemRoutes() {
 		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
-			r.Use(auth.InternalAuth())
+			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Name, m.config.Icon,
 				m.config.SQL, m.config.Versions, m.registry,
