@@ -24,12 +24,12 @@ type Migration struct {
 // List returns all migrations from sql/{scope}/, sorted by numeric version
 // (ascending). A migration is identified by its .up.sql file; the matching
 // .down.sql is recorded if present (empty otherwise — downgrades will fail
-// for that version).
+// for that version). Versions are compared numerically so a module that
+// mixes widths ("9", "10") resolves in the right order.
 //
-// Returns an empty slice (not an error) if fsys is nil or sql/{scope}/ does
-// not exist. A module that has only app migrations (no cross-app shared
-// state) will see List(fsys, ScopeModule) return an empty slice cleanly,
-// which is what the manifest needs to report version "" for that scope.
+// Returns an empty slice (not an error) if fsys is nil or the scope's
+// directory does not exist — a module that uses only one scope is the
+// common case.
 func List(fsys fs.FS, scope Scope) ([]Migration, error) {
 	if fsys == nil {
 		return nil, nil
@@ -40,7 +40,7 @@ func List(fsys fs.FS, scope Scope) ([]Migration, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("mirrorstack/migration: read %s dir: %w", dir, err)
+		return nil, fmt.Errorf("mirrorstack/migration: read %s: %w", dir, err)
 	}
 
 	// First pass: collect filenames into two maps keyed by version.

@@ -124,33 +124,11 @@ func TestLatestVersion_MixedWidthsSortNumerically(t *testing.T) {
 }
 
 // --- ScopeModule track ---
-//
-// The module track is the new sql/module/ directory introduced in #55.
-// All scope-aware behavior must work for ScopeModule too — the tests below
-// mirror the ScopeApp matrix at a representative depth so a regression in
-// the scope-parameterization branch fires loudly.
 
-func TestLatestVersion_ModuleScope_NoDir(t *testing.T) {
+func TestLatestVersion_ModuleScope(t *testing.T) {
 	t.Parallel()
 
-	// A module that has only an app track (no cross-app shared state) is
-	// the common case. ModuleScope must report "" without error.
-	fsys := fstest.MapFS{
-		"sql/app/0001_a.up.sql": &fstest.MapFile{Data: []byte("")},
-	}
-	got, err := LatestVersion(fsys, ScopeModule)
-	if err != nil {
-		t.Errorf("ScopeModule with no sql/module/ dir: err = %v, want nil", err)
-	}
-	if got != "" {
-		t.Errorf("ScopeModule with no sql/module/ dir: got %q, want empty", got)
-	}
-}
-
-func TestLatestVersion_ModuleScope_PicksHighest(t *testing.T) {
-	t.Parallel()
-
-	// Both tracks coexist; ModuleScope must read its own dir, not app/.
+	// Both tracks coexist; each scope must read its own directory only.
 	fsys := fstest.MapFS{
 		"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
 		"sql/app/0008_app_thing.up.sql": &fstest.MapFile{Data: []byte("")},
@@ -164,8 +142,6 @@ func TestLatestVersion_ModuleScope_PicksHighest(t *testing.T) {
 	if got != "0001" {
 		t.Errorf("LatestVersion(ScopeModule) = %q, want 0001 (must NOT see sql/app/ entries)", got)
 	}
-
-	// Sanity: the app scope still sees its own files.
 	gotApp, _ := LatestVersion(fsys, ScopeApp)
 	if gotApp != "0008" {
 		t.Errorf("LatestVersion(ScopeApp) = %q, want 0008 (must NOT see sql/module/ entries)", gotApp)

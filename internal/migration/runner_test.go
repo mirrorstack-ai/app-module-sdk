@@ -108,21 +108,15 @@ func TestList_IgnoresNonMigrationFiles(t *testing.T) {
 	}
 }
 
-// --- ScopeModule track ---
-//
-// The new sql/module/ directory uses the same parser and tree-walk logic as
-// sql/app/, so a single-test smoke check is sufficient — the full matrix
-// above is parameterized only by the directory string. This test exists to
-// pin the directory mapping (sql/app vs sql/module) so a future refactor
-// that breaks the Scope.Dir() contract fails loudly here.
-func TestList_ModuleScope_ReadsModuleDir(t *testing.T) {
+// ScopeModule uses the same parser; this pins the sql/app vs sql/module mapping.
+func TestList_ModuleScope(t *testing.T) {
 	t.Parallel()
 
 	fsys := fstest.MapFS{
-		"sql/app/0000_app_init.up.sql":     &fstest.MapFile{Data: []byte("CREATE TABLE items()")},
-		"sql/module/0000_outbox.up.sql":    &fstest.MapFile{Data: []byte("CREATE TABLE outbox()")},
-		"sql/module/0000_outbox.down.sql":  &fstest.MapFile{Data: []byte("DROP TABLE outbox")},
-		"sql/module/0001_dedup.up.sql":     &fstest.MapFile{Data: []byte("CREATE TABLE processed_events()")},
+		"sql/app/0000_app_init.up.sql":    &fstest.MapFile{Data: []byte("CREATE TABLE items()")},
+		"sql/module/0000_outbox.up.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE outbox()")},
+		"sql/module/0000_outbox.down.sql": &fstest.MapFile{Data: []byte("DROP TABLE outbox")},
+		"sql/module/0001_dedup.up.sql":    &fstest.MapFile{Data: []byte("CREATE TABLE processed_events()")},
 	}
 
 	got, err := List(fsys, ScopeModule)
@@ -213,10 +207,10 @@ func TestSliceDown_ReversesOrder(t *testing.T) {
 	t.Parallel()
 
 	migrations := []Migration{
-		{Version: "0000", DownFile: "sql/0000_a.down.sql"},
-		{Version: "0001", DownFile: "sql/0001_b.down.sql"},
-		{Version: "0002", DownFile: "sql/0002_c.down.sql"},
-		{Version: "0003", DownFile: "sql/0003_d.down.sql"},
+		{Version: "0000", DownFile: "sql/app/0000_a.down.sql"},
+		{Version: "0001", DownFile: "sql/app/0001_b.down.sql"},
+		{Version: "0002", DownFile: "sql/app/0002_c.down.sql"},
+		{Version: "0003", DownFile: "sql/app/0003_d.down.sql"},
 	}
 	// Downgrade from 0003 to 0001 → revert 0003, then 0002 (reverse order)
 	got, err := SliceDown(migrations, "0003", "0001")
