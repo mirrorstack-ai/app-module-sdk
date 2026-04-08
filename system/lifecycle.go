@@ -2,6 +2,7 @@ package system
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -157,7 +158,12 @@ func UninstallHandler() http.HandlerFunc {
 func decodeVersionRequest(w http.ResponseWriter, r *http.Request) (VersionRequest, bool) {
 	var req VersionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			httputil.JSON(w, http.StatusRequestEntityTooLarge, httputil.ErrorResponse{Error: "request body too large"})
+		} else {
+			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
+		}
 		return req, false
 	}
 	if req.From == "" || req.To == "" {
