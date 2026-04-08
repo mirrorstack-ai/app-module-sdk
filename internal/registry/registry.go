@@ -179,6 +179,9 @@ func (r *Registry) Schedules() []Schedule {
 // AddSchedule semantics). The roles slice is cloned so caller mutations
 // after the call cannot leak into the stored copy.
 func (r *Registry) AddPermission(name string, roles []string) {
+	if name == "" {
+		panic("mirrorstack/registry: AddPermission called with empty name")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.permissions {
