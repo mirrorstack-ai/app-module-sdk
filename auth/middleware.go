@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
