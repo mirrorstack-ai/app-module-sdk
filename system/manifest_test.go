@@ -110,7 +110,7 @@ func TestManifest_EmptyEventsAndSchedules_NotNull(t *testing.T) {
 	ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`} {
+	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`, `"permissions":[]`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("manifest body missing %q\nbody: %s", want, body)
 		}
@@ -155,5 +155,38 @@ func TestManifest_Versions(t *testing.T) {
 	}
 	if got.Versions["v0.1.0"] != "0008" || got.Versions["v0.2.0"] != "0012" {
 		t.Errorf("versions map mismatch: %v", got.Versions)
+	}
+}
+
+func TestManifest_Permissions(t *testing.T) {
+	t.Parallel()
+
+	// Permissions added on the per-Module registry must surface in the
+	// manifest payload. The Registry's first-wins-by-name dedup is the
+	// guarantee here — registering the same permission twice (e.g., on two
+	// routes that share an authz check) collapses to a single entry.
+	reg := registry.New()
+	reg.AddPermission("media.view", []string{"admin", "member", "viewer"})
+	reg.AddPermission("media.upload", []string{"admin", "member"})
+	reg.AddPermission("media.view", []string{"admin"}) // duplicate name → dropped
+
+	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
+
+	if len(got.Permissions) != 2 {
+		t.Fatalf("permissions = %d, want 2: %+v", len(got.Permissions), got.Permissions)
+	}
+	for _, p := range got.Permissions {
+		switch p.Name {
+		case "media.view":
+			if len(p.Roles) != 3 {
+				t.Errorf("media.view roles overwritten by duplicate: %v", p.Roles)
+			}
+		case "media.upload":
+			if len(p.Roles) != 2 {
+				t.Errorf("media.upload roles wrong: %v", p.Roles)
+			}
+		default:
+			t.Errorf("unexpected permission %q", p.Name)
+		}
 	}
 }

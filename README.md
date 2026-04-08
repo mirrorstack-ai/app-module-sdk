@@ -244,7 +244,7 @@ app-module-sdk/
   auth/
     context.go                 WithUserID/WithAppID/WithAppRole, role constants
     middleware.go              PlatformAuth, PublicAuth, InternalAuth
-    permission.go              RequirePermission with auto-registration
+    permission.go              RequireRoles middleware (no tracking — see Module.RequirePermission)
   db/
     credential.go              Credential struct, context helpers
     db.go                      Dev-mode client, Querier interface

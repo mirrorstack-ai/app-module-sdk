@@ -213,7 +213,7 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 }
 
 // Platform registers routes with platform auth scope.
-// Default: admin only. Use auth.RequirePermission for member/viewer access.
+// Default: admin only. Use Module.RequirePermission for member/viewer access.
 func (m *Module) Platform(fn func(r chi.Router)) {
 	m.scopedRoutes(registry.ScopePlatform, auth.PlatformAuth(), fn)
 }
@@ -266,12 +266,29 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 	}
 }
 
-// RequirePermission returns chi middleware that checks AppRole against allowed roles.
-// Auto-registers the permission for manifest generation.
+// RequirePermission returns chi middleware that checks AppRole against the
+// allowed roles AND records the permission on this Module's registry so it
+// appears in the manifest payload. Call this at route registration time
+// (alongside m.Platform/Public/Internal), NOT from inside a request handler
+// — registry append is O(N), so dynamic per-request names would leak memory
+// and slow down every subsequent registration.
 //
-//	r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
+//	r.With(mod.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
+func (m *Module) RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
+	m.registry.AddPermission(name, roles)
+	return auth.RequireRoles(roles...)
+}
+
+// RequirePermission is the convenience wrapper that dispatches to the default
+// Module created by Init(). Calling this before Init() panics — match the
+// behavior of Platform/Public/Internal.
+//
+//	ms.Init(...)
+//	ms.Platform(func(r chi.Router) {
+//	    r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get(...)
+//	})
 func RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
-	return auth.RequirePermission(name, roles...)
+	return mustDefault("RequirePermission").RequirePermission(name, roles...)
 }
 
 // Start auto-detects Lambda vs HTTP and starts serving.

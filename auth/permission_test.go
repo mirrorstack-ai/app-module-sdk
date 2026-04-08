@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestRequirePermission_Allowed(t *testing.T) {
-	t.Cleanup(ResetPermissions)
+func TestRequireRoles_Allowed(t *testing.T) {
+	t.Parallel()
 
-	handler := RequirePermission("media.view", "admin", "member", "viewer")(http.HandlerFunc(okHandler))
+	handler := RequireRoles("admin", "member", "viewer")(http.HandlerFunc(okHandler))
 
 	tests := []struct {
 		role string
@@ -29,10 +29,10 @@ func TestRequirePermission_Allowed(t *testing.T) {
 	}
 }
 
-func TestRequirePermission_Denied(t *testing.T) {
-	t.Cleanup(ResetPermissions)
+func TestRequireRoles_Denied(t *testing.T) {
+	t.Parallel()
 
-	handler := RequirePermission("media.delete", "admin")(http.HandlerFunc(okHandler))
+	handler := RequireRoles("admin")(http.HandlerFunc(okHandler))
 
 	tests := []struct {
 		role string
@@ -40,8 +40,8 @@ func TestRequirePermission_Denied(t *testing.T) {
 	}{
 		{RoleMember, 403},
 		{RoleViewer, 403},
-		{"VideoManager", 403},  // custom role not in allowed list
-		{"ADMIN", 403},         // case-sensitive — "ADMIN" ≠ "admin"
+		{"VideoManager", 403}, // custom role not in allowed list
+		{"ADMIN", 403},        // case-sensitive — "ADMIN" ≠ "admin"
 		{"", 401},
 	}
 	for _, tt := range tests {
@@ -54,10 +54,10 @@ func TestRequirePermission_Denied(t *testing.T) {
 	}
 }
 
-func TestRequirePermission_AdminOnly(t *testing.T) {
-	t.Cleanup(ResetPermissions)
+func TestRequireRoles_AdminOnly(t *testing.T) {
+	t.Parallel()
 
-	handler := RequirePermission("media.config", "admin")(http.HandlerFunc(okHandler))
+	handler := RequireRoles("admin")(http.HandlerFunc(okHandler))
 
 	req := requestWithRole("POST", "/config", RoleAdmin)
 	rec := httptest.NewRecorder()
@@ -67,32 +67,36 @@ func TestRequirePermission_AdminOnly(t *testing.T) {
 	}
 }
 
-func TestRegisteredPermissions(t *testing.T) {
-	t.Cleanup(ResetPermissions)
+func TestRequireRoles_ZeroRolesDeniesEverything(t *testing.T) {
+	t.Parallel()
 
-	RequirePermission("media.view", "admin", "member", "viewer")
-	RequirePermission("media.upload", "admin", "member")
-	RequirePermission("media.delete", "admin")
-	// Duplicate should be skipped
-	RequirePermission("media.view", "admin", "member", "viewer")
+	// SECURITY regression guard: an empty roles list must be safe-by-default
+	// (deny everyone). A future "simplification" that returned next.ServeHTTP
+	// for the zero-roles case would silently open every route guarded by
+	// RequireRoles(...) — typically the result of a build-time bug where the
+	// roles slice came from configuration that failed to parse.
+	handler := RequireRoles()(http.HandlerFunc(okHandler))
 
-	perms := RegisteredPermissions()
-	if len(perms) != 3 {
-		t.Fatalf("expected 3 permissions, got %d", len(perms))
+	for _, role := range []string{RoleAdmin, RoleMember, RoleViewer, "VideoManager"} {
+		req := requestWithRole("GET", "/x", role)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("zero-roles, role=%q: want 403, got %d", role, rec.Code)
+		}
 	}
 
-	expected := map[string]int{
-		"media.view":   3,
-		"media.upload": 2,
-		"media.delete": 1,
-	}
-	for _, p := range perms {
-		wantRoles, ok := expected[p.Name]
-		if !ok {
-			t.Errorf("unexpected permission: %s", p.Name)
-		}
-		if len(p.Roles) != wantRoles {
-			t.Errorf("%s: expected %d roles, got %d", p.Name, wantRoles, len(p.Roles))
-		}
+	// Anonymous (no AppRole) still 401, not 403, because the
+	// authentication-required check fires before the role lookup.
+	req := requestWithRole("GET", "/x", "")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("zero-roles, anonymous: want 401, got %d", rec.Code)
 	}
 }
+
+// Note: registry/manifest tests previously lived here as
+// TestRegisteredPermissions. They now live in internal/registry where the
+// per-Module Permissions storage actually lives — the auth package no
+// longer maintains any cross-call state.

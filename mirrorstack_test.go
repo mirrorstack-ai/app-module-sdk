@@ -175,10 +175,11 @@ func TestInternal_AcceptsValidSecret(t *testing.T) {
 // --- Permission middleware ---
 
 func TestRequirePermission_AllowsMember(t *testing.T) {
-	t.Cleanup(auth.ResetPermissions)
+	t.Parallel() // safe now that permission state lives on the Module instance, not auth package globals
+
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
 	})
@@ -190,10 +191,11 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 }
 
 func TestRequirePermission_RejectsViewer(t *testing.T) {
-	t.Cleanup(auth.ResetPermissions)
+	t.Parallel()
+
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(RequirePermission("media.delete", "admin")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.delete", "admin")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("deleted"))
 		})
 	})
@@ -201,6 +203,39 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 	rec := doRequestWithRole(t, m.Router(), "DELETE", "/items/123", auth.RoleViewer)
 	if rec.Code != 403 {
 		t.Errorf("expected 403 for viewer on admin-only permission, got %d", rec.Code)
+	}
+}
+
+func TestRequirePermission_AppearsInManifest(t *testing.T) {
+	// Permissions registered via Module.RequirePermission must show up in the
+	// manifest payload — that's the whole point of consolidating into the
+	// per-Module registry. Two parallel modules in the same process must NOT
+	// see each other's permissions (the package-global registry would have).
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m1, _ := New(Config{ID: "media", Name: "Media"})
+	m2, _ := New(Config{ID: "video", Name: "Video"})
+
+	m1.Platform(func(r chi.Router) {
+		r.With(m1.RequirePermission("media.upload", "admin", "member")).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
+	})
+	m2.Platform(func(r chi.Router) {
+		r.With(m2.RequirePermission("video.transcode", "admin")).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
+	})
+
+	rec := doRequestWithSecret(t, m1.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+
+	if len(got.Permissions) != 2 {
+		t.Fatalf("m1 manifest permissions = %d, want 2 (media.upload, media.view): %+v", len(got.Permissions), got.Permissions)
+	}
+	for _, p := range got.Permissions {
+		if p.Name == "video.transcode" {
+			t.Errorf("m1 manifest leaked permission from m2: %+v", p)
+		}
 	}
 }
 
@@ -445,9 +480,10 @@ func TestRequireInternalSecret(t *testing.T) {
 
 func TestScopesPanic_BeforeInit(t *testing.T) {
 	fns := map[string]func(){
-		"Platform": func() { Platform(func(r chi.Router) {}) },
-		"Public":   func() { Public(func(r chi.Router) {}) },
-		"Internal": func() { Internal(func(r chi.Router) {}) },
+		"Platform":          func() { Platform(func(r chi.Router) {}) },
+		"Public":            func() { Public(func(r chi.Router) {}) },
+		"Internal":          func() { Internal(func(r chi.Router) {}) },
+		"RequirePermission": func() { RequirePermission("media.view", "admin") },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
