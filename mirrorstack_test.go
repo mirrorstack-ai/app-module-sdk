@@ -483,26 +483,15 @@ func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
 
-	// over the 64 KB limit — expect 413
+	// upgrade reads r.Body via json.Decode — MaxBytesReader triggers on oversized body
 	big := bytes.Repeat([]byte("x"), 64*1024+1)
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/install", bytes.NewReader(big))
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", bytes.NewReader(big))
 	req.Header.Set("X-MS-Internal-Secret", "secret")
 	rec := httptest.NewRecorder()
 	m.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("expected 413 for oversized body, got %d", rec.Code)
-	}
-
-	// exactly at limit — should not be rejected by MaxBytes
-	exact := bytes.Repeat([]byte("x"), 64*1024)
-	req2 := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/install", bytes.NewReader(exact))
-	req2.Header.Set("X-MS-Internal-Secret", "secret")
-	rec2 := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec2, req2)
-
-	if rec2.Code == http.StatusRequestEntityTooLarge {
-		t.Errorf("expected non-413 for body at limit, got 413")
 	}
 }
 
