@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -372,25 +373,29 @@ func TestManifest_MigrationFromConfig(t *testing.T) {
 }
 
 // --- Lifecycle endpoints ---
+//
+// Each test below covers BOTH the /lifecycle/app/* and /lifecycle/module/*
+// scope namespaces. The behavior is identical across scopes — only the
+// migration directory the handler reads from changes — so a single table
+// drives both. A regression that mounts only one scope, or that wires the
+// wrong handler under one of the namespaces, fails the loop here. Iteration
+// is keyed off migration.AllScopes() so a future scope addition is picked
+// up automatically.
 
 func TestLifecycle_RoutesRequireInternalSecret(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	// All four lifecycle routes should reject requests without the secret.
-	routes := []string{
-		"/__mirrorstack/platform/lifecycle/install",
-		"/__mirrorstack/platform/lifecycle/upgrade",
-		"/__mirrorstack/platform/lifecycle/downgrade",
-		"/__mirrorstack/platform/lifecycle/uninstall",
-	}
-	for _, route := range routes {
-		t.Run(route, func(t *testing.T) {
-			rec := doRequest(t, m.Router(), "POST", route)
-			if rec.Code != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", rec.Code)
-			}
-		})
+	for _, scope := range migration.AllScopes() {
+		for _, action := range []string{"install", "upgrade", "downgrade", "uninstall"} {
+			route := "/__mirrorstack/platform/lifecycle/" + string(scope) + "/" + action
+			t.Run(route, func(t *testing.T) {
+				rec := doRequest(t, m.Router(), "POST", route)
+				if rec.Code != http.StatusUnauthorized {
+					t.Errorf("status = %d, want 401", rec.Code)
+				}
+			})
+		}
 	}
 }
 
@@ -398,12 +403,16 @@ func TestLifecycle_UninstallReturnsOK(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/uninstall", "secret")
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
-		t.Errorf("body = %s, want status:ok", rec.Body.String())
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/uninstall", "secret")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+				t.Errorf("body = %s, want status:ok", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -412,9 +421,13 @@ func TestLifecycle_InstallEmptyFSReturnsOK(t *testing.T) {
 	// No SQL configured → install is a no-op (no migrations to apply).
 	m, _ := New(Config{ID: "test"})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/install", "secret")
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/install", "secret")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -422,14 +435,18 @@ func TestLifecycle_UpgradeRequiresPayload(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	// No body → 400
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", nil)
-	req.Header.Set("X-MS-Internal-Secret", "secret")
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			// No body → 400
+			req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/upgrade", nil)
+			req.Header.Set("X-MS-Internal-Secret", "secret")
+			rec := httptest.NewRecorder()
+			m.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
 	}
 }
 
@@ -520,7 +537,7 @@ func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
 	// build valid JSON > 64 KB — json.Decode reads it all before failing, triggering MaxBytesReader
 	padding := strings.Repeat("a", 64*1024)
 	bigJSON := `{"from":"` + padding + `","to":"0001"}`
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", strings.NewReader(bigJSON))
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/app/upgrade", strings.NewReader(bigJSON))
 	req.Header.Set("X-MS-Internal-Secret", "secret")
 	rec := httptest.NewRecorder()
 	m.Router().ServeHTTP(rec, req)

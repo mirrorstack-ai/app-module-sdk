@@ -224,10 +224,10 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 - [x] `health` — health check
 - [x] `platform/manifest` — module identity + capabilities
 - [ ] `platform/meter` — custom business metrics
-- [x] `platform/lifecycle/install` — fresh install on an app
-- [x] `platform/lifecycle/upgrade` — upgrade between versions
-- [x] `platform/lifecycle/downgrade` — rollback between versions
-- [x] `platform/lifecycle/uninstall` — soft-delete removal
+- [x] `platform/lifecycle/app/install` and `platform/lifecycle/module/install` — fresh install (per-app schema or per-module shared schema)
+- [x] `platform/lifecycle/app/upgrade` and `platform/lifecycle/module/upgrade` — upgrade between versions
+- [x] `platform/lifecycle/app/downgrade` and `platform/lifecycle/module/downgrade` — rollback between versions
+- [x] `platform/lifecycle/app/uninstall` and `platform/lifecycle/module/uninstall` — soft-delete removal
 
 ### MCP integration
 
