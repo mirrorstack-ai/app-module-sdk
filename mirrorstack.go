@@ -20,6 +20,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -346,6 +347,7 @@ func (m *Module) mountSystemRoutes() {
 	m.router.Route("/__mirrorstack", func(r chi.Router) {
 		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
+			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(auth.InternalAuth())
 			r.Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Name, m.config.Icon,

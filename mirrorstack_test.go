@@ -1,6 +1,7 @@
 package mirrorstack
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -476,6 +477,33 @@ func TestRequireInternalSecret(t *testing.T) {
 			t.Errorf("expected nil error when secret set, got %v", err)
 		}
 	})
+}
+
+func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
+
+	// over the 64 KB limit — expect 413
+	big := bytes.Repeat([]byte("x"), 64*1024+1)
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/install", bytes.NewReader(big))
+	req.Header.Set("X-MS-Internal-Secret", "secret")
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized body, got %d", rec.Code)
+	}
+
+	// exactly at limit — should not be rejected by MaxBytes
+	exact := bytes.Repeat([]byte("x"), 64*1024)
+	req2 := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/install", bytes.NewReader(exact))
+	req2.Header.Set("X-MS-Internal-Secret", "secret")
+	rec2 := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec2, req2)
+
+	if rec2.Code == http.StatusRequestEntityTooLarge {
+		t.Errorf("expected non-413 for body at limit, got 413")
+	}
 }
 
 func TestScopesPanic_BeforeInit(t *testing.T) {
