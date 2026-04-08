@@ -113,6 +113,33 @@ func TestNew_EmptyID(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsBadID(t *testing.T) {
+	bad := []string{
+		"Media",       // uppercase
+		"media!",      // special char
+		"1media",      // starts with digit
+		"_media",      // starts with underscore
+		"../etc",      // path traversal
+		"abcdefghijklmnopqrstuvwxyz012345", // 32 chars
+	}
+	for _, id := range bad {
+		_, err := New(Config{ID: id})
+		if err == nil {
+			t.Errorf("expected error for ID %q", id)
+		}
+	}
+}
+
+func TestNew_AcceptsValidID(t *testing.T) {
+	good := []string{"media", "oauth", "billing_engine", "v2_oauth"}
+	for _, id := range good {
+		_, err := New(Config{ID: id})
+		if err != nil {
+			t.Errorf("unexpected error for ID %q: %v", id, err)
+		}
+	}
+}
+
 func TestRouter(t *testing.T) {
 	m, err := New(Config{ID: "test", Name: "Test"})
 	if err != nil {
