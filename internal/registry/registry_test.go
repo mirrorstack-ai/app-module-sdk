@@ -335,3 +335,15 @@ func TestPermissions_RolesAreCloned(t *testing.T) {
 		t.Errorf("output mutation leaked into registry: roles[1] = %q", again[0].Roles[1])
 	}
 }
+
+func TestAddPermission_PanicsOnEmptyName(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for empty permission name")
+		}
+	}()
+	r := New()
+	r.AddPermission("", []string{"admin"})
+}
