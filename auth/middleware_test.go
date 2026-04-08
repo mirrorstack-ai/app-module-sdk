@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -165,6 +167,77 @@ func TestInternalAuth_WrongSecret_InLambda_Still401(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 wrong-secret in-lambda, got %d", rec.Code)
+	}
+}
+
+func TestInternalAuth_RejectionLog_NoSecret(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(nil) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "internal auth rejected") {
+		t.Errorf("expected rejection log line, got: %q", got)
+	}
+	if !strings.Contains(got, "no secret configured") {
+		t.Errorf("expected 'no secret configured' in log, got: %q", got)
+	}
+}
+
+func TestInternalAuth_RejectionLog_WrongSecret(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(nil) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "test-secret-123")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	req.Header.Set("X-MS-Internal-Secret", "bad-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "internal auth rejected") {
+		t.Errorf("expected rejection log line, got: %q", got)
+	}
+	if !strings.Contains(got, "header_present=true") {
+		t.Errorf("expected header_present=true in log, got: %q", got)
+	}
+	// SECURITY: secret value must not appear in log
+	if strings.Contains(got, "bad-secret") || strings.Contains(got, "test-secret") {
+		t.Errorf("secret value leaked into log: %q", got)
+	}
+}
+
+func TestInternalAuth_RejectionLog_NoHeader(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(nil) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "test-secret-123")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := buf.String()
+	if !strings.Contains(got, "header_present=false") {
+		t.Errorf("expected header_present=false in log, got: %q", got)
 	}
 }
 

@@ -58,6 +58,7 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if expected == "" {
+				log.Printf("mirrorstack: internal auth rejected (no secret configured) from %s", r.RemoteAddr)
 				if inLambda {
 					// SECURITY: generic body. The detailed reason is in the
 					// construction-time log line above; the 503 status itself
@@ -75,6 +76,7 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 
 			secret := r.Header.Get("X-MS-Internal-Secret")
 			if !constantTimeEqual(secret, expected) {
+				log.Printf("mirrorstack: internal auth rejected (secret mismatch, header_present=%v) from %s", secret != "", r.RemoteAddr)
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "internal authentication required"})
 				return
 			}
