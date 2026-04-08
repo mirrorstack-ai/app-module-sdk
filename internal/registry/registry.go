@@ -4,9 +4,9 @@
 //
 // Routes are recorded by Module.Platform/Public/Internal as the developer
 // registers handlers. Permissions are recorded by Module.RequirePermission.
-// Events and schedules are placeholders for issue #9 (ms.OnEvent / ms.Emit /
-// ms.Cron) — the registry exposes empty defaults so the manifest payload
-// shape is stable.
+// Events and schedules are recorded by Module.OnEvent / Module.Emits /
+// Module.Cron (issue #9). The registry exposes empty defaults so the
+// manifest payload shape is stable even when nothing is registered.
 package registry
 
 import (
@@ -47,7 +47,7 @@ type Route struct {
 
 // Schedule is a cron job declaration. Path is the URL the platform's
 // scheduler invokes (POSTs to) when the cron fires; the SDK auto-derives
-// it as /crons/{name} on the module's Internal scope.
+// it as /__mirrorstack/crons/{name} on the module's Internal scope.
 type Schedule struct {
 	Name string `json:"name"`
 	Cron string `json:"cron"`

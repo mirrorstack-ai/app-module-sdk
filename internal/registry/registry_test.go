@@ -349,8 +349,8 @@ func TestPermissions_FirstWinsBlocksPrivilegeEscalation(t *testing.T) {
 	// First-wins must block this — a buggy or malicious second call cannot
 	// replace the original tight ruleset with a wider one.
 	r := New()
-	r.AddPermission("media.delete", []string{"admin"})                            // strict first
-	r.AddPermission("media.delete", []string{"admin", "member", "viewer"})        // looser second — must be dropped
+	r.AddPermission("media.delete", []string{"admin"})                     // strict first
+	r.AddPermission("media.delete", []string{"admin", "member", "viewer"}) // looser second — must be dropped
 
 	got := r.Permissions()
 	if len(got) != 1 {

@@ -49,16 +49,21 @@ type Config struct {
 }
 
 // Module is the core SDK instance.
+//
+// internalAuth is captured at New() time so OnEvent/Cron registrations can
+// reuse a single middleware closure. auth.InternalAuth() reads
+// MS_INTERNAL_SECRET once at construction; constructing it per registration
+// would re-read the env var and re-allocate the closure on every call.
 type Module struct {
-	config       Config
-	router       *chi.Mux
-	logger       *log.Logger
-	registry     *registry.Registry
-	internalAuth func(http.Handler) http.Handler // cached at New() — InternalAuth() reads MS_INTERNAL_SECRET once at construction; recomputing per registration would re-read the env var and re-allocate the closure for every OnEvent/Cron call
-	poolCache    *db.PoolCache                   // production: per-app DB pools
-	devDBOnce    sync.Once                       // dev mode: lazy DB init
-	devDB        *db.DB
-	devDBErr     error
+	config         Config
+	router         *chi.Mux
+	logger         *log.Logger
+	registry       *registry.Registry
+	internalAuth   func(http.Handler) http.Handler
+	poolCache      *db.PoolCache // production: per-app DB pools
+	devDBOnce      sync.Once     // dev mode: lazy DB init
+	devDB          *db.DB
+	devDBErr       error
 	cacheCache     *cache.ClientCache // production: per-app Redis clients
 	devCacheOnce   sync.Once          // dev mode: lazy cache init
 	devCache       *cache.Client
