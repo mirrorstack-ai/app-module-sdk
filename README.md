@@ -106,42 +106,6 @@ err := ms.Tx(r.Context(), func(q db.Querier) error {
 })
 ```
 
-### Module-shared schema (`mod_<id>`)
-
-For state that crosses app boundaries — outbox tables, dedup ledgers,
-cross-app audit logs, rate limiters, module-wide config — use `ms.ModuleDB`
-and `ms.ModuleTx`:
-
-```go
-// Insert into the module's shared outbox table
-err := ms.ModuleTx(r.Context(), func(q db.Querier) error {
-    return q.Exec(ctx, "INSERT INTO outbox (event, payload) VALUES ($1, $2)", ...)
-})
-```
-
-`ModuleDB` and `ModuleTx` operate on the module's `mod_<id>` schema — independent
-of the per-app `app_<id>` schema that `DB`/`Tx` use. A handler that needs both
-calls both — they use independent credentials and don't interfere.
-
-The `mod_<id>` schema is where you put `sql/module/*.up.sql` migrations
-(see Module structure below).
-
-#### Platform role grant contract
-
-The SDK relies on the platform provisioning two distinct DB roles per
-deployed module with disjoint privileges:
-
-| Role | Schema | Granted via |
-|------|--------|-------------|
-| Per-(module, app) | `app_<appID>` only | injected as `db.Credential` for `Module.DB` / `Module.Tx` |
-| Per-module | `mod_<moduleID>` only | injected as `db.Credential` for `Module.ModuleDB` / `Module.ModuleTx` |
-
-Cross-credential contamination (e.g., a misrouted app credential reaching
-`ModuleDB`) is caught by Postgres at the SQL layer because the per-(module,
-app) role lacks `USAGE` on `mod_<id>` — defense-in-depth, no SDK enforcement
-required. Verify your platform-side role provisioning keeps the two grant
-sets disjoint.
-
 ### Security (3-layer isolation)
 
 | Layer | What | How |
@@ -311,13 +275,9 @@ app-module-sdk/
 
 ```
 app-mod-{name}/
-  sql/
-    app/                       Per-app migrations (one app_<id> schema per tenant)
-      0000_initial.up.sql
-      0000_initial.down.sql
-    module/                    Per-module migrations (single mod_<id> shared schema)
-      0000_outbox.up.sql       e.g. outbox, dedup ledgers, audit logs
-      0000_outbox.down.sql
+  sql/                         Migrations (auto-applied)
+    0000_initial.up.sql
+    0000_initial.down.sql
     queries/                   sqlc query definitions
   api/                         Go backend
     cmd/main.go

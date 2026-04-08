@@ -8,16 +8,11 @@ import (
 type contextKey string
 
 const (
-	schemaKey           = contextKey("ms-app-schema")
-	credentialKey       = contextKey("ms-db-credential")
-	moduleCredentialKey = contextKey("ms-db-module-credential")
+	schemaKey     = contextKey("ms-app-schema")
+	credentialKey = contextKey("ms-db-credential")
 )
 
-// Credential holds per-invocation database credentials injected by the
-// platform. The same struct serves both per-app and per-module credentials,
-// distinguished by the context key they live under (credentialKey vs
-// moduleCredentialKey). Different DB usernames separate pool cache keys
-// naturally — no flag on the struct is needed.
+// Credential holds per-invocation database credentials injected by the platform.
 type Credential struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
@@ -51,29 +46,13 @@ func SchemaFrom(ctx context.Context) string {
 	return s
 }
 
-// WithCredential returns a context with the per-app DB credential set.
-// Used by the platform's Lambda invoke shim before calling the module
-// handler, so Module.DB / Module.Tx can scope queries to the app schema.
+// WithCredential returns a context with the DB credential set.
 func WithCredential(ctx context.Context, cred Credential) context.Context {
 	return context.WithValue(ctx, credentialKey, &cred)
 }
 
-// CredentialFrom reads the per-app DB credential from the context.
+// CredentialFrom reads the DB credential from the context.
 func CredentialFrom(ctx context.Context) *Credential {
 	c, _ := ctx.Value(credentialKey).(*Credential)
-	return c
-}
-
-// WithModuleCredential returns a context with the per-module DB credential
-// set. Used by the platform's Lambda invoke shim for handlers that touch
-// the module's cross-app shared schema (mod_<id>). The use cases live on
-// Module.ModuleDB; this function only handles credential injection.
-func WithModuleCredential(ctx context.Context, cred Credential) context.Context {
-	return context.WithValue(ctx, moduleCredentialKey, &cred)
-}
-
-// ModuleCredentialFrom reads the per-module DB credential from the context.
-func ModuleCredentialFrom(ctx context.Context) *Credential {
-	c, _ := ctx.Value(moduleCredentialKey).(*Credential)
 	return c
 }
