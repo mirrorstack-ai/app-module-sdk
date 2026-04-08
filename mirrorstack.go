@@ -277,6 +277,12 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 // Start auto-detects Lambda vs HTTP and starts serving.
 func (m *Module) Start() error {
 	if runtime.IsLambda() {
+		// Fail-fast in Lambda: a missing secret turns every platform call
+		// into a 503; surface it as an init failure instead. Dev/HTTP
+		// intentionally permits no-secret.
+		if err := requireInternalSecret(); err != nil {
+			return err
+		}
 		handler := runtime.NewLambdaHandler(m.router)
 		lambda.Start(handler)
 		return nil
@@ -290,6 +296,15 @@ func (m *Module) Start() error {
 	m.logger.Printf("%s module (%s) listening on %s", m.config.Name, m.config.ID, addr)
 	if err := http.ListenAndServe(addr, m.router); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	return nil
+}
+
+// requireInternalSecret errors if MS_INTERNAL_SECRET is unset — used by
+// Module.Start() in Lambda mode to fail init before lambda.Start handoff.
+func requireInternalSecret() error {
+	if os.Getenv("MS_INTERNAL_SECRET") == "" {
+		return errors.New("mirrorstack: MS_INTERNAL_SECRET not set — required for platform routes in Lambda mode")
 	}
 	return nil
 }

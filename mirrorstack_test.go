@@ -424,6 +424,25 @@ func TestStart_BeforeInit(t *testing.T) {
 	_ = Start()
 }
 
+func TestRequireInternalSecret(t *testing.T) {
+	// Pulled out as its own helper because Module.Start() in Lambda mode
+	// calls lambda.Start() which we cannot drive from a unit test. The
+	// helper is the only piece of fail-fast logic we own; once it returns
+	// nil, Start() hands off to the AWS Lambda runtime.
+	t.Run("missing", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "")
+		if err := requireInternalSecret(); err == nil {
+			t.Error("expected error when MS_INTERNAL_SECRET is unset")
+		}
+	})
+	t.Run("present", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "any-non-empty-value")
+		if err := requireInternalSecret(); err != nil {
+			t.Errorf("expected nil error when secret set, got %v", err)
+		}
+	})
+}
+
 func TestScopesPanic_BeforeInit(t *testing.T) {
 	fns := map[string]func(){
 		"Platform": func() { Platform(func(r chi.Router) {}) },
