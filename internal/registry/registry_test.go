@@ -250,6 +250,26 @@ func TestPermissions_FirstWinsByName(t *testing.T) {
 	}
 }
 
+func TestPermissions_FirstWinsBlocksPrivilegeEscalation(t *testing.T) {
+	t.Parallel()
+
+	// SECURITY regression guard: the dangerous direction of duplicate-name
+	// re-registration is stricter-first, looser-second (privilege escalation).
+	// First-wins must block this — a buggy or malicious second call cannot
+	// replace the original tight ruleset with a wider one.
+	r := New()
+	r.AddPermission("media.delete", []string{"admin"})                            // strict first
+	r.AddPermission("media.delete", []string{"admin", "member", "viewer"})        // looser second — must be dropped
+
+	got := r.Permissions()
+	if len(got) != 1 {
+		t.Fatalf("permissions = %d, want 1 (first-wins by name)", len(got))
+	}
+	if len(got[0].Roles) != 1 || got[0].Roles[0] != "admin" {
+		t.Errorf("looser second registration leaked: %v, want [admin]", got[0].Roles)
+	}
+}
+
 func TestPermissions_EmptyReturnsNonNil(t *testing.T) {
 	t.Parallel()
 	if got := New().Permissions(); got == nil {

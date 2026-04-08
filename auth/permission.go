@@ -15,6 +15,12 @@ import (
 // the permission in the manifest payload, use Module.RequirePermission (or
 // mirrorstack.RequirePermission, which dispatches to the default Module).
 //
+// SECURITY: calling RequireRoles with no arguments produces a middleware that
+// denies every authenticated caller (the empty roleSet rejects all lookups).
+// This is the safe-by-default behavior — a typo'd or generated empty roles
+// list locks down the route rather than opening it. Do not rely on
+// RequireRoles() as a "no-op" middleware; use auth.PublicAuth instead.
+//
 //	r.With(auth.RequireRoles("admin", "member", "viewer")).Get("/items", listItems)
 func RequireRoles(roles ...string) func(http.Handler) http.Handler {
 	roleSet := make(map[string]bool, len(roles))
