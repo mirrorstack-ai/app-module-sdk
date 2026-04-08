@@ -2,30 +2,21 @@ package auth
 
 import (
 	"net/http"
-	"sync"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
-// Permission represents a declared module permission.
-type Permission struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Roles       []string `json:"roles"`
-}
-
-var (
-	registryMu  sync.RWMutex
-	permissions []Permission
-)
-
-// RequirePermission returns chi middleware that checks AppRole against allowed roles.
-// Registers the permission for manifest generation.
+// RequireRoles returns chi middleware that checks AppRole against the allowed
+// roles. Pure middleware factory: no registry, no global state, safe to call
+// from any goroutine.
 //
-//	r.With(auth.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
-func RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
-	registerPermission(Permission{Name: name, Roles: roles})
-
+// This function does NOT track the permission name in any module manifest —
+// it only enforces the role check at request time. To both enforce AND surface
+// the permission in the manifest payload, use Module.RequirePermission (or
+// mirrorstack.RequirePermission, which dispatches to the default Module).
+//
+//	r.With(auth.RequireRoles("admin", "member", "viewer")).Get("/items", listItems)
+func RequireRoles(roles ...string) func(http.Handler) http.Handler {
 	roleSet := make(map[string]bool, len(roles))
 	for _, r := range roles {
 		roleSet[r] = true
@@ -45,33 +36,4 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 			next.ServeHTTP(w, r)
 		})
 	}
-}
-
-func registerPermission(p Permission) {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-
-	for _, existing := range permissions {
-		if existing.Name == p.Name {
-			return
-		}
-	}
-	permissions = append(permissions, p)
-}
-
-// RegisteredPermissions returns a copy of all declared permissions.
-func RegisteredPermissions() []Permission {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-
-	result := make([]Permission, len(permissions))
-	copy(result, permissions)
-	return result
-}
-
-// ResetPermissions clears the registry. For testing only.
-func ResetPermissions() {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	permissions = nil
 }

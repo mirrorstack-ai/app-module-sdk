@@ -23,10 +23,11 @@ type ManifestPayload struct {
 	// and uses it to translate semver release requests into the numeric
 	// migration numbers the lifecycle handlers expect. Empty map is valid:
 	// modules without formal releases just declare migration numbers directly.
-	Versions  map[string]string                   `json:"versions"`
-	Routes    map[registry.Scope][]registry.Route `json:"routes"`
-	Events    ManifestEvents                      `json:"events"`
-	Schedules []registry.Schedule                 `json:"schedules"`
+	Versions    map[string]string                   `json:"versions"`
+	Routes      map[registry.Scope][]registry.Route `json:"routes"`
+	Events      ManifestEvents                      `json:"events"`
+	Schedules   []registry.Schedule                 `json:"schedules"`
+	Permissions []registry.Permission               `json:"permissions"`
 }
 
 // ManifestDefaults is the default display name and icon. The platform may
@@ -70,13 +71,14 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]str
 		}
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
-			ID:        id,
-			Defaults:  ManifestDefaults{Name: name, Icon: icon},
-			Migration: version,
-			Versions:  versions,
-			Routes:    reg.Routes(),
-			Events:    ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Schedules: reg.Schedules(),
+			ID:          id,
+			Defaults:    ManifestDefaults{Name: name, Icon: icon},
+			Migration:   version,
+			Versions:    versions,
+			Routes:      reg.Routes(),
+			Events:      ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Schedules:   reg.Schedules(),
+			Permissions: reg.Permissions(),
 		})
 	}
 }

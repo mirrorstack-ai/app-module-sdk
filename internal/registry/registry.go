@@ -1,10 +1,12 @@
-// Package registry collects per-module declarations (routes, events, schedules)
-// for the manifest endpoint to expose to the platform on deploy.
+// Package registry collects per-module declarations (routes, events,
+// schedules, permissions) for the manifest endpoint to expose to the platform
+// on deploy.
 //
 // Routes are recorded by Module.Platform/Public/Internal as the developer
-// registers handlers. Events and schedules are placeholders for issue #9
-// (ms.OnEvent / ms.Emit / ms.Cron) — the registry exposes empty defaults so
-// the manifest payload shape is stable.
+// registers handlers. Permissions are recorded by Module.RequirePermission.
+// Events and schedules are placeholders for issue #9 (ms.OnEvent / ms.Emit /
+// ms.Cron) — the registry exposes empty defaults so the manifest payload
+// shape is stable.
 package registry
 
 import (
@@ -48,14 +50,22 @@ type Schedule struct {
 	Cron string `json:"cron"`
 }
 
-// Registry is the per-module registry of routes/events/schedules.
+// Permission is a declared module permission. Exposed in the manifest so the
+// platform can surface "what does this module need" on its install screen.
+type Permission struct {
+	Name  string   `json:"name"`
+	Roles []string `json:"roles"`
+}
+
+// Registry is the per-module registry of routes/events/schedules/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
-	mu         sync.RWMutex
-	routes     map[Scope][]Route
-	emits      []string
-	subscribes map[string]string // event name → internal path
-	schedules  []Schedule
+	mu          sync.RWMutex
+	routes      map[Scope][]Route
+	emits       []string
+	subscribes  map[string]string // event name → internal path
+	schedules   []Schedule
+	permissions []Permission
 }
 
 func New() *Registry {
@@ -162,4 +172,41 @@ func (r *Registry) Schedules() []Schedule {
 		return []Schedule{}
 	}
 	return slices.Clone(r.schedules)
+}
+
+// AddPermission records a declared permission. First-wins by name: a second
+// AddPermission for the same name is dropped (matches AddRoute / AddEmit /
+// AddSchedule semantics). The roles slice is cloned so caller mutations
+// after the call cannot leak into the stored copy.
+func (r *Registry) AddPermission(name string, roles []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.permissions {
+		if existing.Name == name {
+			return
+		}
+	}
+	r.permissions = append(r.permissions, Permission{
+		Name:  name,
+		Roles: slices.Clone(roles),
+	})
+}
+
+// Permissions returns a non-nil deep copy of all declared permissions. The
+// roles slice on each entry is cloned so caller mutations cannot leak back.
+//
+// The hand-rolled loop is required: slices.Clone is shallow, and a shallow
+// clone of []Permission would share each entry's Roles slice with the
+// registry. TestPermissions_RolesAreCloned is the regression guard.
+func (r *Registry) Permissions() []Permission {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.permissions == nil {
+		return []Permission{}
+	}
+	out := make([]Permission, len(r.permissions))
+	for i, p := range r.permissions {
+		out[i] = Permission{Name: p.Name, Roles: slices.Clone(p.Roles)}
+	}
+	return out
 }
