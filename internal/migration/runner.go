@@ -17,25 +17,30 @@ import (
 type Migration struct {
 	Version  string // numeric prefix from filename, e.g., "0008"
 	Name     string // human-readable slug, e.g., "add_index"
-	UpFile   string // path within fsys, e.g., "sql/0008_add_index.up.sql"
+	UpFile   string // path within fsys, e.g., "sql/app/0008_add_index.up.sql"
 	DownFile string // path within fsys, "" if no down file present
 }
 
-// List returns all migrations from sql/, sorted by numeric version (ascending).
-// A migration is identified by its .up.sql file; the matching .down.sql is
-// recorded if present (empty otherwise — downgrades will fail for that version).
+// List returns all migrations from sql/{scope}/, sorted by numeric version
+// (ascending). A migration is identified by its .up.sql file; the matching
+// .down.sql is recorded if present (empty otherwise — downgrades will fail
+// for that version).
 //
-// Returns an empty slice (not an error) if fsys is nil or sql/ does not exist.
-func List(fsys fs.FS) ([]Migration, error) {
+// Returns an empty slice (not an error) if fsys is nil or sql/{scope}/ does
+// not exist. A module that has only app migrations (no cross-app shared
+// state) will see List(fsys, ScopeModule) return an empty slice cleanly,
+// which is what the manifest needs to report version "" for that scope.
+func List(fsys fs.FS, scope Scope) ([]Migration, error) {
 	if fsys == nil {
 		return nil, nil
 	}
-	entries, err := fs.ReadDir(fsys, "sql")
+	dir := scope.Dir()
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("mirrorstack/migration: read sql/ dir: %w", err)
+		return nil, fmt.Errorf("mirrorstack/migration: read %s dir: %w", dir, err)
 	}
 
 	// First pass: collect filenames into two maps keyed by version.
@@ -48,12 +53,12 @@ func List(fsys fs.FS) ([]Migration, error) {
 			continue
 		}
 		if version, slug, ok := parseUpFilename(e.Name()); ok {
-			upFiles[version] = "sql/" + e.Name()
+			upFiles[version] = dir + "/" + e.Name()
 			names[version] = slug
 			continue
 		}
 		if m := downFilePattern.FindStringSubmatch(e.Name()); m != nil {
-			downFiles[m[1]] = "sql/" + e.Name()
+			downFiles[m[1]] = dir + "/" + e.Name()
 		}
 	}
 

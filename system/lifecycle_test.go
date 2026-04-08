@@ -138,7 +138,7 @@ func TestUpgradeHandler_NoOp(t *testing.T) {
 	// short-circuits before the runner is called → 200 with empty Applied.
 	// This exercises the happy-path wiring without needing a real DB.
 	fsys := fstest.MapFS{
-		"sql/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
+		"sql/app/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
 	h := UpgradeHandler(fsys, noopTxRunner(t))
 	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
@@ -159,8 +159,8 @@ func TestDowngradeHandler_RequiresFromGreaterThanTo(t *testing.T) {
 	t.Parallel()
 
 	fsys := fstest.MapFS{
-		"sql/0001_a.up.sql":   &fstest.MapFile{Data: []byte("")},
-		"sql/0001_a.down.sql": &fstest.MapFile{Data: []byte("")},
+		"sql/app/0001_a.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/app/0001_a.down.sql": &fstest.MapFile{Data: []byte("")},
 	}
 	h := DowngradeHandler(fsys, noopTxRunner(t))
 
