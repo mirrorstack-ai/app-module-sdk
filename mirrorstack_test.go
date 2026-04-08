@@ -483,9 +483,10 @@ func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
 
-	// upgrade reads r.Body via json.Decode — MaxBytesReader triggers on oversized body
-	big := bytes.Repeat([]byte("x"), 64*1024+1)
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", bytes.NewReader(big))
+	// build valid JSON > 64 KB — json.Decode reads it all before failing, triggering MaxBytesReader
+	padding := strings.Repeat("a", 64*1024)
+	bigJSON := `{"from":"` + padding + `","to":"0001"}`
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", strings.NewReader(bigJSON))
 	req.Header.Set("X-MS-Internal-Secret", "secret")
 	rec := httptest.NewRecorder()
 	m.Router().ServeHTTP(rec, req)
