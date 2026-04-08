@@ -39,13 +39,20 @@ type Config struct {
 	// routes (install/upgrade/downgrade) read it to apply migrations.
 	SQL fs.FS
 
-	// Versions optionally maps semver release tags to migration numbers
-	// (e.g., {"v0.1.0": "0008", "v0.2.0": "0012"}). Exposed to the platform
-	// via the manifest endpoint so the platform can translate its internal
-	// semver-based deploy state into the migration numbers the lifecycle
-	// handlers accept. The SDK itself never reads this map at lifecycle
-	// time — /lifecycle/{upgrade,downgrade} take migration numbers only.
-	Versions map[string]string
+	// Versions optionally maps semver release tags to per-scope migration
+	// numbers, e.g.:
+	//
+	//	{
+	//	    "v0.1.0": {App: "0008", Module: "0002"},
+	//	    "v0.2.0": {App: "0012"},  // module track unchanged
+	//	}
+	//
+	// Exposed to the platform via the manifest endpoint so the platform can
+	// translate its internal semver-based deploy state into the migration
+	// numbers the lifecycle handlers accept. The SDK itself never reads this
+	// map at lifecycle time — /lifecycle/{upgrade,downgrade} take migration
+	// numbers only.
+	Versions map[string]system.MigrationVersions
 }
 
 // Module is the core SDK instance.

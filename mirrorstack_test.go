@@ -366,8 +366,8 @@ func TestManifest_MigrationFromConfig(t *testing.T) {
 		t.Fatalf("decode manifest: %v", err)
 	}
 
-	if got.Migration != "0008" {
-		t.Errorf("migration = %q, want 0008", got.Migration)
+	if got.Migration.App != "0008" {
+		t.Errorf("migration.app = %q, want 0008", got.Migration.App)
 	}
 }
 
