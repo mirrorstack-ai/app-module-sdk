@@ -478,6 +478,23 @@ func TestRequireInternalSecret(t *testing.T) {
 	})
 }
 
+func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
+
+	// build valid JSON > 64 KB — json.Decode reads it all before failing, triggering MaxBytesReader
+	padding := strings.Repeat("a", 64*1024)
+	bigJSON := `{"from":"` + padding + `","to":"0001"}`
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", strings.NewReader(bigJSON))
+	req.Header.Set("X-MS-Internal-Secret", "secret")
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized body, got %d", rec.Code)
+	}
+}
+
 func TestScopesPanic_BeforeInit(t *testing.T) {
 	fns := map[string]func(){
 		"Platform":          func() { Platform(func(r chi.Router) {}) },
