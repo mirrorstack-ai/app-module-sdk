@@ -1,6 +1,7 @@
 package mirrorstack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -18,6 +21,41 @@ func resetDefault(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() { defaultModule = nil })
 	defaultModule = nil
+}
+
+// newTestModuleWithSecret creates a Module with MS_INTERNAL_SECRET set to
+// "secret" — the canonical setup for tests that exercise internal-scope
+// routes (manifest, lifecycle, events, crons). Use the lowercase id for
+// stable manifest assertions.
+//
+// IMPORTANT: t.Setenv MUST run before New(), which is why this helper
+// bundles them. Module.New() captures auth.InternalAuth() at construction;
+// the cached middleware closure reads MS_INTERNAL_SECRET once and never
+// re-reads. A test that calls New() then sets the env afterward will
+// silently produce a module with the wrong secret and fail with
+// confusing 401/503 responses.
+func newTestModuleWithSecret(t *testing.T, id string) *Module {
+	t.Helper()
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, err := New(Config{ID: id})
+	if err != nil {
+		t.Fatalf("New(%q): %v", id, err)
+	}
+	return m
+}
+
+// assertPanics runs fn and fails the test if fn does not panic. msg is the
+// error message used when no panic occurred. Mirrors the recover-pattern
+// previously duplicated across event_test.go, cron_test.go,
+// permission_test.go, and registry_test.go.
+func assertPanics(t *testing.T, msg string, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error(msg)
+		}
+	}()
+	fn()
 }
 
 func doRequest(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
@@ -72,6 +110,33 @@ func TestNew_EmptyID(t *testing.T) {
 	_, err := New(Config{})
 	if err == nil {
 		t.Error("expected error for empty ID")
+	}
+}
+
+func TestNew_RejectsBadID(t *testing.T) {
+	bad := []string{
+		"Media",       // uppercase
+		"media!",      // special char
+		"1media",      // starts with digit
+		"_media",      // starts with underscore
+		"../etc",      // path traversal
+		"abcdefghijklmnopqrstuvwxyz012345", // 32 chars
+	}
+	for _, id := range bad {
+		_, err := New(Config{ID: id})
+		if err == nil {
+			t.Errorf("expected error for ID %q", id)
+		}
+	}
+}
+
+func TestNew_AcceptsValidID(t *testing.T) {
+	good := []string{"media", "oauth", "billing_engine", "v2_oauth"}
+	for _, id := range good {
+		_, err := New(Config{ID: id})
+		if err != nil {
+			t.Errorf("unexpected error for ID %q: %v", id, err)
+		}
 	}
 }
 
@@ -320,8 +385,8 @@ func TestManifest_RoutesFromAllScopes_RegisteredViaModule(t *testing.T) {
 func TestManifest_MigrationFromConfig(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	sqlFS := fstest.MapFS{
-		"sql/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
-		"sql/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+		"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/app/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
 	m, _ := New(Config{ID: "media", Name: "Media", SQL: sqlFS})
 
@@ -331,31 +396,35 @@ func TestManifest_MigrationFromConfig(t *testing.T) {
 		t.Fatalf("decode manifest: %v", err)
 	}
 
-	if got.Migration != "0008" {
-		t.Errorf("migration = %q, want 0008", got.Migration)
+	if got.Migration.App != "0008" {
+		t.Errorf("migration.app = %q, want 0008", got.Migration.App)
 	}
 }
 
 // --- Lifecycle endpoints ---
+//
+// Each test below covers BOTH the /lifecycle/app/* and /lifecycle/module/*
+// scope namespaces. The behavior is identical across scopes — only the
+// migration directory the handler reads from changes — so a single table
+// drives both. A regression that mounts only one scope, or that wires the
+// wrong handler under one of the namespaces, fails the loop here. Iteration
+// is keyed off migration.AllScopes() so a future scope addition is picked
+// up automatically.
 
 func TestLifecycle_RoutesRequireInternalSecret(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	// All four lifecycle routes should reject requests without the secret.
-	routes := []string{
-		"/__mirrorstack/platform/lifecycle/install",
-		"/__mirrorstack/platform/lifecycle/upgrade",
-		"/__mirrorstack/platform/lifecycle/downgrade",
-		"/__mirrorstack/platform/lifecycle/uninstall",
-	}
-	for _, route := range routes {
-		t.Run(route, func(t *testing.T) {
-			rec := doRequest(t, m.Router(), "POST", route)
-			if rec.Code != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", rec.Code)
-			}
-		})
+	for _, scope := range migration.AllScopes() {
+		for _, action := range []string{"install", "upgrade", "downgrade", "uninstall"} {
+			route := "/__mirrorstack/platform/lifecycle/" + string(scope) + "/" + action
+			t.Run(route, func(t *testing.T) {
+				rec := doRequest(t, m.Router(), "POST", route)
+				if rec.Code != http.StatusUnauthorized {
+					t.Errorf("status = %d, want 401", rec.Code)
+				}
+			})
+		}
 	}
 }
 
@@ -363,12 +432,16 @@ func TestLifecycle_UninstallReturnsOK(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/uninstall", "secret")
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
-		t.Errorf("body = %s, want status:ok", rec.Body.String())
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/uninstall", "secret")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
+				t.Errorf("body = %s, want status:ok", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -377,9 +450,13 @@ func TestLifecycle_InstallEmptyFSReturnsOK(t *testing.T) {
 	// No SQL configured → install is a no-op (no migrations to apply).
 	m, _ := New(Config{ID: "test"})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/install", "secret")
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			rec := doRequestWithSecret(t, m.Router(), "POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/install", "secret")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -387,14 +464,18 @@ func TestLifecycle_UpgradeRequiresPayload(t *testing.T) {
 	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "test"})
 
-	// No body → 400
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", nil)
-	req.Header.Set("X-MS-Internal-Secret", "secret")
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
+	for _, scope := range migration.AllScopes() {
+		t.Run(string(scope), func(t *testing.T) {
+			// No body → 400
+			req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/"+string(scope)+"/upgrade", nil)
+			req.Header.Set("X-MS-Internal-Secret", "secret")
+			rec := httptest.NewRecorder()
+			m.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
 	}
 }
 
@@ -485,7 +566,7 @@ func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
 	// build valid JSON > 64 KB — json.Decode reads it all before failing, triggering MaxBytesReader
 	padding := strings.Repeat("a", 64*1024)
 	bigJSON := `{"from":"` + padding + `","to":"0001"}`
-	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/upgrade", strings.NewReader(bigJSON))
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/app/upgrade", strings.NewReader(bigJSON))
 	req.Header.Set("X-MS-Internal-Secret", "secret")
 	rec := httptest.NewRecorder()
 	m.Router().ServeHTTP(rec, req)
@@ -501,6 +582,11 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
 		"RequirePermission": func() { RequirePermission("media.view", "admin") },
+		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
+		"Emits":             func() { Emits("created") },
+		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
+		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
+		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -511,6 +597,31 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 				}
 			}()
 			fn()
+		})
+	}
+}
+
+func TestModule_ModuleSchema(t *testing.T) {
+	t.Parallel()
+
+	// Pin the schema-naming convention: mod_<id>. The platform's per-module
+	// DB role provisioning depends on this exact format being predictable
+	// from Config.ID alone — a future change here would require lockstep
+	// updates to platform-side role-creation scripts.
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"media", "mod_media"},
+		{"oauth", "mod_oauth"},
+		{"billing_engine", "mod_billing_engine"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			m, _ := New(Config{ID: tc.id})
+			if got := m.moduleSchema(); got != tc.want {
+				t.Errorf("moduleSchema() = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }

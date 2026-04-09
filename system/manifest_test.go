@@ -86,7 +86,7 @@ func TestManifest_EventsAndSchedules(t *testing.T) {
 	reg := registry.New()
 	reg.AddEmit("created")
 	reg.AddSubscribe("oauth.user_deleted", "/internal/events/on-user-deleted")
-	reg.AddSchedule("cleanup-temp", "0 3 * * *")
+	reg.AddSchedule("cleanup-temp", "0 3 * * *", "/crons/cleanup-temp")
 
 	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
 
@@ -96,8 +96,8 @@ func TestManifest_EventsAndSchedules(t *testing.T) {
 	if got.Events.Subscribes["oauth.user_deleted"] != "/internal/events/on-user-deleted" {
 		t.Errorf("events.subscribes mismatch: %v", got.Events.Subscribes)
 	}
-	if len(got.Schedules) != 1 || got.Schedules[0].Name != "cleanup-temp" {
-		t.Errorf("schedules = %v, want [{cleanup-temp ...}]", got.Schedules)
+	if len(got.Schedules) != 1 || got.Schedules[0].Name != "cleanup-temp" || got.Schedules[0].Path != "/crons/cleanup-temp" {
+		t.Errorf("schedules = %v, want [{cleanup-temp 0 3 * * * /crons/cleanup-temp}]", got.Schedules)
 	}
 }
 
@@ -110,25 +110,50 @@ func TestManifest_EmptyEventsAndSchedules_NotNull(t *testing.T) {
 	ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`, `"permissions":[]`} {
+	// Note: "module" is omitempty on MigrationVersions and VersionEntry, so
+	// the empty manifest emits `"migration":{"app":""}` rather than
+	// `{"app":"","module":""}`. The "app" field is always present.
+	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`, `"permissions":[]`, `"migration":{"app":""}`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("manifest body missing %q\nbody: %s", want, body)
 		}
 	}
 }
 
-func TestManifest_MigrationVersion(t *testing.T) {
+func TestManifest_MigrationVersions(t *testing.T) {
 	t.Parallel()
 
-	fsys := fstest.MapFS{
-		"sql/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
-		"sql/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+	cases := []struct {
+		name string
+		fsys fstest.MapFS
+		want MigrationVersions
+	}{
+		{
+			name: "app only",
+			fsys: fstest.MapFS{
+				"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+				"sql/app/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+			},
+			want: MigrationVersions{App: "0008", Module: ""},
+		},
+		{
+			name: "both scopes",
+			fsys: fstest.MapFS{
+				"sql/app/0000_initial.up.sql":   &fstest.MapFile{Data: []byte("")},
+				"sql/app/0008_add_index.up.sql": &fstest.MapFile{Data: []byte("")},
+				"sql/module/0000_outbox.up.sql": &fstest.MapFile{Data: []byte("")},
+				"sql/module/0003_dedup.up.sql":  &fstest.MapFile{Data: []byte("")},
+			},
+			want: MigrationVersions{App: "0008", Module: "0003"},
+		},
 	}
-
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", fsys, nil, registry.New()))
-
-	if got.Migration != "0008" {
-		t.Errorf("migration = %q, want 0008", got.Migration)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", tc.fsys, nil, registry.New()))
+			if got.Migration != tc.want {
+				t.Errorf("migration = %+v, want %+v", got.Migration, tc.want)
+			}
+		})
 	}
 }
 
@@ -136,8 +161,8 @@ func TestManifest_NilSQL_EmptyMigration(t *testing.T) {
 	t.Parallel()
 
 	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()))
-	if got.Migration != "" {
-		t.Errorf("migration = %q, want empty when SQL fs is nil", got.Migration)
+	if got.Migration.App != "" || got.Migration.Module != "" {
+		t.Errorf("migration = %+v, want both empty when SQL fs is nil", got.Migration)
 	}
 }
 
@@ -145,16 +170,25 @@ func TestManifest_Versions(t *testing.T) {
 	t.Parallel()
 
 	// Declared versions are surfaced verbatim — this is how the platform
-	// learns the semver→migration map it needs to translate deploy requests
-	// into the numeric migration IDs the lifecycle handlers require.
-	versions := map[string]string{"v0.1.0": "0008", "v0.2.0": "0012"}
+	// learns the semver→{app, module} map it needs to translate deploy
+	// requests into the numeric migration IDs the lifecycle handlers require.
+	// "v0.1.0" sets both tracks; "v0.2.0" only bumps the app track (the
+	// module schema is unchanged from v0.1.0). Module is omitempty so a
+	// caller that didn't set it serializes cleanly.
+	versions := map[string]MigrationVersions{
+		"v0.1.0": {App: "0008", Module: "0002"},
+		"v0.2.0": {App: "0012"},
+	}
 	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, versions, registry.New()))
 
 	if len(got.Versions) != 2 {
 		t.Fatalf("versions = %v, want 2 entries", got.Versions)
 	}
-	if got.Versions["v0.1.0"] != "0008" || got.Versions["v0.2.0"] != "0012" {
-		t.Errorf("versions map mismatch: %v", got.Versions)
+	if got.Versions["v0.1.0"].App != "0008" || got.Versions["v0.1.0"].Module != "0002" {
+		t.Errorf("v0.1.0 = %+v, want {0008 0002}", got.Versions["v0.1.0"])
+	}
+	if got.Versions["v0.2.0"].App != "0012" || got.Versions["v0.2.0"].Module != "" {
+		t.Errorf("v0.2.0 = %+v, want {0012 \"\"}", got.Versions["v0.2.0"])
 	}
 }
 

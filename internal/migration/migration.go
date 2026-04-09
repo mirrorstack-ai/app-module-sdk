@@ -1,6 +1,5 @@
-// Package migration reads the module's sql/ directory, exposes the latest
-// migration version for the manifest endpoint, and applies up/down migrations
-// as a stateless executor.
+// Package migration reads the module's sql/ directory and applies up/down
+// migrations as a stateless executor.
 //
 // The SDK does NOT maintain a tracking table and does NOT know which
 // migrations were previously applied. The platform's control plane owns that
@@ -8,7 +7,8 @@
 // package just reads the requested slice of SQL files and runs them inside a
 // per-migration transaction.
 //
-// Module developers embed their migrations via:
+// Migrations live under sql/app/ and, optionally, sql/module/. Module
+// developers embed both via:
 //
 //	//go:embed sql/*
 //	var sqlFiles embed.FS
@@ -20,6 +20,30 @@ import (
 	"io/fs"
 	"regexp"
 )
+
+// Scope is an independent migration track with its own version sequence.
+// Distinct from internal/registry.Scope (which is an auth boundary, not a
+// migration directory).
+type Scope string
+
+const (
+	// ScopeApp reads sql/app/.
+	ScopeApp Scope = "app"
+	// ScopeModule reads sql/module/.
+	ScopeModule Scope = "module"
+)
+
+// Dir is the directory under the embedded fs.FS that this scope reads from.
+func (s Scope) Dir() string {
+	return "sql/" + string(s)
+}
+
+// AllScopes returns the canonical ordering of migration scopes. Callers that
+// iterate every scope (manifest reporting, lifecycle endpoint mounting, etc.)
+// should use this so a future scope addition is picked up automatically.
+func AllScopes() []Scope {
+	return []Scope{ScopeApp, ScopeModule}
+}
 
 // upFilePattern matches up-migration files named like "0000_initial.up.sql".
 // The leading numeric prefix is the version, the middle slug is the human name.
@@ -48,16 +72,11 @@ func parseUpFilename(name string) (version, slug string, ok bool) {
 	return m[1], m[2], true
 }
 
-// LatestVersion returns the highest migration version string in the sql/
-// directory of fsys. Returns "" if fsys is nil, the sql/ directory does not
-// exist, or no .up.sql files are present.
-//
-// The returned version is the leading numeric prefix as it appears in the
-// filename (e.g., "0008") so the platform sees the same string format the
-// module developer wrote. Versions are compared numerically — a module that
-// mixes widths ("9", "10") still resolves correctly.
-func LatestVersion(fsys fs.FS) (string, error) {
-	migrations, err := List(fsys)
+// LatestVersion returns the highest migration version string in the
+// sql/{scope}/ directory of fsys, or "" when the directory has no .up.sql
+// files. See List for the missing-directory and numeric-comparison contracts.
+func LatestVersion(fsys fs.FS, scope Scope) (string, error) {
+	migrations, err := List(fsys, scope)
 	if err != nil || len(migrations) == 0 {
 		return "", err
 	}

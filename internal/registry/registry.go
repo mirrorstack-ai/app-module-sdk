@@ -4,9 +4,9 @@
 //
 // Routes are recorded by Module.Platform/Public/Internal as the developer
 // registers handlers. Permissions are recorded by Module.RequirePermission.
-// Events and schedules are placeholders for issue #9 (ms.OnEvent / ms.Emit /
-// ms.Cron) — the registry exposes empty defaults so the manifest payload
-// shape is stable.
+// Events and schedules are recorded by Module.OnEvent / Module.Emits /
+// Module.Cron (issue #9). The registry exposes empty defaults so the
+// manifest payload shape is stable even when nothing is registered.
 package registry
 
 import (
@@ -45,9 +45,13 @@ type Route struct {
 	Path   string `json:"path"`
 }
 
+// Schedule is a cron job declaration. Path is the URL the platform's
+// scheduler invokes (POSTs to) when the cron fires; the SDK auto-derives
+// it as /__mirrorstack/crons/{name} on the module's Internal scope.
 type Schedule struct {
 	Name string `json:"name"`
 	Cron string `json:"cron"`
+	Path string `json:"path"`
 }
 
 // Permission is a declared module permission. Exposed in the manifest so the
@@ -109,14 +113,17 @@ func (r *Registry) Routes() map[Scope][]Route {
 }
 
 // AddEmit declares that the module emits an event of the given name.
-// First-wins: duplicate names are dropped.
-func (r *Registry) AddEmit(name string) {
+// Returns true if added, false if a declaration for that name already exists
+// (first-wins). Panics on an invalid name (see validateRegistrationName).
+func (r *Registry) AddEmit(name string) bool {
+	validateRegistrationName("Emits", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if slices.Contains(r.emits, name) {
-		return
+		return false
 	}
 	r.emits = append(r.emits, name)
+	return true
 }
 
 // Emits returns a non-nil copy of all declared emit events.
@@ -130,15 +137,18 @@ func (r *Registry) Emits() []string {
 }
 
 // AddSubscribe declares that the module subscribes to an event from another
-// module. The handler is mounted at path on the Internal scope. First-wins:
-// a second AddSubscribe for the same event name is dropped.
-func (r *Registry) AddSubscribe(name, path string) {
+// module. The handler is mounted at path on the Internal scope. Returns true
+// if added, false if a subscription for that event name already exists
+// (first-wins). Panics on an invalid name (see validateRegistrationName).
+func (r *Registry) AddSubscribe(name, path string) bool {
+	validateRegistrationName("OnEvent", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.subscribes[name]; exists {
-		return
+		return false
 	}
 	r.subscribes[name] = path
+	return true
 }
 
 // Subscribes returns a non-nil copy of all event subscriptions.
@@ -151,17 +161,20 @@ func (r *Registry) Subscribes() map[string]string {
 	return maps.Clone(r.subscribes)
 }
 
-// AddSchedule registers a cron job. First-wins by name: a second
-// AddSchedule with the same name is dropped.
-func (r *Registry) AddSchedule(name, cron string) {
+// AddSchedule registers a cron job. Returns true if added, false if a job
+// with the same name already exists (first-wins). Panics on an invalid name
+// (see validateRegistrationName).
+func (r *Registry) AddSchedule(name, cron, path string) bool {
+	validateRegistrationName("Cron", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.schedules {
 		if existing.Name == name {
-			return
+			return false
 		}
 	}
-	r.schedules = append(r.schedules, Schedule{Name: name, Cron: cron})
+	r.schedules = append(r.schedules, Schedule{Name: name, Cron: cron, Path: path})
+	return true
 }
 
 // Schedules returns a non-nil copy of all scheduled jobs.
@@ -177,8 +190,14 @@ func (r *Registry) Schedules() []Schedule {
 // AddPermission records a declared permission. First-wins by name: a second
 // AddPermission for the same name is dropped (matches AddRoute / AddEmit /
 // AddSchedule semantics). The roles slice is cloned so caller mutations
-// after the call cannot leak into the stored copy.
+// after the call cannot leak into the stored copy. Panics on an invalid
+// name (see validateRegistrationName) — permissions don't end up in URL
+// paths, so the path-separator check is purely cosmetic for permissions,
+// but the consistency with AddSubscribe/AddEmit/AddSchedule prevents
+// downstream consumers (DB columns, log parsers) from receiving malformed
+// strings via the manifest.
 func (r *Registry) AddPermission(name string, roles []string) {
+	validateRegistrationName("RequirePermission", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.permissions {

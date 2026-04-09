@@ -106,6 +106,42 @@ err := ms.Tx(r.Context(), func(q db.Querier) error {
 })
 ```
 
+### Module-shared schema (`mod_<id>`)
+
+For state that crosses app boundaries — outbox tables, dedup ledgers,
+cross-app audit logs, rate limiters, module-wide config — use `ms.ModuleDB`
+and `ms.ModuleTx`:
+
+```go
+// Insert into the module's shared outbox table
+err := ms.ModuleTx(r.Context(), func(q db.Querier) error {
+    return q.Exec(ctx, "INSERT INTO outbox (event, payload) VALUES ($1, $2)", ...)
+})
+```
+
+`ModuleDB` and `ModuleTx` operate on the module's `mod_<id>` schema — independent
+of the per-app `app_<id>` schema that `DB`/`Tx` use. A handler that needs both
+calls both — they use independent credentials and don't interfere.
+
+The `mod_<id>` schema is where you put `sql/module/*.up.sql` migrations
+(see Module structure below).
+
+#### Platform role grant contract
+
+The SDK relies on the platform provisioning two distinct DB roles per
+deployed module with disjoint privileges:
+
+| Role | Schema | Granted via |
+|------|--------|-------------|
+| Per-(module, app) | `app_<appID>` only | injected as `db.Credential` for `Module.DB` / `Module.Tx` |
+| Per-module | `mod_<moduleID>` only | injected as `db.Credential` for `Module.ModuleDB` / `Module.ModuleTx` |
+
+Cross-credential contamination (e.g., a misrouted app credential reaching
+`ModuleDB`) is caught by Postgres at the SQL layer because the per-(module,
+app) role lacks `USAGE` on `mod_<id>` — defense-in-depth, no SDK enforcement
+required. Verify your platform-side role provisioning keeps the two grant
+sets disjoint.
+
 ### Security (3-layer isolation)
 
 | Layer | What | How |
@@ -215,19 +251,19 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 ### Events & scheduling
 
-- [ ] `ms.OnEvent()` — subscribe to events from other modules
-- [ ] `ms.Emit()` — declare emitted events
-- [ ] `ms.Cron()` — register scheduled jobs
+- [x] `ms.OnEvent()` — subscribe to events from other modules
+- [x] `ms.Emits()` — declare emitted events
+- [x] `ms.Cron()` — register scheduled jobs
 
 ### System routes (`/__mirrorstack/`)
 
 - [x] `health` — health check
 - [x] `platform/manifest` — module identity + capabilities
 - [ ] `platform/meter` — custom business metrics
-- [x] `platform/lifecycle/install` — fresh install on an app
-- [x] `platform/lifecycle/upgrade` — upgrade between versions
-- [x] `platform/lifecycle/downgrade` — rollback between versions
-- [x] `platform/lifecycle/uninstall` — soft-delete removal
+- [x] `platform/lifecycle/app/install` and `platform/lifecycle/module/install` — fresh install (per-app schema or per-module shared schema)
+- [x] `platform/lifecycle/app/upgrade` and `platform/lifecycle/module/upgrade` — upgrade between versions
+- [x] `platform/lifecycle/app/downgrade` and `platform/lifecycle/module/downgrade` — rollback between versions
+- [x] `platform/lifecycle/app/uninstall` and `platform/lifecycle/module/uninstall` — soft-delete removal
 
 ### MCP integration
 
@@ -275,9 +311,13 @@ app-module-sdk/
 
 ```
 app-mod-{name}/
-  sql/                         Migrations (auto-applied)
-    0000_initial.up.sql
-    0000_initial.down.sql
+  sql/
+    app/                       Per-app migrations (one app_<id> schema per tenant)
+      0000_initial.up.sql
+      0000_initial.down.sql
+    module/                    Per-module migrations (single mod_<id> shared schema)
+      0000_outbox.up.sql       e.g. outbox, dedup ledgers, audit logs
+      0000_outbox.down.sql
     queries/                   sqlc query definitions
   api/                         Go backend
     cmd/main.go

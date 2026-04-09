@@ -6,10 +6,12 @@ package mirrorstack
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -21,6 +23,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -39,46 +42,67 @@ type Config struct {
 	// routes (install/upgrade/downgrade) read it to apply migrations.
 	SQL fs.FS
 
-	// Versions optionally maps semver release tags to migration numbers
-	// (e.g., {"v0.1.0": "0008", "v0.2.0": "0012"}). Exposed to the platform
-	// via the manifest endpoint so the platform can translate its internal
-	// semver-based deploy state into the migration numbers the lifecycle
-	// handlers accept. The SDK itself never reads this map at lifecycle
-	// time — /lifecycle/{upgrade,downgrade} take migration numbers only.
-	Versions map[string]string
+	// Versions optionally maps semver release tags to per-scope migration
+	// numbers, e.g.:
+	//
+	//	{
+	//	    "v0.1.0": {App: "0008", Module: "0002"},
+	//	    "v0.2.0": {App: "0012"},  // module track unchanged
+	//	}
+	//
+	// Exposed to the platform via the manifest endpoint so the platform can
+	// translate its internal semver-based deploy state into the migration
+	// numbers the lifecycle handlers accept. The SDK itself never reads this
+	// map at lifecycle time — /lifecycle/{upgrade,downgrade} take migration
+	// numbers only.
+	Versions map[string]system.MigrationVersions
 }
 
 // Module is the core SDK instance.
+//
+// internalAuth is captured at New() time so OnEvent/Cron registrations can
+// reuse a single middleware closure. auth.InternalAuth() reads
+// MS_INTERNAL_SECRET once at construction; constructing it per registration
+// would re-read the env var and re-allocate the closure on every call.
 type Module struct {
-	config    Config
-	router    *chi.Mux
-	logger    *log.Logger
-	registry  *registry.Registry
-	poolCache *db.PoolCache // production: per-app DB pools
-	devDBOnce sync.Once     // dev mode: lazy DB init
-	devDB     *db.DB
-	devDBErr  error
-	cacheCache   *cache.ClientCache // production: per-app Redis clients
-	devCacheOnce sync.Once          // dev mode: lazy cache init
-	devCache     *cache.Client
-	devCacheErr  error
+	config         Config
+	router         *chi.Mux
+	logger         *log.Logger
+	registry       *registry.Registry
+	internalAuth   func(http.Handler) http.Handler
+	poolCache      *db.PoolCache // production: per-app DB pools
+	devDBOnce      sync.Once     // dev mode: lazy DB init
+	devDB          *db.DB
+	devDBErr       error
+	cacheCache     *cache.ClientCache // production: per-app Redis clients
+	devCacheOnce   sync.Once          // dev mode: lazy cache init
+	devCache       *cache.Client
+	devCacheErr    error
 	devStorageOnce sync.Once // dev mode: lazy storage init
 	devStorage     *storage.Client
 	devStorageErr  error
 }
+
+// moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
+// Leaves room for the "mod_" prefix without exceeding Postgres's 63-char identifier limit.
+var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
+	if !moduleIDPattern.MatchString(cfg.ID) {
+		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 31 chars)", cfg.ID, moduleIDPattern)
+	}
 	m := &Module{
-		config:     cfg,
-		router:     chi.NewRouter(),
-		logger:     log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
-		registry:   registry.New(),
-		poolCache:  db.NewPoolCache(),
-		cacheCache: cache.NewClientCache(),
+		config:       cfg,
+		router:       chi.NewRouter(),
+		logger:       log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		registry:     registry.New(),
+		internalAuth: auth.InternalAuth(),
+		poolCache:    db.NewPoolCache(),
+		cacheCache:   cache.NewClientCache(),
 	}
 	m.mountSystemRoutes()
 	return m, nil
@@ -112,7 +136,10 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 	}, nil
 }
 
-// Tx runs fn inside a transaction with schema isolation. Commits on success, rolls back on error.
+// Tx runs fn inside a transaction with schema isolation. Commits on success,
+// rolls back on error. The app schema is read from the caller's context (set
+// by the platform's Lambda invoke shim via db.WithSchema). Compare with
+// Module.ModuleTx which explicitly overlays the mod_<id> schema.
 //
 //	err := mod.Tx(r.Context(), func(q db.Querier) error {
 //	    queries := generated.New(q)
@@ -129,17 +156,22 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	return db.Tx(ctx, pool, fn)
 }
 
-// resolvePool returns the right pool plus a release closure: per-app credential
-// pool (production, refcount-pinned) or dev-mode pool (no-op release).
-// Thread-safe via sync.Once for dev init.
+// resolvePool returns the per-app credential pool (production) or the dev
+// pool (dev mode). See resolvePoolFor for the shared logic.
 func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
-	// Production: credential injected per invocation. PoolCache.Get returns
-	// a refcount-pinned pool — caller MUST run the release closure.
-	if cred := db.CredentialFrom(ctx); cred != nil {
+	return m.resolvePoolFor(ctx, db.CredentialFrom)
+}
+
+// resolvePoolFor is the shared implementation behind resolvePool and
+// resolveModulePool. Production reads a credential from the context via
+// getCred (different context key per scope) and pulls a refcount-pinned
+// pool from the cache. Dev mode falls through to the single dev pool, which
+// is shared across all scopes — schema isolation in dev happens at the
+// AcquireScoped layer via WithSchema, not at the pool level.
+func (m *Module) resolvePoolFor(ctx context.Context, getCred func(context.Context) *db.Credential) (*pgxpool.Pool, func(), error) {
+	if cred := getCred(ctx); cred != nil {
 		return m.poolCache.Get(ctx, *cred)
 	}
-
-	// Dev mode: single pool from DATABASE_URL, init once. No refcount needed.
 	m.devDBOnce.Do(func() {
 		m.devDB, m.devDBErr = db.Open(context.Background())
 	})
@@ -147,6 +179,78 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error)
 		return nil, nil, m.devDBErr
 	}
 	return m.devDB.Pool(), func() {}, nil
+}
+
+// ModuleDB returns a connection scoped to this module's shared schema
+// (mod_<id>). Use it for cross-app state — outbox tables, dedup ledgers,
+// cross-app audit logs, rate limiters, module-wide config — anything a
+// module needs that is owned by the module rather than by a single app.
+//
+// Production: uses the per-module credential injected by the platform via
+// db.WithModuleCredential. Independent of the per-app credential read by
+// Module.DB — a handler that needs both gets both, in the same context.
+//
+// Dev: shares the dev pool from DATABASE_URL with Module.DB; the schema is
+// the only difference. The dev Postgres must have a mod_<id> schema for
+// the queries to succeed.
+//
+// The module schema overlays any app schema set on the caller's context for
+// this single call only — the caller's ctx is not mutated, so a subsequent
+// Module.DB call sees the original app schema unchanged.
+//
+//	conn, release, err := mod.ModuleDB(r.Context())
+//	if err != nil { ... }
+//	defer release()
+//	conn.Exec(ctx, "INSERT INTO outbox(...) VALUES(...)")
+func (m *Module) ModuleDB(ctx context.Context) (db.Querier, func(), error) {
+	pool, releasePool, err := m.resolveModulePool(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
+	querier, releaseConn, err := db.AcquireScoped(moduleCtx, pool)
+	if err != nil {
+		releasePool()
+		return nil, nil, err
+	}
+	return querier, func() {
+		releaseConn()
+		releasePool()
+	}, nil
+}
+
+// ModuleTx runs fn inside a transaction scoped to the module's shared schema
+// (mod_<id>). Commits on success, rolls back on error or panic. Use this for
+// the outbox-pattern: insert the work record AND the dedup row in the same
+// transaction so the worker only ever sees consistent state.
+//
+//	err := mod.ModuleTx(r.Context(), func(q db.Querier) error {
+//	    queries := generated.New(q)
+//	    if err := queries.InsertOutbox(ctx, ...); err != nil { return err }
+//	    return queries.MarkProcessed(ctx, ...)
+//	})
+func (m *Module) ModuleTx(ctx context.Context, fn func(q db.Querier) error) error {
+	pool, releasePool, err := m.resolveModulePool(ctx)
+	if err != nil {
+		return err
+	}
+	defer releasePool()
+	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
+	return db.Tx(moduleCtx, pool, fn)
+}
+
+// resolveModulePool reads the per-module credential instead of the per-app
+// one. See resolvePoolFor for the shared logic.
+func (m *Module) resolveModulePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
+	return m.resolvePoolFor(ctx, db.ModuleCredentialFrom)
+}
+
+// moduleSchema returns the Postgres schema name for this module's shared
+// state. Convention: "mod_" + the developer's Config.ID. The platform must
+// pre-create this schema and grant the per-module DB role USAGE on it
+// before any module handler runs.
+func (m *Module) moduleSchema() string {
+	return "mod_" + m.config.ID
 }
 
 // Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
@@ -225,9 +329,11 @@ func (m *Module) Public(fn func(r chi.Router)) {
 }
 
 // Internal registers routes with internal auth scope (platform-to-module only).
-// Validates X-MS-Internal-Secret via constant-time comparison.
+// Validates X-MS-Internal-Secret via constant-time comparison. The middleware
+// is cached on the Module at New() so OnEvent / Cron registrations reuse a
+// single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopeInternal, auth.InternalAuth(), fn)
+	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
 }
 
 // scopedRoutes records every route fn registers under the given scope, then
@@ -348,16 +454,23 @@ func (m *Module) mountSystemRoutes() {
 		r.Get("/health", system.Health) // intentionally public — no auth
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
-			r.Use(auth.InternalAuth())
+			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Name, m.config.Icon,
 				m.config.SQL, m.config.Versions, m.registry,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
-				r.Post("/install", system.InstallHandler(m.config.SQL, m.Tx))
-				r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, m.Tx))
-				r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, m.Tx))
-				r.Post("/uninstall", system.UninstallHandler())
+				// App and module migrations are separate tracks on disjoint
+				// directories; mount the same four endpoints under each scope
+				// so the platform can drive them independently.
+				for _, scope := range migration.AllScopes() {
+					r.Route("/"+string(scope), func(r chi.Router) {
+						r.Post("/install", system.InstallHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
+					})
+				}
 			})
 		})
 	})
@@ -403,6 +516,18 @@ func DB(ctx context.Context) (db.Querier, func(), error) {
 // Tx runs fn inside a transaction on the default module.
 func Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	return mustDefault("Tx").Tx(ctx, fn)
+}
+
+// ModuleDB returns a connection scoped to the module's shared schema on the
+// default module.
+func ModuleDB(ctx context.Context) (db.Querier, func(), error) {
+	return mustDefault("ModuleDB").ModuleDB(ctx)
+}
+
+// ModuleTx runs fn inside a transaction scoped to the module's shared schema
+// on the default module.
+func ModuleTx(ctx context.Context, fn func(q db.Querier) error) error {
+	return mustDefault("ModuleTx").ModuleTx(ctx, fn)
 }
 
 // Cache returns a scoped cache client on the default module.
