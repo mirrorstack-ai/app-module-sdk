@@ -6,10 +6,12 @@ package mirrorstack
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -81,10 +83,17 @@ type Module struct {
 	devStorageErr  error
 }
 
+// moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
+// Leaves room for the "mod_" prefix without exceeding Postgres's 63-char identifier limit.
+var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("mirrorstack: Config.ID is required")
+	}
+	if !moduleIDPattern.MatchString(cfg.ID) {
+		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 31 chars)", cfg.ID, moduleIDPattern)
 	}
 	m := &Module{
 		config:       cfg,
