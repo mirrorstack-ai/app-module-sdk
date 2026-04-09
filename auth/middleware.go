@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
 // PlatformAuth returns middleware that requires an authenticated user.
@@ -41,7 +42,7 @@ func PublicAuth() func(http.Handler) http.Handler {
 // can still bypass Start() via Module.Router().ServeHTTP — this branch is
 // the runtime safety net for that case.
 func InternalAuth() func(http.Handler) http.Handler {
-	return internalAuth(isLambdaEnv())
+	return internalAuth(lambdaenv.IsSet())
 }
 
 // internalAuth is the test seam; inLambda is injected so tests don't mutate
@@ -87,8 +88,3 @@ func constantTimeEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// isLambdaEnv duplicates internal/runtime.IsLambda to avoid an import cycle
-// (runtime imports auth).
-func isLambdaEnv() bool {
-	return os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != ""
-}

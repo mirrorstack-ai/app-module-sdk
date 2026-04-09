@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
 const defaultDevURL = "postgres://postgres:postgres@localhost:5433/module?sslmode=disable"
@@ -34,8 +36,7 @@ type DB struct {
 // Use this for dev mode only. Production uses PoolCache with injected credentials.
 // Returns an error if called inside AWS Lambda (credentials should be injected per-invocation).
 func Open(ctx context.Context) (*DB, error) {
-	// Cannot use runtime.IsLambda() — import cycle (runtime → db → runtime)
-	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+	if lambdaenv.IsSet() {
 		return nil, fmt.Errorf("mirrorstack/db: Open() cannot be used in Lambda — credentials are injected per-invocation")
 	}
 	url := os.Getenv("DATABASE_URL")

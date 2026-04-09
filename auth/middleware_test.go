@@ -168,16 +168,3 @@ func TestInternalAuth_WrongSecret_InLambda_Still401(t *testing.T) {
 	}
 }
 
-func TestIsLambdaEnv(t *testing.T) {
-	// Regression guard: this duplicates internal/runtime.IsLambda because of
-	// an import cycle (see middleware.go). If AWS_LAMBDA_FUNCTION_NAME ever
-	// stops being the right signal, both call sites need updating.
-	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "")
-	if isLambdaEnv() {
-		t.Error("expected isLambdaEnv() = false when AWS_LAMBDA_FUNCTION_NAME unset")
-	}
-	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "test-fn")
-	if !isLambdaEnv() {
-		t.Error("expected isLambdaEnv() = true when AWS_LAMBDA_FUNCTION_NAME set")
-	}
-}
