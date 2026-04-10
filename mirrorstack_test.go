@@ -208,8 +208,7 @@ func TestPublic_AcceptsAnonymous(t *testing.T) {
 }
 
 func TestInternal_RejectsNoSecret(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "test-secret")
-	m, _ := New(Config{ID: "test", Name: "Test"})
+	m := newTestModuleWithSecret(t, "test")
 	m.Internal(func(r chi.Router) {
 		r.Post("/event", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("internal"))
@@ -223,15 +222,14 @@ func TestInternal_RejectsNoSecret(t *testing.T) {
 }
 
 func TestInternal_AcceptsValidSecret(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "test-secret")
-	m, _ := New(Config{ID: "test", Name: "Test"})
+	m := newTestModuleWithSecret(t, "test")
 	m.Internal(func(r chi.Router) {
 		r.Post("/event", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("internal"))
 		})
 	})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/event", "test-secret")
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/event", "secret")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 with valid secret, got %d", rec.Code)
 	}
@@ -315,8 +313,7 @@ func TestHealthAutoMounted(t *testing.T) {
 }
 
 func TestSystemPlatformRoutes_RequireInternalSecret(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
-	m, _ := New(Config{ID: "test", Name: "Test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	// Without secret → 401. Asserting exactly 401 (not just !=200) so an
 	// accidental route removal — which would return 404 — fails this test
@@ -330,10 +327,10 @@ func TestSystemPlatformRoutes_RequireInternalSecret(t *testing.T) {
 // --- Manifest endpoint ---
 
 func TestManifest_Returns200WithSecret(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "platform-secret")
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	m, _ := New(Config{ID: "media", Name: "Media", Icon: "perm_media"})
 
-	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "platform-secret")
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -348,8 +345,7 @@ func TestManifest_Returns200WithSecret(t *testing.T) {
 }
 
 func TestManifest_RoutesFromAllScopes_RegisteredViaModule(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "media", Name: "Media"})
+	m := newTestModuleWithSecret(t, "media")
 
 	m.Platform(func(r chi.Router) {
 		r.Get("/items", func(w http.ResponseWriter, r *http.Request) {})
@@ -412,8 +408,7 @@ func TestManifest_MigrationFromConfig(t *testing.T) {
 // up automatically.
 
 func TestLifecycle_RoutesRequireInternalSecret(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	for _, scope := range migration.AllScopes() {
 		for _, action := range []string{"install", "upgrade", "downgrade", "uninstall"} {
@@ -429,8 +424,7 @@ func TestLifecycle_RoutesRequireInternalSecret(t *testing.T) {
 }
 
 func TestLifecycle_UninstallReturnsOK(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	for _, scope := range migration.AllScopes() {
 		t.Run(string(scope), func(t *testing.T) {
@@ -446,9 +440,8 @@ func TestLifecycle_UninstallReturnsOK(t *testing.T) {
 }
 
 func TestLifecycle_InstallEmptyFSReturnsOK(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
 	// No SQL configured → install is a no-op (no migrations to apply).
-	m, _ := New(Config{ID: "test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	for _, scope := range migration.AllScopes() {
 		t.Run(string(scope), func(t *testing.T) {
@@ -461,8 +454,7 @@ func TestLifecycle_InstallEmptyFSReturnsOK(t *testing.T) {
 }
 
 func TestLifecycle_UpgradeRequiresPayload(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	for _, scope := range migration.AllScopes() {
 		t.Run(string(scope), func(t *testing.T) {
@@ -541,8 +533,7 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 	// Verify that the chi.Walk + re-register approach in scopedRoutes preserves
 	// the original routing behavior. Routes registered via Platform/Public/Internal
 	// must still be reachable AND still enforce auth.
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "test"})
+	m := newTestModuleWithSecret(t, "test")
 
 	m.Platform(func(r chi.Router) {
 		r.Get("/admin/items", func(w http.ResponseWriter, r *http.Request) {
