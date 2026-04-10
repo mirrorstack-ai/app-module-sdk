@@ -11,9 +11,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-chi/chi/v5"
@@ -513,9 +516,11 @@ func (m *Module) startTaskWorker() error {
 
 	m.logger.Printf("%s module (%s) starting task worker (concurrency=%d)", m.config.Name, m.config.ID, concurrency)
 
-	// PR 4 will wrap this in signal.NotifyContext for SIGTERM handling.
-	// For now, block on the poll loop directly.
-	ctx := context.Background()
+	// SIGTERM/SIGINT: stop accepting new messages, drain in-flight handlers.
+	// ECS sends SIGTERM 30s before SIGKILL; we use a 25s drain window to
+	// leave a 5s buffer for Close() and process exit.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	var wg sync.WaitGroup
 	for range concurrency {
@@ -525,7 +530,26 @@ func (m *Module) startTaskWorker() error {
 			runtime.PollLoop(ctx, &cfg)
 		}()
 	}
-	wg.Wait()
+
+	// Block until shutdown signal.
+	<-ctx.Done()
+	stop() // release signal channel early
+	m.logger.Printf("mirrorstack: shutdown signal received, draining tasks (max 25s)")
+
+	// Wait for all poll goroutines to exit (each exits when ctx.Done fires
+	// and their current message finishes or times out).
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer drainCancel()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+		m.logger.Printf("mirrorstack: all tasks drained cleanly")
+	case <-drainCtx.Done():
+		m.logger.Printf("mirrorstack: drain timeout exceeded — some goroutines may still be running")
+	}
 
 	m.Close()
 	return nil
