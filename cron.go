@@ -3,7 +3,7 @@ package mirrorstack
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
 // cronPathPrefix mounts under the reserved /__mirrorstack/ namespace.
@@ -35,9 +35,7 @@ func (m *Module) Cron(name, schedule string, handler http.HandlerFunc) {
 	if !m.registry.AddSchedule(name, schedule, path) {
 		panic("mirrorstack: Cron(" + name + ") registered twice")
 	}
-	m.Internal(func(r chi.Router) {
-		r.Post(path, handler)
-	})
+	m.scopedSingleRoute(registry.ScopeInternal, m.internalAuth, "POST", path, handler)
 }
 
 // Cron registers a cron job on the default Module created by Init(). Panics

@@ -3,7 +3,7 @@ package mirrorstack
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
 // eventPathPrefix mounts under the reserved /__mirrorstack/ namespace so
@@ -32,9 +32,7 @@ func (m *Module) OnEvent(name string, handler http.HandlerFunc) {
 	if !m.registry.AddSubscribe(name, path) {
 		panic("mirrorstack: OnEvent(" + name + ") registered twice")
 	}
-	m.Internal(func(r chi.Router) {
-		r.Post(path, handler)
-	})
+	m.scopedSingleRoute(registry.ScopeInternal, m.internalAuth, "POST", path, handler)
 }
 
 // Emits declares that this module emits an event of the given name. The

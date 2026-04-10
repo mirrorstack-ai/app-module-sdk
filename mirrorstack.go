@@ -409,6 +409,23 @@ func (m *Module) Internal(fn func(r chi.Router)) {
 // unbounded without this.
 const internalRouteBodyCap = 1 << 20 // 1 MB
 
+// scopedSingleRoute records and mounts one route on the given scope without
+// allocating an intermediate chi sub-router. Used by OnEvent, Cron, and OnTask
+// which always register exactly one POST handler at a known path. Avoids the
+// chi.NewRouter + chi.Walk overhead that scopedRoutes pays for multi-route
+// registration callbacks.
+func (m *Module) scopedSingleRoute(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, method, path string, handler http.Handler) {
+	m.registry.AddRoute(scope, method, path)
+	mw := make([]func(http.Handler) http.Handler, 0, 2)
+	if scope == registry.ScopeInternal {
+		mw = append(mw, httputil.MaxBytes(internalRouteBodyCap))
+	}
+	if scopeMiddleware != nil {
+		mw = append(mw, scopeMiddleware)
+	}
+	m.router.With(mw...).Method(method, path, handler)
+}
+
 func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
 	sub := chi.NewRouter()
 	if scope == registry.ScopeInternal {
