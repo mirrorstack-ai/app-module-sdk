@@ -15,5 +15,10 @@ services:
     ports:
       - "6379:6379"
 
+  elasticmq:
+    image: softwaremill/elasticmq-native
+    ports:
+      - "9324:9324"
+
 volumes:
   pgdata:
