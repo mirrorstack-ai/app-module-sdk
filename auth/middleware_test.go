@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -168,3 +171,67 @@ func TestInternalAuth_WrongSecret_InLambda_Still401(t *testing.T) {
 	}
 }
 
+func TestInternalAuth_LogsOnNoSecret(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/platform/lifecycle/tick", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := buf.String()
+	if !strings.Contains(got, "no secret configured") {
+		t.Errorf("expected log to mention 'no secret configured', got: %q", got)
+	}
+	if !strings.Contains(got, "/platform/lifecycle/tick") {
+		t.Errorf("expected log to mention request path, got: %q", got)
+	}
+}
+
+func TestInternalAuth_LogsOnSecretMismatch(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/platform/lifecycle/tick", nil)
+	req.Header.Set("X-MS-Internal-Secret", "wrong")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := buf.String()
+	if !strings.Contains(got, "secret mismatch") {
+		t.Errorf("expected log to mention 'secret mismatch', got: %q", got)
+	}
+	if !strings.Contains(got, "header_present=true") {
+		t.Errorf("expected header_present=true in log, got: %q", got)
+	}
+	// SECURITY: actual secret must never appear in log
+	if strings.Contains(got, "real-secret") || strings.Contains(got, "wrong") {
+		t.Errorf("log leaks secret value: %q", got)
+	}
+}
+
+func TestInternalAuth_LogsHeaderAbsent(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/platform/lifecycle/tick", nil) // no header
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := buf.String()
+	if !strings.Contains(got, "header_present=false") {
+		t.Errorf("expected header_present=false in log, got: %q", got)
+	}
+}
