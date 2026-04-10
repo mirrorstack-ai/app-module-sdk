@@ -21,3 +21,23 @@ func TestIsLambda_Set(t *testing.T) {
 		t.Error("expected true")
 	}
 }
+
+func TestIsTaskWorker_NotSet(t *testing.T) {
+	orig := isTaskWorker
+	t.Cleanup(func() { isTaskWorker = orig })
+
+	isTaskWorker = false
+	if IsTaskWorker() {
+		t.Error("expected false")
+	}
+}
+
+func TestIsTaskWorker_Set(t *testing.T) {
+	orig := isTaskWorker
+	t.Cleanup(func() { isTaskWorker = orig })
+
+	isTaskWorker = true
+	if !IsTaskWorker() {
+		t.Error("expected true")
+	}
+}
