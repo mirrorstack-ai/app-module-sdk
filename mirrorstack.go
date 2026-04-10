@@ -403,8 +403,17 @@ func (m *Module) Internal(fn func(r chi.Router)) {
 // route tree, which indicates a misconfigured module that should not start.
 // Panic instead of silently leaving the registry and router in inconsistent
 // states (some routes recorded but not re-registered, or vice versa).
+// internalRouteBodyCap is the default body size limit for Internal-scope
+// routes (events, crons, tasks, and developer-registered internal handlers).
+// Defense-in-depth — Lambda's API Gateway has a 6 MB cap, but dev mode is
+// unbounded without this.
+const internalRouteBodyCap = 1 << 20 // 1 MB
+
 func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
 	sub := chi.NewRouter()
+	if scope == registry.ScopeInternal {
+		sub.Use(httputil.MaxBytes(internalRouteBodyCap))
+	}
 	if scopeMiddleware != nil {
 		sub.Use(scopeMiddleware)
 	}

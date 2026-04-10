@@ -634,6 +634,32 @@ func TestPlatformRoutes_MaxBytesLimit(t *testing.T) {
 	}
 }
 
+func TestInternalRoutes_MaxBytesLimit(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+
+	// Handler must read the body for MaxBytesReader to trigger.
+	m.OnEvent("big-event", func(w http.ResponseWriter, r *http.Request) {
+		var v json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Build a body > 1 MB to exceed the internal route cap
+	padding := strings.Repeat("a", 1<<20+1)
+	bigJSON := `{"data":"` + padding + `"}`
+	req := httptest.NewRequest("POST", "/__mirrorstack/events/big-event", strings.NewReader(bigJSON))
+	req.Header.Set("X-MS-Internal-Secret", "secret")
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized internal route body, got %d", rec.Code)
+	}
+}
+
 func TestScopesPanic_BeforeInit(t *testing.T) {
 	fns := map[string]func(){
 		"Platform":          func() { Platform(func(r chi.Router) {}) },
