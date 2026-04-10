@@ -253,6 +253,30 @@ func (m *Module) moduleSchema() string {
 	return "mod_" + m.config.ID
 }
 
+// lifecycleTxRunner returns the TxRunner that should drive migrations for
+// the given scope. Each scope runs against a different schema and uses a
+// different DB credential, so the two scopes require different runners:
+//
+//   - ScopeApp → Module.Tx (reads db.CredentialFrom, per-app role, app_<id>
+//     schema from ctx).
+//   - ScopeModule → Module.ModuleTx (reads db.ModuleCredentialFrom, per-module
+//     role, mod_<id> schema overlayed inside the transaction).
+//
+// Mixing these up is silently wrong: module migrations driven by the app
+// credential would fail at Postgres because the per-(module, app) role lacks
+// USAGE on mod_<id>, but that is infrastructure defense-in-depth — the SDK
+// must pick the correct runner itself.
+func (m *Module) lifecycleTxRunner(scope migration.Scope) migration.TxRunner {
+	switch scope {
+	case migration.ScopeModule:
+		return m.ModuleTx
+	case migration.ScopeApp:
+		return m.Tx
+	default:
+		panic("mirrorstack: lifecycleTxRunner: unhandled scope " + string(scope))
+	}
+}
+
 // Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
 //
 //	c, release, err := mod.Cache(r.Context())
@@ -461,13 +485,15 @@ func (m *Module) mountSystemRoutes() {
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
 				// App and module migrations are separate tracks on disjoint
-				// directories; mount the same four endpoints under each scope
-				// so the platform can drive them independently.
+				// directories AND disjoint DB credentials; mount the same
+				// four endpoints under each scope so the platform can drive
+				// them independently.
 				for _, scope := range migration.AllScopes() {
+					runTx := m.lifecycleTxRunner(scope)
 					r.Route("/"+string(scope), func(r chi.Router) {
-						r.Post("/install", system.InstallHandler(m.config.SQL, scope, m.Tx))
-						r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, m.Tx))
-						r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, m.Tx))
+						r.Post("/install", system.InstallHandler(m.config.SQL, scope, runTx))
+						r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, runTx))
+						r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, runTx))
 						r.Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
 					})
 				}

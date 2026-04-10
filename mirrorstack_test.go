@@ -115,11 +115,11 @@ func TestNew_EmptyID(t *testing.T) {
 
 func TestNew_RejectsBadID(t *testing.T) {
 	bad := []string{
-		"Media",       // uppercase
-		"media!",      // special char
-		"1media",      // starts with digit
-		"_media",      // starts with underscore
-		"../etc",      // path traversal
+		"Media",                            // uppercase
+		"media!",                           // special char
+		"1media",                           // starts with digit
+		"_media",                           // starts with underscore
+		"../etc",                           // path traversal
 		"abcdefghijklmnopqrstuvwxyz012345", // 32 chars
 	}
 	for _, id := range bad {
@@ -474,6 +474,64 @@ func TestLifecycle_UpgradeRequiresPayload(t *testing.T) {
 
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+// TestLifecycle_ScopeTxRunnerWiring verifies each scope's lifecycle handlers
+// read their own credential context key. An empty Token makes PoolCache
+// validate() fail before any dial, so the test stays hermetic and the error
+// body echoes the sentinel username only when the correct key was consulted.
+func TestLifecycle_ScopeTxRunnerWiring(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+
+	cases := []struct {
+		scope    migration.Scope
+		sentinel string
+		inject   func(context.Context, db.Credential) context.Context
+	}{
+		{migration.ScopeApp, "app-scope-sentinel-user", db.WithCredential},
+		{migration.ScopeModule, "mod-scope-sentinel-user", db.WithModuleCredential},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.scope), func(t *testing.T) {
+			t.Parallel()
+
+			m, err := New(Config{
+				ID: "test",
+				SQL: fstest.MapFS{
+					tc.scope.Dir() + "/0001_probe.up.sql": &fstest.MapFile{Data: []byte("SELECT 1")},
+				},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			cred := db.Credential{
+				Host:     "h",
+				Port:     5432,
+				Database: "d",
+				Username: tc.sentinel,
+				// Token intentionally empty — PoolCache validate() fails
+				// fast, no dial attempted.
+			}
+			ctx := tc.inject(context.Background(), cred)
+
+			route := "/__mirrorstack/platform/lifecycle/" + string(tc.scope) + "/install"
+			req := httptest.NewRequest("POST", route, nil).WithContext(ctx)
+			req.Header.Set("X-MS-Internal-Secret", "secret")
+			rec := httptest.NewRecorder()
+			m.Router().ServeHTTP(rec, req)
+
+			if !strings.Contains(rec.Body.String(), tc.sentinel) {
+				t.Errorf(
+					"%s should drive migrations via the %s credential, but the "+
+						"response body does not mention sentinel user %q.\n"+
+						"Status: %d\nBody: %s",
+					route, tc.scope, tc.sentinel, rec.Code, rec.Body.String(),
+				)
 			}
 		})
 	}
