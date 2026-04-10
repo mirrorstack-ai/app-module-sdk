@@ -643,6 +643,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
 		"Emits":             func() { Emits("created") },
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
+		"OnTask":            func() { OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil }) },
 		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 	}

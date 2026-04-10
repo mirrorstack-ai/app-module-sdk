@@ -81,6 +81,7 @@ type Module struct {
 	devStorageOnce sync.Once // dev mode: lazy storage init
 	devStorage     *storage.Client
 	devStorageErr  error
+	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
 }
 
 // moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
@@ -103,6 +104,7 @@ func New(cfg Config) (*Module, error) {
 		internalAuth: auth.InternalAuth(),
 		poolCache:    db.NewPoolCache(),
 		cacheCache:   cache.NewClientCache(),
+		taskHandlers: make(map[string]taskEntry),
 	}
 	m.mountSystemRoutes()
 	return m, nil
