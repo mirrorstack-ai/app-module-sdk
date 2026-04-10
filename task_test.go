@@ -159,3 +159,59 @@ func TestOnTask_WithTimeout(t *testing.T) {
 		t.Errorf("timeout = %v, want 5s", entry.timeout)
 	}
 }
+
+// --- RunTask (dev-mode in-process dispatch) ---
+
+func TestRunTask_DevMode_Dispatches(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+
+	var received json.RawMessage
+	m.OnTask("echo", func(ctx context.Context, payload json.RawMessage) error {
+		received = payload
+		return nil
+	})
+
+	payload := json.RawMessage(`{"key":"value"}`)
+	taskID, err := m.RunTask(context.Background(), "echo", payload)
+	if err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	if taskID == "" {
+		t.Error("RunTask should return a non-empty taskID")
+	}
+	if string(received) != `{"key":"value"}` {
+		t.Errorf("received = %s, want {\"key\":\"value\"}", string(received))
+	}
+}
+
+func TestRunTask_UnknownTask(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+
+	_, err := m.RunTask(context.Background(), "nonexistent", nil)
+	if err == nil {
+		t.Error("RunTask should error on unknown task")
+	}
+}
+
+func TestRunTask_PayloadTooLarge(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+	m.OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil })
+
+	big := make(json.RawMessage, 300*1024) // > 256KB
+	_, err := m.RunTask(context.Background(), "work", big)
+	if err == nil {
+		t.Error("RunTask should reject payload > 256KB")
+	}
+}
+
+func TestRunTask_DevMode_PropagatesError(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+	m.OnTask("fail", func(ctx context.Context, p json.RawMessage) error {
+		return context.DeadlineExceeded
+	})
+
+	_, err := m.RunTask(context.Background(), "fail", json.RawMessage(`{}`))
+	if err == nil {
+		t.Error("RunTask should propagate handler error in dev mode")
+	}
+}

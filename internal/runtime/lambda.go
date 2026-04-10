@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -64,11 +63,6 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 			return jsonError(400, "invalid request payload"), nil
 		}
 
-		// Validate schema format if present
-		if req.AppSchema != "" && !schemaPattern.MatchString(req.AppSchema) {
-			return jsonError(400, "invalid app schema format"), nil
-		}
-
 		// Ensure path is relative to prevent host injection
 		path := req.Path
 		if !strings.HasPrefix(path, "/") {
@@ -93,28 +87,18 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 			httpReq.Header.Set(k, v)
 		}
 
-		// Inject trusted values from typed payload fields into context
-		reqCtx := httpReq.Context()
-		if req.Resources != nil {
-			if req.Resources.DB != nil {
-				reqCtx = db.WithCredential(reqCtx, *req.Resources.DB)
-			}
-			if req.Resources.Cache != nil {
-				reqCtx = cache.WithCredential(reqCtx, *req.Resources.Cache)
-			}
-			if req.Resources.Storage != nil {
-				reqCtx = storage.WithCredential(reqCtx, *req.Resources.Storage)
-			}
-		}
-		if req.AppSchema != "" {
-			reqCtx = db.WithSchema(reqCtx, req.AppSchema)
-		}
-		if req.UserID != "" || req.AppID != "" || req.AppRole != "" {
-			reqCtx = auth.Set(reqCtx, auth.Identity{
-				UserID:  req.UserID,
-				AppID:   req.AppID,
-				AppRole: req.AppRole,
-			})
+		// Inject trusted values from typed payload fields into context.
+		// InjectResources is the shared injection function used by both
+		// Lambda and task worker paths — see inject.go.
+		reqCtx, err := InjectResources(httpReq.Context(), InjectParams{
+			Resources: req.Resources,
+			UserID:    req.UserID,
+			AppID:     req.AppID,
+			AppRole:   req.AppRole,
+			AppSchema: req.AppSchema,
+		})
+		if err != nil {
+			return jsonError(400, err.Error()), nil
 		}
 		httpReq = httpReq.WithContext(reqCtx)
 

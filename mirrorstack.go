@@ -26,6 +26,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
+	msqs "github.com/mirrorstack-ai/app-module-sdk/internal/sqs"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -82,6 +83,8 @@ type Module struct {
 	devStorage     *storage.Client
 	devStorageErr  error
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
+	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
+	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
 }
 
 // moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
@@ -105,7 +108,20 @@ func New(cfg Config) (*Module, error) {
 		poolCache:    db.NewPoolCache(),
 		cacheCache:   cache.NewClientCache(),
 		taskHandlers: make(map[string]taskEntry),
+		signingKey:   []byte(os.Getenv("MS_TASK_SIGNING_KEY")),
 	}
+
+	// Eagerly initialize SQS client when queue URL is configured.
+	// LoadDefaultConfig may hit IMDS on first cold start in Lambda; acceptable
+	// since this runs once at process init, not per request.
+	if queueURL := os.Getenv("MS_TASK_QUEUE_URL"); queueURL != "" {
+		sqsClient, err := msqs.New(context.Background(), queueURL)
+		if err != nil {
+			return nil, fmt.Errorf("mirrorstack: init sqs client: %w", err)
+		}
+		m.sqsClient = sqsClient
+	}
+
 	m.mountSystemRoutes()
 	return m, nil
 }
