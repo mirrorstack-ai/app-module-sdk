@@ -87,6 +87,15 @@ mod.Start()
 
 Port defaults to `8080`. Override with `PORT` env var.
 
+> **Warning: never expose the dev-mode HTTP server to the public internet.**
+>
+> When `AWS_LAMBDA_FUNCTION_NAME` is unset, `InternalAuth` returns 401
+> (not 503) on a missing secret to keep local tooling friendly. A dev
+> server bound to `0.0.0.0` with no `MS_INTERNAL_SECRET` set will accept
+> platform calls from anyone who can reach the port. Use Lambda or ECS
+> task worker mode for production. For staging, set `MS_INTERNAL_SECRET`
+> and put the server behind a VPN or IP allowlist.
+
 ## Database
 
 `ms.DB(ctx)` returns a scoped database connection with automatic tenant isolation:
