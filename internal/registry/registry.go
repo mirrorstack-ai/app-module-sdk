@@ -54,6 +54,14 @@ type Schedule struct {
 	Path string `json:"path"`
 }
 
+// Task is a declared background task. Exposed in the manifest so the platform
+// can provision SQS queues and ECS task definitions on deploy.
+type Task struct {
+	Name        string `json:"name"`
+	MaxDuration string `json:"maxDuration,omitempty"` // e.g. "600s", "10m" — platform sets visibility timeout
+	MaxRetries  int    `json:"maxRetries,omitempty"`  // platform configures DLQ redrive policy
+}
+
 // Permission is a declared module permission. Exposed in the manifest so the
 // platform can surface "what does this module need" on its install screen.
 type Permission struct {
@@ -61,7 +69,7 @@ type Permission struct {
 	Roles []string `json:"roles"`
 }
 
-// Registry is the per-module registry of routes/events/schedules/permissions.
+// Registry is the per-module registry of routes/events/schedules/tasks/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
 	mu          sync.RWMutex
@@ -69,6 +77,7 @@ type Registry struct {
 	emits       []string
 	subscribes  map[string]string // event name → internal path
 	schedules   []Schedule
+	tasks       []Task
 	permissions []Permission
 }
 
@@ -185,6 +194,32 @@ func (r *Registry) Schedules() []Schedule {
 		return []Schedule{}
 	}
 	return slices.Clone(r.schedules)
+}
+
+// AddTask declares a background task. Returns true if added, false if a task
+// with the same name already exists (first-wins). Panics on an invalid name
+// (see validateRegistrationName).
+func (r *Registry) AddTask(task Task) bool {
+	validateRegistrationName("OnTask", task.Name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.tasks {
+		if existing.Name == task.Name {
+			return false
+		}
+	}
+	r.tasks = append(r.tasks, task)
+	return true
+}
+
+// Tasks returns a non-nil copy of all declared tasks.
+func (r *Registry) Tasks() []Task {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.tasks == nil {
+		return []Task{}
+	}
+	return slices.Clone(r.tasks)
 }
 
 // AddPermission records a declared permission. First-wins by name: a second

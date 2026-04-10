@@ -22,6 +22,7 @@ type ManifestPayload struct {
 	Routes      map[registry.Scope][]registry.Route `json:"routes"`
 	Events      ManifestEvents                      `json:"events"`
 	Schedules   []registry.Schedule                 `json:"schedules"`
+	Tasks       []registry.Task                     `json:"tasks"`
 	Permissions []registry.Permission               `json:"permissions"`
 }
 
@@ -88,6 +89,7 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]Mig
 			Routes:      reg.Routes(),
 			Events:      ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
 			Schedules:   reg.Schedules(),
+			Tasks:       reg.Tasks(),
 			Permissions: reg.Permissions(),
 		})
 	}
