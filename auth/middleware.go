@@ -41,6 +41,12 @@ func PublicAuth() func(http.Handler) http.Handler {
 // also fail-fasts on the missing-secret case in Lambda mode, but a caller
 // can still bypass Start() via Module.Router().ServeHTTP — this branch is
 // the runtime safety net for that case.
+//
+// CONTRACT: the returned middleware captures the expected secret once at
+// construction time. Callers (e.g., Module.internalAuth) cache and reuse
+// the returned closure for every route registration. Do not add request-
+// time behavior (re-reading the secret, fetching from a config service)
+// without updating all cache sites in mirrorstack.go.
 func InternalAuth() func(http.Handler) http.Handler {
 	return internalAuth(lambdaenv.IsSet())
 }
