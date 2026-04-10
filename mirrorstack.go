@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"sync"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -440,18 +441,26 @@ func RequirePermission(name string, roles ...string) func(http.Handler) http.Han
 	return mustDefault("RequirePermission").RequirePermission(name, roles...)
 }
 
-// Start auto-detects Lambda vs HTTP and starts serving.
+// Start auto-detects the runtime mode and starts serving:
+//
+//   - Lambda (AWS_LAMBDA_FUNCTION_NAME set): wraps the router for Lambda invoke
+//   - Task worker (MS_TASK_WORKER_MODE=true): polls SQS for background tasks
+//   - Otherwise: HTTP server on :PORT (default 8080) for local development
+//
+// Lambda wins if both env vars are set (they are mutually exclusive in
+// production but this ordering is a safety net).
 func (m *Module) Start() error {
 	if runtime.IsLambda() {
-		// Fail-fast in Lambda: a missing secret turns every platform call
-		// into a 503; surface it as an init failure instead. Dev/HTTP
-		// intentionally permits no-secret.
 		if err := requireInternalSecret(); err != nil {
 			return err
 		}
 		handler := runtime.NewLambdaHandler(m.router)
 		lambda.Start(handler)
 		return nil
+	}
+
+	if runtime.IsTaskWorker() {
+		return m.startTaskWorker()
 	}
 
 	port := os.Getenv("PORT")
@@ -464,6 +473,79 @@ func (m *Module) Start() error {
 		return err
 	}
 	return nil
+}
+
+// startTaskWorker runs the SQS poll loop. Spawns MS_TASK_CONCURRENCY
+// goroutines (default 1). Blocks until the context is cancelled (SIGTERM
+// handling is added in PR 4).
+func (m *Module) startTaskWorker() error {
+	if m.sqsClient == nil {
+		return errors.New("mirrorstack: MS_TASK_QUEUE_URL is required in task worker mode")
+	}
+	if len(m.signingKey) < 32 {
+		return errors.New("mirrorstack: MS_TASK_SIGNING_KEY must be at least 32 bytes in task worker mode")
+	}
+	if len(m.taskHandlers) == 0 {
+		return errors.New("mirrorstack: no tasks registered via OnTask — nothing to process")
+	}
+
+	concurrency, err := parseTaskConcurrency()
+	if err != nil {
+		return err
+	}
+
+	// Build the handler map in the shape the worker loop expects.
+	handlers := make(map[string]runtime.TaskEntry, len(m.taskHandlers))
+	for name, entry := range m.taskHandlers {
+		handlers[name] = runtime.TaskEntry{
+			Handler: runtime.TaskHandlerFunc(entry.handler),
+			Timeout: entry.timeout,
+		}
+	}
+
+	cfg := runtime.WorkerConfig{
+		SQSClient:    m.sqsClient,
+		Handlers:     handlers,
+		SigningKey:   m.signingKey,
+		Logger:       m.logger,
+		IsProduction: true, // MS_TASK_QUEUE_URL is set (checked above)
+	}
+
+	m.logger.Printf("%s module (%s) starting task worker (concurrency=%d)", m.config.Name, m.config.ID, concurrency)
+
+	// PR 4 will wrap this in signal.NotifyContext for SIGTERM handling.
+	// For now, block on the poll loop directly.
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runtime.PollLoop(ctx, &cfg)
+		}()
+	}
+	wg.Wait()
+
+	m.Close()
+	return nil
+}
+
+// parseTaskConcurrency reads MS_TASK_CONCURRENCY, defaulting to 1.
+// Returns an error for non-integer or < 1 values.
+func parseTaskConcurrency() (int, error) {
+	s := os.Getenv("MS_TASK_CONCURRENCY")
+	if s == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("mirrorstack: MS_TASK_CONCURRENCY=%q is not a valid integer", s)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("mirrorstack: MS_TASK_CONCURRENCY=%d must be >= 1", n)
+	}
+	return n, nil
 }
 
 // requireInternalSecret errors if MS_INTERNAL_SECRET is unset — used by
