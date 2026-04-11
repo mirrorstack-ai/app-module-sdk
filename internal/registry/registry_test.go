@@ -396,7 +396,7 @@ func TestAddPermission_PanicsOnInvalidName(t *testing.T) {
 	// Permissions don't end up in URL paths, but they DO appear in the
 	// manifest payload which platform-side consumers may use as identifiers
 	// for grant UI, RBAC tables, log fields, etc. Sharing the registry's
-	// validateRegistrationName guard with AddSubscribe/AddEmit/AddSchedule
+	// ValidateName guard with AddSubscribe/AddEmit/AddSchedule
 	// prevents inconsistent behavior across the four registration sites
 	// and keeps malformed strings (null bytes, dot-segments) out of the
 	// manifest regardless of which Add* the developer called.

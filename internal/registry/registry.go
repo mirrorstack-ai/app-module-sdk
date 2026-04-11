@@ -123,9 +123,9 @@ func (r *Registry) Routes() map[Scope][]Route {
 
 // AddEmit declares that the module emits an event of the given name.
 // Returns true if added, false if a declaration for that name already exists
-// (first-wins). Panics on an invalid name (see validateRegistrationName).
+// (first-wins). Panics on an invalid name (see ValidateName).
 func (r *Registry) AddEmit(name string) bool {
-	validateRegistrationName("Emits", name)
+	ValidateName("Emits", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if slices.Contains(r.emits, name) {
@@ -148,9 +148,9 @@ func (r *Registry) Emits() []string {
 // AddSubscribe declares that the module subscribes to an event from another
 // module. The handler is mounted at path on the Internal scope. Returns true
 // if added, false if a subscription for that event name already exists
-// (first-wins). Panics on an invalid name (see validateRegistrationName).
+// (first-wins). Panics on an invalid name (see ValidateName).
 func (r *Registry) AddSubscribe(name, path string) bool {
-	validateRegistrationName("OnEvent", name)
+	ValidateName("OnEvent", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.subscribes[name]; exists {
@@ -172,9 +172,9 @@ func (r *Registry) Subscribes() map[string]string {
 
 // AddSchedule registers a cron job. Returns true if added, false if a job
 // with the same name already exists (first-wins). Panics on an invalid name
-// (see validateRegistrationName).
+// (see ValidateName).
 func (r *Registry) AddSchedule(name, cron, path string) bool {
-	validateRegistrationName("Cron", name)
+	ValidateName("Cron", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.schedules {
@@ -198,9 +198,9 @@ func (r *Registry) Schedules() []Schedule {
 
 // AddTask declares a background task. Returns true if added, false if a task
 // with the same name already exists (first-wins). Panics on an invalid name
-// (see validateRegistrationName).
+// (see ValidateName).
 func (r *Registry) AddTask(task Task) bool {
-	validateRegistrationName("OnTask", task.Name)
+	ValidateName("OnTask", task.Name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.tasks {
@@ -226,13 +226,13 @@ func (r *Registry) Tasks() []Task {
 // AddPermission for the same name is dropped (matches AddRoute / AddEmit /
 // AddSchedule semantics). The roles slice is cloned so caller mutations
 // after the call cannot leak into the stored copy. Panics on an invalid
-// name (see validateRegistrationName) — permissions don't end up in URL
+// name (see ValidateName) — permissions don't end up in URL
 // paths, so the path-separator check is purely cosmetic for permissions,
 // but the consistency with AddSubscribe/AddEmit/AddSchedule prevents
 // downstream consumers (DB columns, log parsers) from receiving malformed
 // strings via the manifest.
 func (r *Registry) AddPermission(name string, roles []string) {
-	validateRegistrationName("RequirePermission", name)
+	ValidateName("RequirePermission", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.permissions {

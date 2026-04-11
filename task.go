@@ -2,7 +2,6 @@ package mirrorstack
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -184,7 +184,7 @@ func (m *Module) RunTask(ctx context.Context, name string, payload json.RawMessa
 // copying credentials so the task worker has identical DB/Cache/Storage access.
 func (m *Module) buildTaskMessage(ctx context.Context, name string, payload json.RawMessage) *runtime.TaskMessage {
 	msg := &runtime.TaskMessage{
-		TaskID:  generateTaskID(),
+		TaskID:  ids.NewUUID(),
 		Name:    name,
 		Payload: payload,
 	}
@@ -213,17 +213,6 @@ func (m *Module) buildTaskMessage(ctx context.Context, name string, payload json
 	msg.AppSchema = db.SchemaFrom(ctx)
 
 	return msg
-}
-
-// generateTaskID returns a new UUID v4 string for task deduplication.
-func generateTaskID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("mirrorstack: crypto/rand.Read failed: " + err.Error())
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 2
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 // OnTask registers a task handler on the default Module created by Init().

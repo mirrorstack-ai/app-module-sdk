@@ -2,7 +2,7 @@ package registry
 
 import "strings"
 
-// validateRegistrationName rejects names that are empty, contain a path
+// ValidateName rejects names that are empty, contain a path
 // separator (/, \), contain a dot-segment (..), contain whitespace, or
 // contain a null byte. The name is concatenated into a URL path by the
 // SDK's event/cron handlers, so any character that chi might normalize
@@ -20,9 +20,9 @@ import "strings"
 // is byte-oriented and a Unicode-whitespace name would simply produce a
 // dead handler, not a security issue.
 //
-// kind is the user-facing API name (e.g., "OnEvent", "Cron", "Emits") used
-// in the panic message so callers see which call failed validation.
-func validateRegistrationName(kind, name string) {
+// kind is the user-facing API name (e.g., "OnEvent", "Cron", "Emits", "Record")
+// used in the panic message so callers see which call failed validation.
+func ValidateName(kind, name string) {
 	if name == "" {
 		panic("mirrorstack/registry: " + kind + " name cannot be empty")
 	}
