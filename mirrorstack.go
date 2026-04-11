@@ -31,6 +31,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	msqs "github.com/mirrorstack-ai/app-module-sdk/internal/sqs"
+	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -89,6 +90,7 @@ type Module struct {
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
 	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
 	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
+	meterClient    *meter.Client        // prod (MS_METER_LAMBDA_ARN set) or dev-mode stderr
 }
 
 // moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
@@ -124,6 +126,19 @@ func New(cfg Config) (*Module, error) {
 			return nil, fmt.Errorf("mirrorstack: init sqs client: %w", err)
 		}
 		m.sqsClient = sqsClient
+	}
+
+	// Meter client: production mode when MS_METER_LAMBDA_ARN is set (ARN is
+	// validated at construction so typos fail fast), dev-mode stderr sink
+	// otherwise. Never nil.
+	if meterARN := os.Getenv("MS_METER_LAMBDA_ARN"); meterARN != "" {
+		meterClient, err := meter.NewFromARN(context.Background(), meterARN)
+		if err != nil {
+			return nil, fmt.Errorf("mirrorstack: init meter client: %w", err)
+		}
+		m.meterClient = meterClient
+	} else {
+		m.meterClient = meter.NewDev(m.logger)
 	}
 
 	m.mountSystemRoutes()
@@ -347,6 +362,22 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error
 // already sets the prefix from cred.Prefix, so no separate ForApp scoping is needed.
 func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
 	return m.resolveStorage(ctx)
+}
+
+// Meter returns a scoped meter for recording usage events (billing metrics).
+// Unlike DB/Cache/Storage, Meter returns the interface directly — there is
+// no release closure (nothing to release) and no construction error
+// (init errors happen eagerly in New()).
+//
+// In production (MS_METER_LAMBDA_ARN set), Record dispatches to the platform
+// meter Lambda via async invoke (~5-15ms per call). In dev mode, Record
+// logs to stderr.
+//
+//	if err := ms.Meter(r.Context()).Record("transcode.minutes", 12); err != nil {
+//	    log.Printf("meter: %v", err) // don't fail the handler
+//	}
+func (m *Module) Meter(ctx context.Context) meter.Meter {
+	return m.meterClient.Scope(ctx, m.config.ID)
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
@@ -697,6 +728,12 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) {
 // Storage returns a scoped storage client on the default module.
 func Storage(ctx context.Context) (storage.Storer, error) {
 	return mustDefault("Storage").Storage(ctx)
+}
+
+// Meter returns a scoped meter for recording usage events on the default module.
+// Panics before Init.
+func Meter(ctx context.Context) meter.Meter {
+	return mustDefault("Meter").Meter(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.

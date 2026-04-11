@@ -662,6 +662,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
 		"OnTask":            func() { OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil }) },
 		"RunTask":           func() { _, _ = RunTask(context.Background(), "work", nil) },
+		"Meter":             func() { _ = Meter(context.Background()).Record("m", 1) },
 		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 	}
