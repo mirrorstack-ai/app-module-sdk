@@ -10,6 +10,8 @@
 package registry
 
 import (
+	"context"
+	"encoding/json"
 	"maps"
 	"slices"
 	"sync"
@@ -78,6 +80,32 @@ type Dependency struct {
 	Optional bool   `json:"optional,omitempty"`
 }
 
+// MCPToolHandler is the type-erased handler signature used after generic
+// MCPTool registration at the SDK level has wrapped the typed handler.
+type MCPToolHandler func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
+
+// MCPResourceHandler returns the current content of an MCP resource on demand.
+type MCPResourceHandler func(ctx context.Context) (json.RawMessage, error)
+
+// MCPToolDecl is a registered MCP tool. Name, Description, and schemas appear
+// in the manifest (via MCPToolExport, omitting Handler). Handler is invoked
+// by the /__mirrorstack/mcp/tools/call route.
+type MCPToolDecl struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
+	Handler      MCPToolHandler  `json:"-"`
+}
+
+// MCPResourceDecl is a registered MCP resource.
+type MCPResourceDecl struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Schema      json.RawMessage    `json:"schema,omitempty"`
+	Handler     MCPResourceHandler `json:"-"`
+}
+
 // Registry is the per-module registry of routes/events/schedules/tasks/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
@@ -90,6 +118,8 @@ type Registry struct {
 	permissions  []Permission
 	description  string
 	dependencies []Dependency
+	mcpTools     []MCPToolDecl
+	mcpResources []MCPResourceDecl
 }
 
 func New() *Registry {
@@ -325,4 +355,82 @@ func (r *Registry) Permissions() []Permission {
 		out[i] = Permission{Name: p.Name, Roles: slices.Clone(p.Roles)}
 	}
 	return out
+}
+
+// AddMCPTool registers an MCP tool. First-wins: if a tool with the same name
+// already exists, the call is a no-op and returns false. Panics on an invalid
+// name (see ValidateName).
+func (r *Registry) AddMCPTool(tool MCPToolDecl) bool {
+	ValidateName("MCPTool", tool.Name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.mcpTools {
+		if existing.Name == tool.Name {
+			return false
+		}
+	}
+	r.mcpTools = append(r.mcpTools, tool)
+	return true
+}
+
+// AddMCPResource registers an MCP resource. Same first-wins rule as AddMCPTool.
+func (r *Registry) AddMCPResource(rc MCPResourceDecl) bool {
+	ValidateName("MCPResource", rc.Name)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.mcpResources {
+		if existing.Name == rc.Name {
+			return false
+		}
+	}
+	r.mcpResources = append(r.mcpResources, rc)
+	return true
+}
+
+// MCPTool returns the registered tool with the given name, or the zero value
+// and false if no such tool is registered.
+func (r *Registry) MCPTool(name string) (MCPToolDecl, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, t := range r.mcpTools {
+		if t.Name == name {
+			return t, true
+		}
+	}
+	return MCPToolDecl{}, false
+}
+
+// MCPResource returns the registered resource with the given name, or the zero
+// value and false if no such resource is registered.
+func (r *Registry) MCPResource(name string) (MCPResourceDecl, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, rc := range r.mcpResources {
+		if rc.Name == name {
+			return rc, true
+		}
+	}
+	return MCPResourceDecl{}, false
+}
+
+// MCPTools returns a non-nil copy of all registered tools in registration order.
+// Handlers are preserved in the copy; the slice header is independent.
+func (r *Registry) MCPTools() []MCPToolDecl {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.mcpTools == nil {
+		return []MCPToolDecl{}
+	}
+	return slices.Clone(r.mcpTools)
+}
+
+// MCPResources returns a non-nil copy of all registered resources in
+// registration order.
+func (r *Registry) MCPResources() []MCPResourceDecl {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.mcpResources == nil {
+		return []MCPResourceDecl{}
+	}
+	return slices.Clone(r.mcpResources)
 }

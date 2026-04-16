@@ -26,6 +26,16 @@ type ManifestPayload struct {
 	Schedules    []registry.Schedule                 `json:"schedules"`
 	Tasks        []registry.Task                     `json:"tasks"`
 	Permissions  []registry.Permission               `json:"permissions"`
+	MCP          ManifestMCP                         `json:"mcp"`
+}
+
+// ManifestMCP declares the MCP tool and resource surface of the module. The
+// platform catalog ingests this at publish time so an aggregated MCP server
+// can route agent tool calls without live-listing per module. Handlers are
+// stripped — only name, description, and schemas appear on the wire.
+type ManifestMCP struct {
+	Tools     []MCPToolEntry     `json:"tools"`
+	Resources []MCPResourceEntry `json:"resources"`
 }
 
 // MigrationVersions is the per-scope migration number set. Used both for the
@@ -51,6 +61,28 @@ type ManifestDefaults struct {
 type ManifestEvents struct {
 	Emits      []string          `json:"emits"`
 	Subscribes map[string]string `json:"subscribes"`
+}
+
+// buildManifestMCP translates the registry's MCP declarations into the
+// wire-safe entries (Handler stripped). Empty slices are non-nil so the
+// output is always {"tools":[],"resources":[]} rather than nulls.
+func buildManifestMCP(reg *registry.Registry) ManifestMCP {
+	tools := reg.MCPTools()
+	toolOut := make([]MCPToolEntry, len(tools))
+	for i, t := range tools {
+		toolOut[i] = MCPToolEntry{
+			Name: t.Name, Description: t.Description,
+			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
+		}
+	}
+	resources := reg.MCPResources()
+	resourceOut := make([]MCPResourceEntry, len(resources))
+	for i, rc := range resources {
+		resourceOut[i] = MCPResourceEntry{
+			Name: rc.Name, Description: rc.Description, Schema: rc.Schema,
+		}
+	}
+	return ManifestMCP{Tools: toolOut, Resources: resourceOut}
 }
 
 // ManifestHandler returns an http.HandlerFunc that serves the module manifest.
@@ -95,6 +127,7 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]Mig
 			Schedules:    reg.Schedules(),
 			Tasks:        reg.Tasks(),
 			Permissions:  reg.Permissions(),
+			MCP:          buildManifestMCP(reg),
 		})
 	}
 }
