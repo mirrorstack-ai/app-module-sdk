@@ -7,7 +7,7 @@ Go SDK for building modules on [MirrorStack](https://mirrorstack.ai), the Agenti
 
 Built with Go, chi router, and designed for AWS Lambda + local dev.
 
-**[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
+**[Docs](./docs/)** | **[Template module](./examples/template/)** | **[Changelog](./CHANGELOG.md)** | **[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
 
 > **Status:** Under active development — see the roadmap below.
 >
