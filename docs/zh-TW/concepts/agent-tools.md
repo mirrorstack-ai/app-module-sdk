@@ -4,59 +4,13 @@
 
 MirrorStack 定位是 **Agentic CMS** — 每個 module 都要可以被 AI agent 操作,不是只給人類 UI 用。expose 至少一個 agent-callable 的 tool 或 resource 是 baseline requirement,這就是為什麼 template 裡面 `mcp.go` 永遠都會在,不能被 CLI flag 關掉。
 
-這份文件講 agent access 的三種 pattern、怎麼挑、還有區分好 tool 跟爛 tool 的幾個 design principle。
+這份文件講每個 module 會 expose 的 MCP surface、tool 跟 resource 的差別、還有區分好 tool 跟爛 tool 的幾個 design principle。
 
-## 三種 Pattern
+## MCP tools + resources
 
-### 1. MCP tools + resources(baseline — 每個 module 都要有)
-
-主要的機制。`ms.MCPTool` register agent 可以 call 的操作;`ms.MCPResource` register agent 可以讀的 snapshot。SDK 在 Internal scope 下面 serve 這些 routes(`/__mirrorstack/mcp/*`),還會把 schema 發佈到 manifest。
+`ms.MCPTool` register agent 可以 call 的操作;`ms.MCPResource` register agent 可以讀的 snapshot。SDK 在 Internal scope 下面 serve 這些 routes(`/__mirrorstack/mcp/*`),還會把 schema 發佈到 manifest。
 
 Platform 的 MCP aggregator 會讀每一個 installed module 的 manifest,然後對 agent expose **一個統一的 MCP server**,每個 tool 都會加上 module 的 prefix:`{module-id}.{tool-name}`。任何會講 MCP 的 client(Claude Code、Cursor、ChatGPT Desktop、自己寫的 agent runtime)都可以 connect。
-
-**什麼時候用 MCP:**
-- Action 或 query 在 install 的時候就可以 discover(schema 是穩定的)
-- Agent 根據 description 自己決定要 call 哪個 tool
-- 想要跨 agent host 都能用
-
-### 2. Claude Code skills(workflow orchestration)
-
-Skills 是 Claude Code 專屬的 markdown 檔案,把多步驟 workflow 包進一個 slash command。Skill 本身不跑 code — 它告訴 Claude 怎麼 orchestrate 其他 primitive(通常是 MCP tools)。
-
-**什麼時候用 skills:**
-- Workflow 有 3+ 步驟、而且總是一起發生
-- 步驟裡面需要 LLM 做判斷(選哪個 preset、選哪個 user 等等)
-- 你要 ship 一個 Claude Code plugin 配有自己的 defaults
-
-Skills 底下 call 的還是 MCP tools。Skills 是 DX sugar;MCP 才是 protocol。
-
-### 3. Subagents(隔離的 task execution)
-
-Claude Code 支援 subagent — 獨立的 LLM instance,有自己的 context window 跟受限的 tool allowlist。適合 main agent 想 delegate 但不想污染自己 context 的場景。
-
-**什麼時候用 subagent:**
-- Task 會跑很久或產生一堆中間 output
-- Work 可以用便宜/快的 model(batch processing 用 Haiku)
-- 需要 guardrail(subagent 只看得到 subset 的 tool)
-
-Subagent 底下 call 的也是 MCP tools — 只是 allowlist 比較窄。
-
-### 怎麼挑
-
-```
-問題                                       答案
----------------------------------------------------------------------
-我 module 有 expose 功能嗎?                 → Ship MCP tools/resources。
-                                             (Required baseline)
-
-我也要出 Claude Code plugin 嗎?             → 常用的 workflow 考慮做成
-                                             skill。
-
-某個 flow 會跑很久/很吵/很花錢嗎?           → 包成 subagent,tool
-                                             allowlist 限縮。
-```
-
-MCP 永遠是 foundation。Skills 跟 subagent 是上面的 opt-in layer。
 
 ## Tool vs Resource
 
