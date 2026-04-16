@@ -173,17 +173,19 @@ Three scopes control who can call your routes:
 
 ### Permissions
 
-Use `ms.RequirePermission` for fine-grained role control:
+Use `ms.RequirePermission` for fine-grained role control. Roles are typed values from the `roles` package — import aliased as `p` by convention:
 
 ```go
+import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+
 ms.Platform(func(r chi.Router) {
-    r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
-    r.With(ms.RequirePermission("media.upload", "admin", "member")).Post("/items", uploadItem)
-    r.With(ms.RequirePermission("media.delete", "admin")).Delete("/items/{id}", deleteItem)
+    r.With(ms.RequirePermission("media.view",   p.Admin(), p.Viewer())).Get("/items", listItems)
+    r.With(ms.RequirePermission("media.upload", p.Admin())).Post("/items", uploadItem)
+    r.With(ms.RequirePermission("media.moderate", p.Custom("moderator"))).Post("/flag", flagItem)
 })
 ```
 
-3 roles: `admin` | `member` | `viewer`
+Canonical roles: `p.Admin()`, `p.Viewer()`. Use `p.Custom("key")` for module-specific roles. Typed values prevent typos and enable IDE autocomplete.
 
 Permissions are auto-registered for manifest generation — the platform knows what each module requires.
 
