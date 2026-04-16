@@ -565,3 +565,101 @@ func TestDependencies_ValidateNameRejectsBad(t *testing.T) {
 		})
 	}
 }
+
+// ---- MCP ----
+
+func TestMCPTool_AddAndList(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	if added := r.AddMCPTool(MCPToolDecl{Name: "greet", Description: "Say hi"}); !added {
+		t.Error("AddMCPTool(new) = false, want true")
+	}
+	if got := r.MCPTools(); len(got) != 1 || got[0].Name != "greet" {
+		t.Errorf("MCPTools = %+v, want [{greet, ...}]", got)
+	}
+}
+
+func TestMCPTool_DuplicateNameIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddMCPTool(MCPToolDecl{Name: "greet", Description: "first"})
+	if added := r.AddMCPTool(MCPToolDecl{Name: "greet", Description: "second"}); added {
+		t.Error("duplicate AddMCPTool = true, want false (first-wins)")
+	}
+	got := r.MCPTools()
+	if len(got) != 1 || got[0].Description != "first" {
+		t.Errorf("MCPTools[0].Description = %q, want first (first-wins)", got[0].Description)
+	}
+}
+
+func TestMCPTool_LookupByName(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddMCPTool(MCPToolDecl{Name: "a"})
+	r.AddMCPTool(MCPToolDecl{Name: "b"})
+
+	if _, ok := r.MCPTool("a"); !ok {
+		t.Error("MCPTool(a) not found")
+	}
+	if _, ok := r.MCPTool("missing"); ok {
+		t.Error("MCPTool(missing) returned ok=true")
+	}
+}
+
+func TestMCPTool_EmptyReturnsNonNil(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	if got := r.MCPTools(); got == nil {
+		t.Error("MCPTools() on empty = nil, want []MCPToolDecl{}")
+	}
+	if got := r.MCPResources(); got == nil {
+		t.Error("MCPResources() on empty = nil, want []MCPResourceDecl{}")
+	}
+}
+
+func TestMCPTool_ValidateNameRejectsBad(t *testing.T) {
+	t.Parallel()
+
+	bad := []string{"", "../etc", "foo/bar", "foo\x00bar"}
+	for _, b := range bad {
+		t.Run(b, func(t *testing.T) {
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddMCPTool name=%q", b)
+				}
+			}()
+			New().AddMCPTool(MCPToolDecl{Name: b})
+		})
+	}
+}
+
+func TestMCPResource_AddAndLookup(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddMCPResource(MCPResourceDecl{Name: "status", Description: "Status"})
+	if _, ok := r.MCPResource("status"); !ok {
+		t.Error("MCPResource(status) not found after add")
+	}
+	if got := r.MCPResources(); len(got) != 1 {
+		t.Errorf("len(MCPResources) = %d, want 1", len(got))
+	}
+}
+
+func TestMCP_PreservesRegistrationOrder(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddMCPTool(MCPToolDecl{Name: "third"})
+	r.AddMCPTool(MCPToolDecl{Name: "first"})
+	r.AddMCPTool(MCPToolDecl{Name: "second"})
+
+	got := r.MCPTools()
+	if got[0].Name != "third" || got[1].Name != "first" || got[2].Name != "second" {
+		t.Errorf("order not preserved: %+v", got)
+	}
+}
