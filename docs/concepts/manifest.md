@@ -1,5 +1,7 @@
 # Manifest
 
+> Language: **English** · [繁體中文](../zh-TW/concepts/manifest.md)
+
 Every MirrorStack module serves `GET /__mirrorstack/platform/manifest` under Internal scope. The platform catalog reads this at deploy time to discover the module's identity, routes, events, permissions, and agent surface.
 
 The manifest is an **additive wire contract** — new fields land with `omitempty` (or as always-present empty arrays) so old catalog consumers keep parsing correctly.

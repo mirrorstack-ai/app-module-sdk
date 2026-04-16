@@ -1,5 +1,7 @@
 # API reference
 
+> Language: **English** · [繁體中文](./zh-TW/api-reference.md)
+
 Every public `ms.*` function. Grouped by concern. Each has a one-line example.
 
 All functions come in two forms: a package-level convenience wrapper (uses the default `Module` created by `ms.Init`) and a receiver method on `*ms.Module` (for testing or multi-module programs). Only the package-level form is shown below; append `m.` or `(*Module).` for the method.

@@ -1,5 +1,7 @@
 # Dependencies
 
+> Language: **English** · [繁體中文](../zh-TW/concepts/dependencies.md)
+
 A MirrorStack module declares dependencies on other modules by their ID, not by abstract capability names. The platform's catalog uses these declarations to drive install ordering (required deps) and to let modules opportunistically integrate (optional deps).
 
 ## Required vs optional

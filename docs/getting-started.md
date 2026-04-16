@@ -1,5 +1,7 @@
 # Getting started
 
+> Language: **English** · [繁體中文](./zh-TW/getting-started.md)
+
 Build your first MirrorStack module in under 5 minutes.
 
 ## Prerequisites

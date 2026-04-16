@@ -1,5 +1,7 @@
 # Scopes
 
+> Language: **English** · [繁體中文](../zh-TW/concepts/scopes.md)
+
 Every HTTP route lives under one of three **scopes**. The scope determines which auth middleware the SDK applies and which clients can reach the route.
 
 | Scope | Entry point | Auth | Intended caller |
