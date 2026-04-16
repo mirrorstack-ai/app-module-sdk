@@ -69,16 +69,27 @@ type Permission struct {
 	Roles []string `json:"roles"`
 }
 
+// Dependency is a declared dependency on another module. Optional=true means
+// the dependent module works standalone and uses the dependency opportunistically
+// at runtime via Resolve[T]; Optional=false means the platform must install the
+// dependency before this module.
+type Dependency struct {
+	ID       string `json:"id"`
+	Optional bool   `json:"optional,omitempty"`
+}
+
 // Registry is the per-module registry of routes/events/schedules/tasks/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
-	mu          sync.RWMutex
-	routes      map[Scope][]Route
-	emits       []string
-	subscribes  map[string]string // event name → internal path
-	schedules   []Schedule
-	tasks       []Task
-	permissions []Permission
+	mu           sync.RWMutex
+	routes       map[Scope][]Route
+	emits        []string
+	subscribes   map[string]string // event name → internal path
+	schedules    []Schedule
+	tasks        []Task
+	permissions  []Permission
+	description  string
+	dependencies []Dependency
 }
 
 func New() *Registry {
@@ -86,6 +97,57 @@ func New() *Registry {
 		routes:     make(map[Scope][]Route),
 		subscribes: make(map[string]string),
 	}
+}
+
+// SetDescription sets the module's human-readable description. Last-write-wins;
+// typically called once at module init via ms.Describe.
+func (r *Registry) SetDescription(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.description = s
+}
+
+// Description returns the module description, or empty string if unset.
+func (r *Registry) Description() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.description
+}
+
+// AddDependency records a dependency on another module by ID. The optional flag
+// distinguishes required (install-time) from optional (runtime Resolve) deps.
+//
+// Dedup: if the same ID is declared both ways across the codebase, required
+// wins (stricter beats looser). A subsequent required call upgrades a prior
+// optional entry; a subsequent optional call never downgrades a required one.
+// Returns true if the dependency was newly added or upgraded from optional to
+// required, false if the call was a no-op.
+func (r *Registry) AddDependency(id string, optional bool) bool {
+	ValidateName("DependsOn", id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, existing := range r.dependencies {
+		if existing.ID == id {
+			if existing.Optional && !optional {
+				r.dependencies[i].Optional = false
+				return true
+			}
+			return false
+		}
+	}
+	r.dependencies = append(r.dependencies, Dependency{ID: id, Optional: optional})
+	return true
+}
+
+// Dependencies returns a non-nil copy of all declared dependencies in
+// registration order.
+func (r *Registry) Dependencies() []Dependency {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.dependencies == nil {
+		return []Dependency{}
+	}
+	return slices.Clone(r.dependencies)
 }
 
 // AddRoute records a route under the given scope. First-wins: duplicate

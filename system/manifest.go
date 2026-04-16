@@ -15,15 +15,17 @@ import (
 // migration versions, and the semver→migration mapping it needs to translate
 // lifecycle calls.
 type ManifestPayload struct {
-	ID          string                              `json:"id"`
-	Defaults    ManifestDefaults                    `json:"defaults"`
-	Migration   MigrationVersions                   `json:"migration"`
-	Versions    map[string]MigrationVersions        `json:"versions"`
-	Routes      map[registry.Scope][]registry.Route `json:"routes"`
-	Events      ManifestEvents                      `json:"events"`
-	Schedules   []registry.Schedule                 `json:"schedules"`
-	Tasks       []registry.Task                     `json:"tasks"`
-	Permissions []registry.Permission               `json:"permissions"`
+	ID           string                              `json:"id"`
+	Defaults     ManifestDefaults                    `json:"defaults"`
+	Description  string                              `json:"description,omitempty"`
+	Dependencies []registry.Dependency               `json:"dependencies"`
+	Migration    MigrationVersions                   `json:"migration"`
+	Versions     map[string]MigrationVersions        `json:"versions"`
+	Routes       map[registry.Scope][]registry.Route `json:"routes"`
+	Events       ManifestEvents                      `json:"events"`
+	Schedules    []registry.Schedule                 `json:"schedules"`
+	Tasks        []registry.Task                     `json:"tasks"`
+	Permissions  []registry.Permission               `json:"permissions"`
 }
 
 // MigrationVersions is the per-scope migration number set. Used both for the
@@ -82,15 +84,17 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]Mig
 		}
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
-			ID:          id,
-			Defaults:    ManifestDefaults{Name: name, Icon: icon},
-			Migration:   MigrationVersions{App: appVersion, Module: moduleVersion},
-			Versions:    versions,
-			Routes:      reg.Routes(),
-			Events:      ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Schedules:   reg.Schedules(),
-			Tasks:       reg.Tasks(),
-			Permissions: reg.Permissions(),
+			ID:           id,
+			Defaults:     ManifestDefaults{Name: name, Icon: icon},
+			Description:  reg.Description(),
+			Dependencies: reg.Dependencies(),
+			Migration:    MigrationVersions{App: appVersion, Module: moduleVersion},
+			Versions:     versions,
+			Routes:       reg.Routes(),
+			Events:       ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Schedules:    reg.Schedules(),
+			Tasks:        reg.Tasks(),
+			Permissions:  reg.Permissions(),
 		})
 	}
 }

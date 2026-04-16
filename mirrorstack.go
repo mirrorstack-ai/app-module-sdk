@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	runtimepkg "runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -482,6 +484,127 @@ func (m *Module) RequirePermission(name string, roles ...string) func(http.Handl
 //	})
 func RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
 	return mustDefault("RequirePermission").RequirePermission(name, roles...)
+}
+
+// Describe sets the module's human-readable description. Used by the catalog
+// for agent discovery ("find a module that does X"). One to three sentences is
+// typical. Last call wins; typically called once at module init.
+//
+//	ms.Describe("Google OAuth provider: authorize, callback, session issue.")
+func (m *Module) Describe(s string) {
+	m.registry.SetDescription(s)
+}
+
+// DependsOn declares a dependency on another module by ID. The required vs
+// optional distinction is AUTO-DETECTED from the call site via the Go stack:
+//
+//   - Called from main.main or a package-level init() → REQUIRED (catalog
+//     installs the dependency before this module; install fails without it).
+//   - Called from anywhere else (helper functions, setup routines, handlers)
+//     → OPTIONAL (this module runs standalone; use ms.Resolve[T] to
+//     opportunistically use the dependency at runtime if installed).
+//
+// Caveat: an "extract function" refactor that moves a DependsOn call out of
+// main() into a helper silently changes the dep from required to optional.
+// Keep required deps declared literally in main() (or a package-level init()).
+// Escape hatch: wrap required deps in an init() if they must live outside
+// main, e.g. for a shared registration package.
+//
+//	func main() {
+//	    ms.Init(...)
+//	    ms.DependsOn("oauth-core")       // required — caller is main
+//	    registerVideoIntegration()
+//	    ms.Start()
+//	}
+//
+//	func registerVideoIntegration() {
+//	    ms.DependsOn("video")            // optional — caller is helper
+//	    ms.OnEvent("video.completed", handleVideoCompleted)
+//	}
+func (m *Module) DependsOn(id string) {
+	optional := !callerIsRoot()
+	m.registry.AddDependency(id, optional)
+}
+
+// Describe is the convenience wrapper that dispatches to the default Module.
+// Calling before Init() panics.
+func Describe(s string) { mustDefault("Describe").Describe(s) }
+
+// DependsOn is the convenience wrapper that dispatches to the default Module.
+// Calling before Init() panics. See Module.DependsOn for the auto-detect rule.
+func DependsOn(id string) { mustDefault("DependsOn").DependsOn(id) }
+
+// Resolve looks up a previously-registered client of type T by module ID.
+// Returns the zero value of T and false when no client is registered for id
+// (either because the dependency module isn't installed or no module has
+// exported a T-typed client).
+//
+// Pairs with DependsOn(id) declared optional: check ok before calling into T.
+//
+//	if user, ok := ms.Resolve[userclient.Client]("user"); ok {
+//	    user.UpsertByExternalIdentity(ctx, ext)
+//	} else {
+//	    // fallback: platform identity resolution
+//	}
+//
+// v1 note: cross-module client wiring is not yet designed. This stub always
+// returns (zero, false). Real resolution lands with the catalog's install
+// machinery.
+func Resolve[T any](id string) (T, bool) {
+	var zero T
+	return zero, false
+}
+
+// callerIsRoot inspects the stack and returns true when the user-code caller
+// of DependsOn is main.main or a package-level init function. SDK frames
+// (the DependsOn method itself, the package-level wrapper) are skipped.
+func callerIsRoot() bool {
+	pcs := make([]uintptr, 32)
+	// Skip: runtime.Callers (0), this function (1). Start at the caller of
+	// callerIsRoot, which is DependsOn.
+	n := runtimepkg.Callers(2, pcs)
+	if n == 0 {
+		return false
+	}
+	frames := runtimepkg.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		fn := frame.Function
+		// Skip the DependsOn plumbing frames (both receiver method and
+		// package-level wrapper end with ".DependsOn").
+		if strings.HasSuffix(fn, ".DependsOn") {
+			if !more {
+				return false
+			}
+			continue
+		}
+		return isRootCallerName(fn)
+	}
+}
+
+// isRootCallerName reports whether fn is main.main or any package init().
+// Go compiles init functions as "pkg.init", "pkg.init.0", "pkg.init.1" etc.
+func isRootCallerName(fn string) bool {
+	if fn == "main.main" {
+		return true
+	}
+	idx := strings.LastIndex(fn, ".init")
+	if idx < 0 {
+		return false
+	}
+	rest := fn[idx+len(".init"):]
+	if rest == "" {
+		return true
+	}
+	if !strings.HasPrefix(rest, ".") {
+		return false
+	}
+	for _, c := range rest[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Start auto-detects the runtime mode and starts serving:
