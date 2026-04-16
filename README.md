@@ -289,8 +289,23 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 ```
 app-module-sdk/
-  mirrorstack.go               Config, Module, Init/Start, DB/Tx, scopes, convenience API
-  mirrorstack_test.go          All root tests
+  mirrorstack.go               Facade: type aliases + wrapper functions for core package
+  internal/core/
+    module.go                  *Module type, lifecycle, route registration
+    db.go                      DB/ModuleDB/Tx/ModuleTx implementation
+    describe.go                Describe, dependency declaration + registry
+    mcp.go                     MCPTool, MCPResource implementation
+    cron.go                    Cron job registration + scheduling
+    event.go                   OnEvent, Emits event wiring
+    task.go                    OnTask, RunTask for SQS-backed background tasks
+    resources.go               System routes (manifest, health, lifecycle)
+    [test files]               Unit + integration tests
+  internal/
+    httputil/respond.go        JSON response helper
+    runtime/
+      detect.go                Lambda detection
+      lambda.go                Lambda handler, credential injection
+    [other internal pkgs]      Registry, migration, IDs, task env, etc.
   auth/
     context.go                 WithUserID/WithAppID/WithAppRole, role constants
     middleware.go              PlatformAuth, PublicAuth, InternalAuth
@@ -301,13 +316,7 @@ app-module-sdk/
     pool_cache.go              PoolCache (LRU), AcquireScoped
     scope.go                   applyScope/resetScope (batch SET/RESET)
     tx.go                      Transaction support
-    db_test.go                 Unit tests
-    db_integration_test.go     Integration tests (build tag: integration)
-  internal/
-    httputil/respond.go        JSON response helper
-    runtime/
-      detect.go                Lambda detection
-      lambda.go                Lambda handler, credential injection
+    [test files]               Unit + integration tests
   system/
     health.go                  Health endpoint
   cache/
@@ -317,8 +326,11 @@ app-module-sdk/
     credential.go              STS credential, context helpers
     storage.go                 Client with PresignPut/Get, URL (CDN)
     multipart.go               Multipart upload for large files
-  meter/                       Custom usage metrics (planned)
-  mcp/                         MCP tool/resource registration (planned)
+  meter/
+    meter.go                   Custom usage metrics recording
+  mcp/                         (unused — MCP impl is in internal/core/mcp.go)
+  roles/
+    roles.go                   Role types for permission declarations
 ```
 
 ## Module structure
