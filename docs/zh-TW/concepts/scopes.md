@@ -2,17 +2,17 @@
 
 > Language: [English](../../concepts/scopes.md) · **繁體中文**
 
-每個 HTTP route 都屬於三個 **scope** 的其中之一。Scope 決定 SDK 要套哪個 auth middleware,還有哪些 client 可以 call 得到這個 route。
+每個 HTTP route 屬於三個 **scope** 的其中之一。Scope 決定 SDK 套用哪一層 auth middleware,也決定哪些呼叫者可以打到這個 route。
 
-| Scope | 進入點 | Auth | Call 方 |
+| Scope | 註冊函式 | 認證方式 | 呼叫者 |
 |---|---|---|---|
-| **Platform** | `ms.Platform(fn)` | Session + role(`auth.PlatformAuth`) | Dashboard users(host frontend) |
-| **Public** | `ms.Public(fn)` | 無 | 匿名(webhooks、OAuth callbacks、public APIs) |
-| **Internal** | `ms.Internal(fn)` | HMAC(`auth.InternalAuth`) | Platform 自己(lifecycle、events、crons) |
+| **Platform** | `ms.Platform(fn)` | Session + role(`auth.PlatformAuth`) | 已登入的 dashboard 使用者(host frontend) |
+| **Public** | `ms.Public(fn)` | 無 | 匿名(webhooks、OAuth callbacks、公開 API) |
+| **Internal** | `ms.Internal(fn)` | HMAC(`auth.InternalAuth`) | 平台本身(lifecycle、events、crons) |
 
 ## Platform
 
-有登入的 dashboard 使用者。SDK 會檢查 session token(platform 的 auth flow 會 set)。Route 可以從 context 拿到 `auth.Identity`,裡面有 `AppID`、`UserID`、`AppRole`。
+已登入的 dashboard 使用者。SDK 會檢查 platform auth flow 發出的 session token。Route 可以從 context 取得 `auth.Identity`,內含 `AppID`、`UserID`、`AppRole`。
 
 ```go
 ms.Platform(func(r chi.Router) {
@@ -21,15 +21,15 @@ ms.Platform(func(r chi.Router) {
 })
 ```
 
-要做 role-based gating 就加 `ms.RequirePermission(name, roles...)`。它會同時裝 Chi middleware 跟把 permission declare 到 manifest,platform 的 install 畫面才能顯示出來。
+需要以角色控管存取時,加上 `ms.RequirePermission(name, roles...)`。這個函式會同時掛上 Chi middleware,並把 permission 註冊到 manifest 裡,platform 的安裝畫面才看得到。
 
 ## Public
 
-匿名 — 沒有 auth。用在:
+匿名 — 沒有認證。用在:
 
-- OAuth callback routes(`/oauth/google/callback`)
-- 第三方 webhooks(`/webhooks/stripe`)
-- 誰都可以打的 public API
+- OAuth callback route(`/oauth/google/callback`)
+- 第三方 webhook(`/webhooks/stripe`)
+- 任何人都能打的公開 API
 
 ```go
 ms.Public(func(r chi.Router) {
@@ -37,26 +37,26 @@ ms.Public(func(r chi.Router) {
 })
 ```
 
-SDK 在這邊不做任何 auth,但是對於 payload 裡 claim 身份的內容(signed webhook、OAuth state nonce 這些),你要自己負責 verify。
+SDK 在這層不做任何認證,但如果 payload 裡宣稱了身分(signed webhook、OAuth state nonce 等),你必須自己驗證。
 
 ## Internal
 
-Platform 才能 call。request 要帶 `X-MS-Internal-Secret: <shared secret>`(靠 `MS_INTERNAL_SECRET` env var 設定)。SDK 會把其他的都擋掉,回 401。
+只有平台能打。Request 必須帶 `X-MS-Internal-Secret: <shared secret>`(透過 `MS_INTERNAL_SECRET` 環境變數設定)。SDK 會拒絕其他所有 request,回 401。
 
 用在:
 
 - Lifecycle:install / upgrade / downgrade / uninstall
-- Event delivery:`POST /__mirrorstack/events/<name>`
-- Cron fire:`POST /__mirrorstack/crons/<name>`
-- Task worker dispatch:`POST /__mirrorstack/tasks/<name>`
+- 事件派送:`POST /__mirrorstack/events/<name>`
+- Cron 觸發:`POST /__mirrorstack/crons/<name>`
+- Task worker 分派:`POST /__mirrorstack/tasks/<name>`
 - Manifest:`GET /__mirrorstack/platform/manifest`
 - MCP surface:`GET/POST /__mirrorstack/mcp/*`
 
-Internal route 不管在哪個 mode 都有 1 MB request body cap(`MaxBytesReader`)。
+Internal route 不論 mode 為何,都套用 1 MB 的 request body 上限(`MaxBytesReader`)。
 
 ```go
 ms.Internal(func(r chi.Router) {
-    r.Post("/rebuild-index", rebuildIndex)  // platform 觸發的維護工作
+    r.Post("/rebuild-index", rebuildIndex)  // 平台觸發的維護任務
 })
 ```
 
@@ -65,17 +65,17 @@ ms.Internal(func(r chi.Router) {
 | Request 帶… | Platform | Public | Internal |
 |---|---|---|---|
 | 什麼都沒帶 | 401 | 200 | 401 |
-| 過期/無效的 session | 401 | 200 | 401 |
-| 有效 session,角色錯 | 403 | 200 | 401 |
-| 有效 session,角色對 | 200 | 200 | 401 |
+| 過期或無效的 session | 401 | 200 | 401 |
+| 有效 session,但角色不符 | 403 | 200 | 401 |
+| 有效 session,角色符合 | 200 | 200 | 401 |
 | 只帶 internal secret | 401 | 200 | 200 |
 
-不同 scope 的 route **互不相通** — 一個 scope 的 caller 再怎麼認證都打不到另一個 scope 的 route,是獨立的 auth 領域。
+不同 scope 的 route **互不相通** — 一邊的呼叫者無論怎麼認證,都打不到另一邊的 route,是獨立的認證網域。
 
-## 怎麼選 scope
+## 如何選 scope
 
-- **Dashboard user 觸發的動作** → Platform
-- **Platform 自己驅動的** → Internal
-- **匿名外部 caller 需要打的** → Public
+- **Dashboard 使用者觸發的動作** → Platform
+- **平台自己驅動的** → Internal
+- **匿名外部呼叫者需要打的** → Public
 
-不確定的話,default 給 Internal。以後要 expose 出來很簡單,但已經 leak 出去的就裝不回去了。
+不確定時一律放 Internal。以後要對外公開很簡單,但外洩出去之後要收回來很困難。

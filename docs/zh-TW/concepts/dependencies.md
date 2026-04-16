@@ -2,50 +2,50 @@
 
 > Language: [English](../../concepts/dependencies.md) · **繁體中文**
 
-MirrorStack module 用 **module ID** 來 declare 對其他 module 的 dependency,不是用什麼抽象的 capability name。Platform 的 catalog 拿這些 declaration 來決定 install 順序(required deps),還有讓 module 之間有機會 integrate(optional deps)。
+MirrorStack module 用 **module ID** 宣告對其他 module 的相依關係,而不是抽象的 capability name。平台的 catalog 讀這些宣告來決定安裝順序(required deps),也讓 module 之間能選擇性整合(optional deps)。
 
 ## Required vs optional
 
 | | Required | Optional |
 |---|---|---|
-| **Declare 方式** | 在 root 用 `ms.DependsOn(spec)` | 用 `ms.Needs(spec, handler)` 包住 handler |
-| **Install 行為** | Catalog 會先裝好 dep;dep 不在、或沒有符合 constraint 的 version 就 install 失敗。 | Catalog 不管;你 module 可以 standalone 裝。 |
-| **Uninstall 行為** | 你 module 還裝著的話,dep 不能被 uninstall。 | Dep 隨時可以 uninstall;你 module 照跑。 |
-| **Runtime 保證** | 一定在。 | 要用 `ms.Resolve[T](id)` 先檢查。 |
-| **Manifest shape** | `{"id":"oauth-core","version":"^1.2.0"}` | `{"id":"video","version":"^1","optional":true}` |
+| **宣告方式** | 在 root 用 `ms.DependsOn(spec)` | 用 `ms.Needs(spec, handler)` 包住 handler |
+| **安裝時行為** | Catalog 會先裝這個相依 module;找不到、或沒有版本符合 constraint,就安裝失敗。 | Catalog 不檢查;你的 module 可以單獨安裝。 |
+| **解除安裝行為** | 你的 module 還在的話,相依 module 不能被解除安裝。 | 相依 module 可以隨時解除安裝;你的 module 照常運作。 |
+| **Runtime 保證** | 一定存在。 | 要先用 `ms.Resolve[T](id)` 檢查。 |
+| **Manifest 輸出** | `{"id":"oauth-core","version":"^1.2.0"}` | `{"id":"video","version":"^1","optional":true}` |
 
 ## Version constraints
 
-`DependsOn` 跟 `Needs` 都接受 `"id"`(任何 version)或 `"id@constraint"` 這樣的 spec。Constraint 用 npm 風格的 SemVer 語法,註冊的時候就 validate — constraint 寫錯會立刻 panic。
+`DependsOn` 跟 `Needs` 都接受 `"id"`(任何版本)或 `"id@constraint"` 這種 spec。Constraint 使用 npm 風格的 SemVer 語法,在註冊時就會驗證 — 寫錯會立刻 panic。
 
-| Spec | 接受的 version |
+| Spec | 接受的版本 |
 |---|---|
-| `"oauth-core"` | 任何 version |
-| `"oauth-core@^1.2.0"` | `>=1.2.0, <2.0.0` — major 內相容 |
-| `"oauth-core@~1.2.0"` | `>=1.2.0, <1.3.0` — minor 內相容 |
+| `"oauth-core"` | 任何版本 |
+| `"oauth-core@^1.2.0"` | `>=1.2.0, <2.0.0` — 相容於相同 major |
+| `"oauth-core@~1.2.0"` | `>=1.2.0, <1.3.0` — 相容於相同 minor |
 | `"oauth-core@1.x"` | 任何 `1.x.x` |
-| `"oauth-core@>=1.2.0 <2.0.0"` | Explicit range |
-| `"oauth-core@1.2.3"` | Exact |
+| `"oauth-core@>=1.2.0 <2.0.0"` | 明確範圍 |
+| `"oauth-core@1.2.3"` | 精確版本 |
 
-Catalog 在 install 時 enforce constraint。沒寫 constraint = 作者接受任何 version;有寫 = catalog 把不相容的版本拒掉。
+Catalog 在安裝時會檢查 constraint。沒寫 = 作者接受任何版本;有寫 = catalog 會拒絕不相容的版本。
 
 ## Required:`ms.DependsOn`
 
-在 module init 的時候 declare 一次。沒裝這個 dep,module 起不來。
+在 module init 時宣告一次。沒裝這個相依 module,你的 module 根本起不來。
 
 ```go
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core@^1.2.0")   // required, 任何 1.2.x 到 1.x 都接受
+    ms.DependsOn("oauth-core@^1.2.0")   // required,1.2.0 以後、2.0.0 以前的版本都接受
     ms.Start()
 }
 ```
 
-`ms.DependsOn` 永遠 register 成 required — 沒有什麼位置判斷的魔法。放在 `main()` 或 package-level `init()` 都行,意思完全一樣。
+`ms.DependsOn` 一律註冊為 required — 沒有依位置判斷的魔法。放在 `main()` 或 package-level `init()` 都行,語意一樣。
 
 ## Optional:`ms.Needs` 包住 handler
 
-Optional dep 是在**註冊 handler 的地方**一起 declare — 跟使用它的 code 放在同一行。`ms.Needs(id, handler)` 把 dep register 成 optional 然後把 handler 原樣 return,所以可以搭配任何吃 `http.HandlerFunc` 的 API。
+Optional 相依在**註冊 handler 的同一行**一起宣告 — 跟實際使用它的程式碼放在一起。`ms.Needs(spec, handler)` 會把相依註冊為 optional,並原封不動地回傳 handler,所以可以跟任何吃 `http.HandlerFunc` 的 API 搭配。
 
 ```go
 func main() {
@@ -59,11 +59,11 @@ func main() {
 
 **為什麼這樣設計:**
 
-1. Dep 跟 handler 就在同一行 — 不用多繞一個「這個 setup function 到底是做什麼的」的彎路。
-2. 沒有靠位置判斷的 auto-detect。`ms.DependsOn` 語意明確、只有一種解讀。Extract-function refactor 不會偷偷改掉分類。
-3. 同一個 API 通用在 `OnEvent`、`Cron`、chi route、還有其他任何吃 handler 的地方。
+1. 相依宣告跟 handler 寫在同一行,不用多繞「這個 setup function 是做什麼用的」一圈。
+2. 不靠呼叫位置做自動判斷。`ms.DependsOn` 語意明確,只有一種解讀。Extract-function 重構不會偷偷改變分類。
+3. 同一組 API 在 `OnEvent`、`Cron`、chi route、任何吃 handler 的地方都通用。
 
-### 一個 handler 要多個 optional dep
+### 一個 handler 要多個 optional 相依
 
 把 `Needs` 疊起來:
 
@@ -71,7 +71,7 @@ func main() {
 ms.OnEvent("payment", ms.Needs("billing", ms.Needs("audit-log", onPayment)))
 ```
 
-每一個 `Needs` call 註冊一個 dep;最外層那個 return 最終包好的 handler。
+每一層 `Needs` 註冊一個相依;最外層那次呼叫會回傳包好的 handler。
 
 ### Chi route 範例
 
@@ -84,35 +84,29 @@ ms.Platform(func(r chi.Router) {
 
 ## Dedup 規則
 
-同一個 dependency 在 codebase 裡面 declare 很多次的話,**required 贏**:
+同一個相依在程式碼裡宣告多次的話,**required 勝出**:
 
-| 第一次 declare | 第二次 declare | 存起來的是 |
+| 第一次宣告 | 第二次宣告 | 最後存起來的 |
 |---|---|---|
 | required(`DependsOn`) | required | required |
 | required(`DependsOn`) | optional(`Needs`) | required |
 | optional(`Needs`) | required(`DependsOn`) | required(升級) |
 | optional(`Needs`) | optional(`Needs`) | optional |
 
-第二次 call optional 的話就 no-op;第二次 call required 會把之前的 optional 升級成 required。所以 `Needs` 到處用沒關係 — 如果其他地方已經 required 了,`Needs` 會安靜地退讓。
+第二次宣告成 optional 會被當成 no-op;第二次宣告成 required 會把之前的 optional 升級成 required。所以 `Needs` 可以放心地到處使用 — 如果別的地方已經宣告成 required 了,`Needs` 會安靜地退讓。
 
-## Runtime 用:`ms.Resolve[T]`
+## Runtime 使用:`ms.Resolve[T]`
 
-在 `ms.Needs` 包的 handler 裡面,用之前先檢查 dep 有沒有真的在:
+在 `ms.Needs` 包起來的 handler 裡,使用相依之前先檢查它存不存在:
 
 ```go
 func onVideoCompleted(w http.ResponseWriter, r *http.Request) {
     if video, ok := ms.Resolve[videoclient.Client]("video"); ok {
-        // video module 有裝 — 用它
+        // video module 有裝 — 直接使用
         video.MarkProcessed(r.Context(), videoID)
     }
-    // 沒裝就 skip
+    // 沒裝就略過
 }
 ```
 
-**v1 note**:Cross-module client wiring 還沒做。`Resolve[T]` 現在永遠 return `(zero, false)`。API shape 已經 commit 了,所以今天寫的 code 之後 real resolution 上線時會自動 work。
-
-## Versioning
-
-`DependsOn` 目前沒有 version constraint。Breaking change 的處理方式是 bump module ID(例如 `oauth-core` → `oauth-core-v2`),跟 Go stdlib 的 `database/sql` vs `database/sql/v2` 同一套 pattern。
-
-Semver range 的 support(`>=1.0.0 <2.0.0`)等 catalog 大到需要 constraint solver 再說。
+**v1 說明**:跨 module 的 client wiring 還沒實作,`Resolve[T]` 目前一律回傳 `(zero, false)`。API 形狀已經固定,今天寫的程式碼在真正的 resolution 機制上線後會自動運作,不用改。
