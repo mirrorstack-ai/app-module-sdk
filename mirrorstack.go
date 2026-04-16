@@ -5,7 +5,6 @@ package mirrorstack
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,19 +14,12 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
-
-	"github.com/invopop/jsonschema"
-
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/go-chi/chi/v5"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
@@ -155,251 +147,8 @@ func New(cfg Config) (*Module, error) {
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
 
-// DB returns a scoped database connection.
-//
-// Production: uses per-app credentials injected by the platform via Lambda payload.
-// Dev: uses DATABASE_URL env var with localhost fallback.
-//
-//	conn, release, err := mod.DB(r.Context())
-//	if err != nil { ... }
-//	defer release()
-//	conn.QueryRow(ctx, "SELECT ...").Scan(&v)
-func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
-	pool, releasePool, err := m.resolvePool(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	querier, releaseConn, err := db.AcquireScoped(ctx, pool)
-	if err != nil {
-		releasePool()
-		return nil, nil, err
-	}
-	return querier, func() {
-		releaseConn()
-		releasePool()
-	}, nil
-}
-
-// Tx runs fn inside a transaction with schema isolation. Commits on success,
-// rolls back on error. The app schema is read from the caller's context (set
-// by the platform's Lambda invoke shim via db.WithSchema). Compare with
-// Module.ModuleTx which explicitly overlays the mod_<id> schema.
-//
-//	err := mod.Tx(r.Context(), func(q db.Querier) error {
-//	    queries := generated.New(q)
-//	    item, err := queries.GetItem(ctx, id)
-//	    if err != nil { return err }
-//	    return queries.DeductBalance(ctx, params)
-//	})
-func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
-	pool, releasePool, err := m.resolvePool(ctx)
-	if err != nil {
-		return err
-	}
-	defer releasePool()
-	return db.Tx(ctx, pool, fn)
-}
-
-// resolvePool returns the per-app credential pool (production) or the dev
-// pool (dev mode). See resolvePoolFor for the shared logic.
-func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
-	return m.resolvePoolFor(ctx, db.CredentialFrom)
-}
-
-// resolvePoolFor is the shared implementation behind resolvePool and
-// resolveModulePool. Production reads a credential from the context via
-// getCred (different context key per scope) and pulls a refcount-pinned
-// pool from the cache. Dev mode falls through to the single dev pool, which
-// is shared across all scopes — schema isolation in dev happens at the
-// AcquireScoped layer via WithSchema, not at the pool level.
-func (m *Module) resolvePoolFor(ctx context.Context, getCred func(context.Context) *db.Credential) (*pgxpool.Pool, func(), error) {
-	if cred := getCred(ctx); cred != nil {
-		return m.poolCache.Get(ctx, *cred)
-	}
-	m.devDBOnce.Do(func() {
-		m.devDB, m.devDBErr = db.Open(context.Background())
-	})
-	if m.devDBErr != nil {
-		return nil, nil, m.devDBErr
-	}
-	return m.devDB.Pool(), func() {}, nil
-}
-
-// ModuleDB returns a connection scoped to this module's shared schema
-// (mod_<id>). Use it for cross-app state — outbox tables, dedup ledgers,
-// cross-app audit logs, rate limiters, module-wide config — anything a
-// module needs that is owned by the module rather than by a single app.
-//
-// Production: uses the per-module credential injected by the platform via
-// db.WithModuleCredential. Independent of the per-app credential read by
-// Module.DB — a handler that needs both gets both, in the same context.
-//
-// Dev: shares the dev pool from DATABASE_URL with Module.DB; the schema is
-// the only difference. The dev Postgres must have a mod_<id> schema for
-// the queries to succeed.
-//
-// The module schema overlays any app schema set on the caller's context for
-// this single call only — the caller's ctx is not mutated, so a subsequent
-// Module.DB call sees the original app schema unchanged.
-//
-//	conn, release, err := mod.ModuleDB(r.Context())
-//	if err != nil { ... }
-//	defer release()
-//	conn.Exec(ctx, "INSERT INTO outbox(...) VALUES(...)")
-func (m *Module) ModuleDB(ctx context.Context) (db.Querier, func(), error) {
-	pool, releasePool, err := m.resolveModulePool(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
-	querier, releaseConn, err := db.AcquireScoped(moduleCtx, pool)
-	if err != nil {
-		releasePool()
-		return nil, nil, err
-	}
-	return querier, func() {
-		releaseConn()
-		releasePool()
-	}, nil
-}
-
-// ModuleTx runs fn inside a transaction scoped to the module's shared schema
-// (mod_<id>). Commits on success, rolls back on error or panic. Use this for
-// the outbox-pattern: insert the work record AND the dedup row in the same
-// transaction so the worker only ever sees consistent state.
-//
-//	err := mod.ModuleTx(r.Context(), func(q db.Querier) error {
-//	    queries := generated.New(q)
-//	    if err := queries.InsertOutbox(ctx, ...); err != nil { return err }
-//	    return queries.MarkProcessed(ctx, ...)
-//	})
-func (m *Module) ModuleTx(ctx context.Context, fn func(q db.Querier) error) error {
-	pool, releasePool, err := m.resolveModulePool(ctx)
-	if err != nil {
-		return err
-	}
-	defer releasePool()
-	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
-	return db.Tx(moduleCtx, pool, fn)
-}
-
-// resolveModulePool reads the per-module credential instead of the per-app
-// one. See resolvePoolFor for the shared logic.
-func (m *Module) resolveModulePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
-	return m.resolvePoolFor(ctx, db.ModuleCredentialFrom)
-}
-
-// moduleSchema returns the Postgres schema name for this module's shared
-// state. Convention: "mod_" + the developer's Config.ID. The platform must
-// pre-create this schema and grant the per-module DB role USAGE on it
-// before any module handler runs.
-func (m *Module) moduleSchema() string {
-	return "mod_" + m.config.ID
-}
-
-// lifecycleTxRunner returns the TxRunner that should drive migrations for
-// the given scope. Each scope runs against a different schema and uses a
-// different DB credential, so the two scopes require different runners:
-//
-//   - ScopeApp → Module.Tx (reads db.CredentialFrom, per-app role, app_<id>
-//     schema from ctx).
-//   - ScopeModule → Module.ModuleTx (reads db.ModuleCredentialFrom, per-module
-//     role, mod_<id> schema overlayed inside the transaction).
-//
-// Mixing these up is silently wrong: module migrations driven by the app
-// credential would fail at Postgres because the per-(module, app) role lacks
-// USAGE on mod_<id>, but that is infrastructure defense-in-depth — the SDK
-// must pick the correct runner itself.
-func (m *Module) lifecycleTxRunner(scope migration.Scope) migration.TxRunner {
-	switch scope {
-	case migration.ScopeModule:
-		return m.ModuleTx
-	case migration.ScopeApp:
-		return m.Tx
-	default:
-		panic("mirrorstack: lifecycleTxRunner: unhandled scope " + string(scope))
-	}
-}
-
-// Cache returns a scoped cache client. Keys are auto-prefixed with {appID}:{moduleID}:.
-//
-//	c, release, err := mod.Cache(r.Context())
-//	if err != nil { ... }
-//	defer release()
-//	c.Set(ctx, "views:123", "42", 5*time.Minute)
-//	val, err := c.Get(ctx, "views:123")
-func (m *Module) Cache(ctx context.Context) (cache.Cacher, func(), error) {
-	client, releaseClient, err := m.resolveCache(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	// Always apply prefix — never return unprefixed base client
-	appID := ""
-	if a := auth.Get(ctx); a != nil {
-		appID = a.AppID
-	}
-	return client.ForApp(appID, m.config.ID), releaseClient, nil
-}
-
-// resolveCache returns the underlying cache client and a release closure.
-// Production uses ClientCache (refcount-pinned). Dev uses a single shared
-// client (no-op release).
-func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error) {
-	if cred := cache.CredentialFrom(ctx); cred != nil {
-		return m.cacheCache.Get(ctx, *cred)
-	}
-	m.devCacheOnce.Do(func() {
-		m.devCache, m.devCacheErr = cache.Open(context.Background())
-	})
-	if m.devCacheErr != nil {
-		return nil, nil, m.devCacheErr
-	}
-	return m.devCache, func() {}, nil
-}
-
-// Storage returns a scoped storage client. Keys are auto-prefixed with the app/module path.
-//
-//	s, err := mod.Storage(r.Context())
-//	if err != nil { ... }
-//	url, err := s.PresignPut(ctx, "photo.jpg", 15*time.Minute)
-//	cdnURL, err := s.URL("photo.jpg")
-//
-// Prefix and CDN base come from the per-invocation STS credential in production,
-// or env vars in dev mode. resolveStorage handles both paths — NewFromCredential
-// already sets the prefix from cred.Prefix, so no separate ForApp scoping is needed.
-func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
-	return m.resolveStorage(ctx)
-}
-
-// Meter returns a scoped meter for recording usage events (billing metrics).
-// Unlike DB/Cache/Storage, Meter returns the interface directly — there is
-// no release closure (nothing to release) and no construction error
-// (init errors happen eagerly in New()).
-//
-// In production (MS_METER_LAMBDA_ARN set), Record dispatches to the platform
-// meter Lambda via async invoke (~5-15ms per call). In dev mode, Record
-// logs to stderr.
-//
-//	if err := ms.Meter(r.Context()).Record("transcode.minutes", 12); err != nil {
-//	    log.Printf("meter: %v", err) // don't fail the handler
-//	}
-func (m *Module) Meter(ctx context.Context) meter.Meter {
-	return m.meterClient.Scope(ctx, m.config.ID)
-}
-
-func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
-	// Production: STS credentials from Lambda payload.
-	// No caching — S3 client creation is cheap (no I/O), and STS tokens rotate
-	// frequently. Caching by AccessKeyID risks using stale credentials.
-	if cred := storage.CredentialFrom(ctx); cred != nil {
-		return storage.NewFromCredential(*cred)
-	}
-	// Dev: env vars
-	m.devStorageOnce.Do(func() {
-		m.devStorage, m.devStorageErr = storage.Open(context.Background())
-	})
-	return m.devStorage, m.devStorageErr
-}
+// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/Needs,
+// MCPTool/MCPResource: see db.go, resources.go, describe.go, and mcp.go.
 
 // Platform registers routes with platform auth scope.
 // Default: admin only. Use Module.RequirePermission for member/viewer access.
@@ -419,6 +168,12 @@ func (m *Module) Public(fn func(r chi.Router)) {
 func (m *Module) Internal(fn func(r chi.Router)) {
 	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
 }
+
+// internalRouteBodyCap is the default body size limit for Internal-scope
+// routes (events, crons, tasks, and developer-registered internal handlers).
+// Defense-in-depth — Lambda's API Gateway has a 6 MB cap, but dev mode is
+// unbounded without this.
+const internalRouteBodyCap = 1 << 20 // 1 MB
 
 // scopedRoutes records every route fn registers under the given scope, then
 // re-attaches them to the main router with the scope's auth middleware.
@@ -441,12 +196,6 @@ func (m *Module) Internal(fn func(r chi.Router)) {
 // route tree, which indicates a misconfigured module that should not start.
 // Panic instead of silently leaving the registry and router in inconsistent
 // states (some routes recorded but not re-registered, or vice versa).
-// internalRouteBodyCap is the default body size limit for Internal-scope
-// routes (events, crons, tasks, and developer-registered internal handlers).
-// Defense-in-depth — Lambda's API Gateway has a 6 MB cap, but dev mode is
-// unbounded without this.
-const internalRouteBodyCap = 1 << 20 // 1 MB
-
 func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
 	sub := chi.NewRouter()
 	if scope == registry.ScopeInternal {
@@ -496,208 +245,6 @@ func (m *Module) RequirePermission(name string, allowed ...roles.Role) func(http
 //	})
 func RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
 	return mustDefault("RequirePermission").RequirePermission(name, allowed...)
-}
-
-// Describe sets the module's human-readable description. Used by the catalog
-// for agent discovery ("find a module that does X"). One to three sentences is
-// typical. Last call wins; typically called once at module init.
-//
-//	ms.Describe("Google OAuth provider: authorize, callback, session issue.")
-func (m *Module) Describe(s string) {
-	m.registry.SetDescription(s)
-}
-
-// DependsOn declares a REQUIRED dependency on another module. The catalog
-// installs the dependency before this module; install fails if the dependency
-// is unavailable or no published version matches the constraint.
-//
-// Spec syntax: "id" (any version) or "id@constraint" where constraint is a
-// SemVer range in npm-style syntax:
-//
-//	ms.DependsOn("oauth-core")           // any version
-//	ms.DependsOn("oauth-core@^1.2.0")    // >=1.2.0, <2.0.0
-//	ms.DependsOn("oauth-core@~1.2.0")    // >=1.2.0, <1.3.0
-//	ms.DependsOn("oauth-core@>=1.2 <2")  // explicit range
-//	ms.DependsOn("oauth-core@1.2.3")     // exact
-//
-// Panics at call time on an invalid constraint — it's a programmer error,
-// not runtime input.
-//
-// For OPTIONAL deps (the module works standalone but integrates with the
-// dependency when present), use ms.Needs at the handler registration site.
-func (m *Module) DependsOn(spec string) {
-	id, constraint := parseDepSpec(spec)
-	m.registry.AddDependency(registry.Dependency{ID: id, Version: constraint, Optional: false})
-}
-
-// Needs declares an OPTIONAL dependency on another module and returns the
-// handler unchanged. Designed to wrap handlers passed to ms.OnEvent, ms.Cron,
-// chi routes — anywhere a handler is registered where the work may use the
-// dependency.
-//
-// Spec syntax mirrors DependsOn: "id" or "id@constraint".
-//
-//	ms.OnEvent("video.completed", ms.Needs("video@^1", onVideoCompleted))
-//	ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))
-//
-// Nest Needs calls to declare multiple optional deps for one handler:
-//
-//	ms.OnEvent("payment",
-//	    ms.Needs("billing@^1", ms.Needs("audit-log", onPayment)))
-//
-// Dedup: if the same ID has also been declared required via ms.DependsOn
-// elsewhere, required wins — an additional Needs is a no-op.
-func (m *Module) Needs(spec string, h http.HandlerFunc) http.HandlerFunc {
-	id, constraint := parseDepSpec(spec)
-	m.registry.AddDependency(registry.Dependency{ID: id, Version: constraint, Optional: true})
-	return h
-}
-
-// parseDepSpec splits "id@constraint" into its two parts. The id is required;
-// the constraint is optional. Panics on an invalid SemVer constraint.
-func parseDepSpec(spec string) (id, constraint string) {
-	at := strings.Index(spec, "@")
-	if at < 0 {
-		return spec, ""
-	}
-	id = spec[:at]
-	constraint = spec[at+1:]
-	if constraint == "" {
-		return id, ""
-	}
-	if _, err := semver.NewConstraint(constraint); err != nil {
-		panic(fmt.Sprintf("mirrorstack: invalid SemVer constraint in dependency spec %q: %v", spec, err))
-	}
-	return id, constraint
-}
-
-// Describe is the convenience wrapper that dispatches to the default Module.
-// Calling before Init() panics.
-func Describe(s string) { mustDefault("Describe").Describe(s) }
-
-// DependsOn is the convenience wrapper that dispatches to the default Module.
-// Calling before Init() panics. Always registers id as required.
-func DependsOn(id string) { mustDefault("DependsOn").DependsOn(id) }
-
-// Needs is the convenience wrapper that dispatches to the default Module.
-// Calling before Init() panics. See Module.Needs for the full contract.
-func Needs(id string, h http.HandlerFunc) http.HandlerFunc {
-	return mustDefault("Needs").Needs(id, h)
-}
-
-// Resolve looks up a previously-registered client of type T by module ID.
-// Returns the zero value of T and false when no client is registered for id
-// (either because the dependency module isn't installed or no module has
-// exported a T-typed client).
-//
-// Pairs with optional deps declared via ms.Needs: check ok before calling
-// into T.
-//
-//	if user, ok := ms.Resolve[userclient.Client]("user"); ok {
-//	    user.UpsertByExternalIdentity(ctx, ext)
-//	} else {
-//	    // fallback: platform identity resolution
-//	}
-//
-// v1 note: cross-module client wiring is not yet designed. This stub always
-// returns (zero, false). Real resolution lands with the catalog's install
-// machinery.
-func Resolve[T any](id string) (T, bool) {
-	var zero T
-	return zero, false
-}
-
-// MCPTool registers an agent-callable tool on the default module. Input and
-// output JSON Schemas are derived from the In and Out type parameters via
-// reflection; struct fields use their `json:"..."` tags. The handler receives
-// parsed typed args and returns a typed result.
-//
-// Name must satisfy registry.ValidateName (no path separators, whitespace, or
-// null bytes). First-wins: a duplicate registration is a no-op.
-//
-// The tool is served at POST /__mirrorstack/mcp/tools/call under Internal
-// scope. The platform aggregates tools from all installed modules into a
-// single agent-facing MCP server.
-//
-//	type GreetArgs struct{ Name string `json:"name"` }
-//	type GreetResult struct{ Message string `json:"message"` }
-//	ms.MCPTool("greet", "Say hi to someone",
-//	    func(ctx context.Context, a GreetArgs) (GreetResult, error) {
-//	        return GreetResult{Message: "hi " + a.Name}, nil
-//	    })
-//
-// Panics before Init or on schema derivation failure.
-func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error)) {
-	m := mustDefault("MCPTool")
-	inputSchema, err := deriveSchema[In]()
-	if err != nil {
-		panic("mirrorstack: MCPTool(" + name + ") input schema derivation failed: " + err.Error())
-	}
-	outputSchema, err := deriveSchema[Out]()
-	if err != nil {
-		panic("mirrorstack: MCPTool(" + name + ") output schema derivation failed: " + err.Error())
-	}
-	m.registry.AddMCPTool(registry.MCPToolDecl{
-		Name:         name,
-		Description:  description,
-		InputSchema:  inputSchema,
-		OutputSchema: outputSchema,
-		Handler:      wrapMCPToolHandler(handler),
-	})
-}
-
-// MCPResource registers an agent-readable resource on the default module. The
-// handler returns current content on demand. Output schema is derived from Out.
-// Panics before Init or on schema derivation failure.
-func MCPResource[Out any](name, description string, handler func(ctx context.Context) (Out, error)) {
-	m := mustDefault("MCPResource")
-	schema, err := deriveSchema[Out]()
-	if err != nil {
-		panic("mirrorstack: MCPResource(" + name + ") schema derivation failed: " + err.Error())
-	}
-	m.registry.AddMCPResource(registry.MCPResourceDecl{
-		Name:        name,
-		Description: description,
-		Schema:      schema,
-		Handler:     wrapMCPResourceHandler(handler),
-	})
-}
-
-// deriveSchema returns a JSON Schema for T via reflection over struct tags.
-func deriveSchema[T any]() (json.RawMessage, error) {
-	var zero T
-	schema := jsonschema.Reflect(zero)
-	return json.Marshal(schema)
-}
-
-// wrapMCPToolHandler adapts a typed handler into the type-erased registry form.
-// Args unmarshal failures become ErrInvalidArgs (400); handler errors pass
-// through (default to 500 unless the handler returned ErrInvalidArgs itself).
-func wrapMCPToolHandler[In, Out any](handler func(context.Context, In) (Out, error)) registry.MCPToolHandler {
-	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-		var in In
-		if len(args) > 0 && string(args) != "null" {
-			if err := json.Unmarshal(args, &in); err != nil {
-				return nil, fmt.Errorf("%w: %s", system.ErrInvalidArgs, err.Error())
-			}
-		}
-		out, err := handler(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(out)
-	}
-}
-
-// wrapMCPResourceHandler adapts a typed resource handler into the registry form.
-func wrapMCPResourceHandler[Out any](handler func(context.Context) (Out, error)) registry.MCPResourceHandler {
-	return func(ctx context.Context) (json.RawMessage, error) {
-		out, err := handler(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(out)
-	}
 }
 
 // Start auto-detects the runtime mode and starts serving:
@@ -924,44 +471,6 @@ func Init(cfg Config) error {
 // Start starts the default module.
 func Start() error {
 	return mustDefault("Start").Start()
-}
-
-// DB returns a scoped database connection on the default module.
-func DB(ctx context.Context) (db.Querier, func(), error) {
-	return mustDefault("DB").DB(ctx)
-}
-
-// Tx runs fn inside a transaction on the default module.
-func Tx(ctx context.Context, fn func(q db.Querier) error) error {
-	return mustDefault("Tx").Tx(ctx, fn)
-}
-
-// ModuleDB returns a connection scoped to the module's shared schema on the
-// default module.
-func ModuleDB(ctx context.Context) (db.Querier, func(), error) {
-	return mustDefault("ModuleDB").ModuleDB(ctx)
-}
-
-// ModuleTx runs fn inside a transaction scoped to the module's shared schema
-// on the default module.
-func ModuleTx(ctx context.Context, fn func(q db.Querier) error) error {
-	return mustDefault("ModuleTx").ModuleTx(ctx, fn)
-}
-
-// Cache returns a scoped cache client on the default module.
-func Cache(ctx context.Context) (cache.Cacher, func(), error) {
-	return mustDefault("Cache").Cache(ctx)
-}
-
-// Storage returns a scoped storage client on the default module.
-func Storage(ctx context.Context) (storage.Storer, error) {
-	return mustDefault("Storage").Storage(ctx)
-}
-
-// Meter returns a scoped meter for recording usage events on the default module.
-// Panics before Init.
-func Meter(ctx context.Context) meter.Meter {
-	return mustDefault("Meter").Meter(ctx)
 }
 
 // Platform registers platform-scoped routes on the default module.
