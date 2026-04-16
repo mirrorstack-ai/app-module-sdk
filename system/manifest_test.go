@@ -224,3 +224,76 @@ func TestManifest_Permissions(t *testing.T) {
 		}
 	}
 }
+
+func TestManifest_DescriptionPopulated(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	reg.SetDescription("A demo module")
+
+	got := decodeManifest(t, ManifestHandler("demo", "Demo", "box", nil, nil, reg))
+	if got.Description != "A demo module" {
+		t.Errorf("description = %q, want %q", got.Description, "A demo module")
+	}
+}
+
+func TestManifest_DescriptionOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("demo", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+
+	if strings.Contains(rec.Body.String(), `"description"`) {
+		t.Errorf("expected \"description\" key to be omitted when empty, got: %s", rec.Body.String())
+	}
+}
+
+func TestManifest_DependenciesPopulated(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	reg.AddDependency("oauth-core", false)
+	reg.AddDependency("video", true)
+
+	got := decodeManifest(t, ManifestHandler("demo", "Demo", "box", nil, nil, reg))
+	if len(got.Dependencies) != 2 {
+		t.Fatalf("len(dependencies) = %d, want 2", len(got.Dependencies))
+	}
+	if got.Dependencies[0].ID != "oauth-core" || got.Dependencies[0].Optional {
+		t.Errorf("dependencies[0] = %+v, want {oauth-core, false}", got.Dependencies[0])
+	}
+	if got.Dependencies[1].ID != "video" || !got.Dependencies[1].Optional {
+		t.Errorf("dependencies[1] = %+v, want {video, true}", got.Dependencies[1])
+	}
+}
+
+func TestManifest_EmptyDependenciesIsArrayNotNull(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("demo", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"dependencies":[]`) {
+		t.Errorf("empty dependencies should serialize as [], got: %s", body)
+	}
+}
+
+func TestManifest_OptionalOmittedInJSONWhenFalse(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	reg.AddDependency("oauth-core", false)
+
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("demo", "Demo", "box", nil, nil, reg).ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	// Required dep should not carry "optional":false in wire shape.
+	if strings.Contains(body, `"optional":false`) {
+		t.Errorf("required dep should omit \"optional\":false, got: %s", body)
+	}
+}

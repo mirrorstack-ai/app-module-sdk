@@ -665,6 +665,8 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Meter":             func() { _ = Meter(context.Background()).Record("m", 1) },
 		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
+		"Describe":          func() { Describe("a module") },
+		"DependsOn":         func() { DependsOn("other") },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -701,5 +703,94 @@ func TestModule_ModuleSchema(t *testing.T) {
 				t.Errorf("moduleSchema() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// ---- Describe / DependsOn / Resolve ----
+
+func TestIsRootCallerName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		fn   string
+		want bool
+	}{
+		{"main.main", true},
+		{"main.init", true},
+		{"main.init.0", true},
+		{"main.init.12", true},
+		{"example.com/pkg.init", true},
+		{"example.com/pkg.init.5", true},
+		{"main.helperFunction", false},
+		{"pkg.SomeFunc", false},
+		{"pkg.initSomething", false}, // not an init — just starts with "init"
+		{"pkg.init.notNumber", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isRootCallerName(tc.fn); got != tc.want {
+			t.Errorf("isRootCallerName(%q) = %v, want %v", tc.fn, got, tc.want)
+		}
+	}
+}
+
+func TestDescribe_PopulatesRegistry(t *testing.T) {
+	t.Parallel()
+
+	m, _ := New(Config{ID: "demo"})
+	m.Describe("A demo module")
+	if got := m.registry.Description(); got != "A demo module" {
+		t.Errorf("Description = %q, want %q", got, "A demo module")
+	}
+}
+
+func TestDependsOn_FromHelperIsOptional(t *testing.T) {
+	t.Parallel()
+
+	m, _ := New(Config{ID: "demo"})
+	m.DependsOn("other") // called from test function — NOT main.main or init
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(Dependencies) = %d, want 1", len(deps))
+	}
+	if deps[0].ID != "other" || !deps[0].Optional {
+		t.Errorf("Dependencies[0] = %+v, want {ID:other, Optional:true}", deps[0])
+	}
+}
+
+func TestDependsOn_CallerDetectionSkipsSDKFrames(t *testing.T) {
+	t.Parallel()
+
+	// Verify both code paths (direct receiver + convenience wrapper) resolve
+	// the caller to the test function, not an SDK frame.
+	resetDefault(t)
+	if err := Init(Config{ID: "demo"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	Describe("desc")
+	DependsOn("dep-via-wrapper")
+	defaultModule.DependsOn("dep-via-method")
+
+	deps := defaultModule.registry.Dependencies()
+	if len(deps) != 2 {
+		t.Fatalf("len(Dependencies) = %d, want 2", len(deps))
+	}
+	for _, d := range deps {
+		if !d.Optional {
+			t.Errorf("dep %q: Optional = false, want true (test caller is not root)", d.ID)
+		}
+	}
+}
+
+func TestResolve_UnregisteredReturnsZeroAndFalse(t *testing.T) {
+	t.Parallel()
+
+	type fakeClient struct{ X int }
+	got, ok := Resolve[fakeClient]("not-registered")
+	if ok {
+		t.Error("Resolve for unregistered id returned ok=true, want false")
+	}
+	if got.X != 0 {
+		t.Errorf("Resolve returned non-zero value %+v, want zero", got)
 	}
 }

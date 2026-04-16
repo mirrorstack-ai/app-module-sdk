@@ -421,3 +421,147 @@ func TestAddPermission_PanicsOnInvalidName(t *testing.T) {
 		})
 	}
 }
+
+// ---- Description ----
+
+func TestDescription_SetAndGet(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	if got := r.Description(); got != "" {
+		t.Errorf("empty Registry Description = %q, want empty", got)
+	}
+	r.SetDescription("A demo module")
+	if got := r.Description(); got != "A demo module" {
+		t.Errorf("Description = %q, want %q", got, "A demo module")
+	}
+}
+
+func TestDescription_LastWins(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.SetDescription("first")
+	r.SetDescription("second")
+	if got := r.Description(); got != "second" {
+		t.Errorf("Description = %q, want %q (last-wins)", got, "second")
+	}
+}
+
+// ---- Dependencies ----
+
+func TestDependencies_AddRequired(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	if added := r.AddDependency("oauth-core", false); !added {
+		t.Error("AddDependency(new, required) = false, want true")
+	}
+	got := r.Dependencies()
+	if len(got) != 1 || got[0].ID != "oauth-core" || got[0].Optional {
+		t.Errorf("Dependencies = %+v, want [{ID:oauth-core, Optional:false}]", got)
+	}
+}
+
+func TestDependencies_AddOptional(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddDependency("video", true)
+	got := r.Dependencies()
+	if len(got) != 1 || got[0].ID != "video" || !got[0].Optional {
+		t.Errorf("Dependencies = %+v, want [{ID:video, Optional:true}]", got)
+	}
+}
+
+func TestDependencies_RequiredUpgradesOptional(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddDependency("oauth-core", true) // optional first
+	if upgraded := r.AddDependency("oauth-core", false); !upgraded {
+		t.Error("AddDependency(optional→required) = false, want true (upgrade)")
+	}
+	got := r.Dependencies()
+	if len(got) != 1 || got[0].Optional {
+		t.Errorf("after required override: Dependencies = %+v, want Optional=false", got)
+	}
+}
+
+func TestDependencies_OptionalDoesNotDowngradeRequired(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddDependency("oauth-core", false) // required first
+	if added := r.AddDependency("oauth-core", true); added {
+		t.Error("AddDependency(required→optional) = true, want false (no-op)")
+	}
+	got := r.Dependencies()
+	if len(got) != 1 || got[0].Optional {
+		t.Errorf("after optional override of required: Dependencies = %+v, want Optional=false", got)
+	}
+}
+
+func TestDependencies_DuplicateRequiredIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddDependency("a", false)
+	if added := r.AddDependency("a", false); added {
+		t.Error("AddDependency(same required twice) = true, want false (no-op)")
+	}
+	if got := r.Dependencies(); len(got) != 1 {
+		t.Errorf("len(Dependencies) = %d after duplicate, want 1", len(got))
+	}
+}
+
+func TestDependencies_EmptyReturnsNonNil(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	got := r.Dependencies()
+	if got == nil {
+		t.Error("Dependencies() on empty Registry returned nil, want []Dependency{}")
+	}
+	if len(got) != 0 {
+		t.Errorf("len(Dependencies()) = %d, want 0", len(got))
+	}
+}
+
+func TestDependencies_PreservesRegistrationOrder(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.AddDependency("third", false)
+	r.AddDependency("first", false)
+	r.AddDependency("second", true)
+	got := r.Dependencies()
+	if len(got) != 3 || got[0].ID != "third" || got[1].ID != "first" || got[2].ID != "second" {
+		t.Errorf("Dependencies = %+v, want registration order third, first, second", got)
+	}
+}
+
+func TestDependencies_ValidateNameRejectsBad(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"dot-segment", "../oauth-core"},
+		{"slash", "foo/bar"},
+		{"null-byte", "foo\x00bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New()
+			defer func() {
+				if rec := recover(); rec == nil {
+					t.Errorf("expected panic for AddDependency(%q)", tc.bad)
+				}
+			}()
+			r.AddDependency(tc.bad, false)
+		})
+	}
+}
