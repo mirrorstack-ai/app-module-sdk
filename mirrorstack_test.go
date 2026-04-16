@@ -14,6 +14,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	p "github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
@@ -242,7 +243,7 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
 	})
@@ -258,7 +259,7 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.delete", "admin")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.delete", p.Admin())).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("deleted"))
 		})
 	})
@@ -279,11 +280,11 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 	m2, _ := New(Config{ID: "video", Name: "Video"})
 
 	m1.Platform(func(r chi.Router) {
-		r.With(m1.RequirePermission("media.upload", "admin", "member")).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
-		r.With(m1.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.upload", p.Admin(), p.Custom("member"))).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
 	})
 	m2.Platform(func(r chi.Router) {
-		r.With(m2.RequirePermission("video.transcode", "admin")).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m2.RequirePermission("video.transcode", p.Admin())).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
 	})
 
 	rec := doRequestWithSecret(t, m1.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
@@ -656,7 +657,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Platform":          func() { Platform(func(r chi.Router) {}) },
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
-		"RequirePermission": func() { RequirePermission("media.view", "admin") },
+		"RequirePermission": func() { RequirePermission("media.view", p.Admin()) },
 		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
 		"Emits":             func() { Emits("created") },
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },

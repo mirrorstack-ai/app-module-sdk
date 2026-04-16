@@ -8,6 +8,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **Typed role values** for `ms.RequirePermission` via a new `roles` package — `roles.Admin()`, `roles.Viewer()`, `roles.Custom(key)`. Prevents typos, enables IDE autocomplete, and reserves space for future i18n metadata.
 - **Agent orchestration primitives** ([#82], [#84])
   - `ms.Describe(s)` — human-readable module description consumed by the catalog for agent discovery.
   - `ms.DependsOn(id)` — declare a dependency by module ID. Required vs optional is auto-detected from the call site: `main.main` or `pkg.init[.N]` → required; anywhere else → optional.
@@ -20,6 +21,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - `MCP.Tools`, `MCP.Resources` ([#84])
 
 ### Changed
+- **BREAKING**: `ms.RequirePermission(name, roles ...string)` → `ms.RequirePermission(name, roles ...roles.Role)`. Migration: replace `"admin"` with `p.Admin()`, `"viewer"` with `p.Viewer()`, any other string with `p.Custom("...")`. Manifest wire shape is unchanged (role keys still serialize as strings).
 - `ManifestPayload` wire shape is additive (new fields are `omitempty` or emit empty arrays rather than null).
 
 ### Documentation

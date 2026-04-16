@@ -241,7 +241,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 - [x] `ms.Init()` / `ms.New()` — module registration
 - [x] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
 - [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes with middleware
-- [x] `ms.RequirePermission()` — per-route permission with auto-registration for manifest
+- [x] `ms.RequirePermission()` — per-route permission with auto-registration for manifest (typed roles: `roles.Admin()`, `roles.Viewer()`, `roles.Custom("...")`)
 
 ### Database
 
@@ -256,7 +256,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 - [x] `ms.Storage(ctx)` — S3 presigned URLs + CDN (R2 cache) + multipart upload
 - [x] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
-- [ ] `ms.Meter(ctx)` — custom usage metrics for billing
+- [x] `ms.Meter(ctx)` — custom usage metrics for billing
 
 ### Events & scheduling
 
@@ -268,17 +268,20 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 - [x] `health` — health check
 - [x] `platform/manifest` — module identity + capabilities
-- [ ] `platform/meter` — custom business metrics
+- [x] `mcp/tools/{list,call}` and `mcp/resources/{list,read}` — agent tool and resource surface
 - [x] `platform/lifecycle/app/install` and `platform/lifecycle/module/install` — fresh install (per-app schema or per-module shared schema)
 - [x] `platform/lifecycle/app/upgrade` and `platform/lifecycle/module/upgrade` — upgrade between versions
 - [x] `platform/lifecycle/app/downgrade` and `platform/lifecycle/module/downgrade` — rollback between versions
 - [x] `platform/lifecycle/app/uninstall` and `platform/lifecycle/module/uninstall` — soft-delete removal
 
-### MCP integration
+### Agent orchestration
 
-- [ ] `ms.MCPTool()` — register MCP tools for AI agents
-- [ ] `ms.MCPResource()` — register MCP resources
-- [ ] `/__mirrorstack/mcp/` — MCP protocol routes
+- [x] `ms.Describe()` — module description for agent discovery
+- [x] `ms.DependsOn()` — dependency declaration with auto-detected required/optional
+- [x] `ms.Resolve[T]()` — typed runtime lookup for optional deps (stub pending cross-module wiring)
+- [x] `ms.MCPTool()` — agent-callable tool with JSON Schema derivation
+- [x] `ms.MCPResource()` — agent-readable resource
+- [x] `/__mirrorstack/mcp/` — MCP protocol routes (tools/resources, list/call/read)
 
 ## SDK structure
 

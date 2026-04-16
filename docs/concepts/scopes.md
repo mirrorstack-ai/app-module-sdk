@@ -13,13 +13,15 @@ Every HTTP route lives under one of three **scopes**. The scope determines which
 Authenticated users of the host dashboard. The SDK checks a session token set by the platform's auth flow. Routes receive an `auth.Identity` via context with `AppID`, `UserID`, and `AppRole`.
 
 ```go
+import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+
 ms.Platform(func(r chi.Router) {
     r.Get("/items", listItems)
-    r.With(ms.RequirePermission("items.write", "admin", "member")).Post("/items", createItem)
+    r.With(ms.RequirePermission("items.write", p.Admin())).Post("/items", createItem)
 })
 ```
 
-Add `ms.RequirePermission(name, roles...)` for role-based gating. It both installs the Chi middleware and declares the permission on the manifest so the platform's install screen can display it.
+Add `ms.RequirePermission(name, roles...)` for role-based gating. Roles come from the `roles` package (`p.Admin()`, `p.Viewer()`, `p.Custom("key")`). It both installs the Chi middleware and declares the permission on the manifest so the platform's install screen can display it.
 
 ## Public
 

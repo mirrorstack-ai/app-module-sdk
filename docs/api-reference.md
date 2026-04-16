@@ -41,13 +41,19 @@ See [concepts/scopes.md](./concepts/scopes.md) for the auth boundaries.
 | `ms.Platform(fn)` | Authenticated dashboard users. |
 | `ms.Public(fn)` | Anonymous endpoints (webhooks, OAuth callbacks). |
 | `ms.Internal(fn)` | Platform-to-module only (HMAC-signed). |
-| `ms.RequirePermission(name, roles...)` | Chi middleware + declares the permission in the manifest. |
+| `ms.RequirePermission(name, roles...)` | Chi middleware + declares the permission in the manifest. Roles are typed values from the `roles` package. |
 
 ```go
+import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+
 ms.Platform(func(r chi.Router) {
-    r.With(ms.RequirePermission("video.upload", "admin")).Post("/videos", uploadVideo)
+    r.With(ms.RequirePermission("video.upload", p.Admin())).Post("/videos", uploadVideo)
+    r.With(ms.RequirePermission("video.view",   p.Admin(), p.Viewer())).Get("/videos", listVideos)
+    r.With(ms.RequirePermission("video.moderate", p.Custom("moderator"))).Post("/flag", flagVideo)
 })
 ```
+
+Canonical roles: `p.Admin()`, `p.Viewer()`. Use `p.Custom("key")` for module-specific roles.
 
 ## Events
 

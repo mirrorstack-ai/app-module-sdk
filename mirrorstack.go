@@ -37,6 +37,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	msqs "github.com/mirrorstack-ai/app-module-sdk/internal/sqs"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
+	"github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -471,22 +472,29 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 // — registry append is O(N), so dynamic per-request names would leak memory
 // and slow down every subsequent registration.
 //
-//	r.With(mod.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
-func (m *Module) RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
-	m.registry.AddPermission(name, roles)
-	return auth.RequireRoles(roles...)
+// Roles are typed values from the roles package (Admin, Viewer, Custom) to
+// prevent typos and enable IDE autocomplete:
+//
+//	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+//	r.With(mod.RequirePermission("media.view", p.Admin(), p.Viewer())).Get("/items", listItems)
+func (m *Module) RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
+	keys := roles.Keys(allowed)
+	m.registry.AddPermission(name, keys)
+	return auth.RequireRoles(keys...)
 }
 
 // RequirePermission is the convenience wrapper that dispatches to the default
 // Module created by Init(). Calling this before Init() panics — match the
 // behavior of Platform/Public/Internal.
 //
+//	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+//
 //	ms.Init(...)
 //	ms.Platform(func(r chi.Router) {
-//	    r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get(...)
+//	    r.With(ms.RequirePermission("media.view", p.Admin(), p.Viewer())).Get(...)
 //	})
-func RequirePermission(name string, roles ...string) func(http.Handler) http.Handler {
-	return mustDefault("RequirePermission").RequirePermission(name, roles...)
+func RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
+	return mustDefault("RequirePermission").RequirePermission(name, allowed...)
 }
 
 // Describe sets the module's human-readable description. Used by the catalog
