@@ -14,9 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	runtimepkg "runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -506,35 +504,45 @@ func (m *Module) Describe(s string) {
 	m.registry.SetDescription(s)
 }
 
-// DependsOn declares a dependency on another module by ID. The required vs
-// optional distinction is AUTO-DETECTED from the call site via the Go stack:
+// DependsOn declares a REQUIRED dependency on another module by ID. Called at
+// module init time (from main or init()). The catalog installs the dependency
+// before this module; install fails if the dependency is unavailable.
 //
-//   - Called from main.main or a package-level init() → REQUIRED (catalog
-//     installs the dependency before this module; install fails without it).
-//   - Called from anywhere else (helper functions, setup routines, handlers)
-//     → OPTIONAL (this module runs standalone; use ms.Resolve[T] to
-//     opportunistically use the dependency at runtime if installed).
-//
-// Caveat: an "extract function" refactor that moves a DependsOn call out of
-// main() into a helper silently changes the dep from required to optional.
-// Keep required deps declared literally in main() (or a package-level init()).
-// Escape hatch: wrap required deps in an init() if they must live outside
-// main, e.g. for a shared registration package.
+// For OPTIONAL deps (the module works standalone but integrates with the
+// dependency when present), use ms.Needs at the handler registration site
+// instead — that co-locates the declaration with the code that uses it.
 //
 //	func main() {
 //	    ms.Init(...)
-//	    ms.DependsOn("oauth-core")       // required — caller is main
-//	    registerVideoIntegration()
+//	    ms.DependsOn("oauth-core")  // required
+//	    ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted)) // optional
 //	    ms.Start()
 //	}
-//
-//	func registerVideoIntegration() {
-//	    ms.DependsOn("video")            // optional — caller is helper
-//	    ms.OnEvent("video.completed", handleVideoCompleted)
-//	}
 func (m *Module) DependsOn(id string) {
-	optional := !callerIsRoot()
-	m.registry.AddDependency(id, optional)
+	m.registry.AddDependency(id, false)
+}
+
+// Needs declares an OPTIONAL dependency on another module by ID and returns
+// the handler unchanged. Designed to wrap handlers passed to ms.OnEvent,
+// ms.Cron, chi routes, etc. — anywhere a handler is registered where the
+// work may use the dependency.
+//
+// The dependency is recorded on the default module's registry at call time
+// (which is module init, since registration calls run during setup before
+// ms.Start). The manifest lists it as {"id":"<id>","optional":true}.
+//
+// Dedup: if the same ID has also been declared required via ms.DependsOn
+// elsewhere, required wins — an additional Needs is a no-op.
+//
+//	ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))
+//	ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))
+//
+// Nest Needs calls to declare multiple optional deps for one handler:
+//
+//	ms.OnEvent("payment", ms.Needs("billing", ms.Needs("audit-log", onPayment)))
+func (m *Module) Needs(id string, h http.HandlerFunc) http.HandlerFunc {
+	m.registry.AddDependency(id, true)
+	return h
 }
 
 // Describe is the convenience wrapper that dispatches to the default Module.
@@ -542,15 +550,22 @@ func (m *Module) DependsOn(id string) {
 func Describe(s string) { mustDefault("Describe").Describe(s) }
 
 // DependsOn is the convenience wrapper that dispatches to the default Module.
-// Calling before Init() panics. See Module.DependsOn for the auto-detect rule.
+// Calling before Init() panics. Always registers id as required.
 func DependsOn(id string) { mustDefault("DependsOn").DependsOn(id) }
+
+// Needs is the convenience wrapper that dispatches to the default Module.
+// Calling before Init() panics. See Module.Needs for the full contract.
+func Needs(id string, h http.HandlerFunc) http.HandlerFunc {
+	return mustDefault("Needs").Needs(id, h)
+}
 
 // Resolve looks up a previously-registered client of type T by module ID.
 // Returns the zero value of T and false when no client is registered for id
 // (either because the dependency module isn't installed or no module has
 // exported a T-typed client).
 //
-// Pairs with DependsOn(id) declared optional: check ok before calling into T.
+// Pairs with optional deps declared via ms.Needs: check ok before calling
+// into T.
 //
 //	if user, ok := ms.Resolve[userclient.Client]("user"); ok {
 //	    user.UpsertByExternalIdentity(ctx, ext)
@@ -564,58 +579,6 @@ func DependsOn(id string) { mustDefault("DependsOn").DependsOn(id) }
 func Resolve[T any](id string) (T, bool) {
 	var zero T
 	return zero, false
-}
-
-// callerIsRoot inspects the stack and returns true when the user-code caller
-// of DependsOn is main.main or a package-level init function. SDK frames
-// (the DependsOn method itself, the package-level wrapper) are skipped.
-func callerIsRoot() bool {
-	pcs := make([]uintptr, 32)
-	// Skip: runtime.Callers (0), this function (1). Start at the caller of
-	// callerIsRoot, which is DependsOn.
-	n := runtimepkg.Callers(2, pcs)
-	if n == 0 {
-		return false
-	}
-	frames := runtimepkg.CallersFrames(pcs[:n])
-	for {
-		frame, more := frames.Next()
-		fn := frame.Function
-		// Skip the DependsOn plumbing frames (both receiver method and
-		// package-level wrapper end with ".DependsOn").
-		if strings.HasSuffix(fn, ".DependsOn") {
-			if !more {
-				return false
-			}
-			continue
-		}
-		return isRootCallerName(fn)
-	}
-}
-
-// isRootCallerName reports whether fn is main.main or any package init().
-// Go compiles init functions as "pkg.init", "pkg.init.0", "pkg.init.1" etc.
-func isRootCallerName(fn string) bool {
-	if fn == "main.main" {
-		return true
-	}
-	idx := strings.LastIndex(fn, ".init")
-	if idx < 0 {
-		return false
-	}
-	rest := fn[idx+len(".init"):]
-	if rest == "" {
-		return true
-	}
-	if !strings.HasPrefix(rest, ".") {
-		return false
-	}
-	for _, c := range rest[1:] {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // MCPTool registers an agent-callable tool on the default module. Input and

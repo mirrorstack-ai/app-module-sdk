@@ -59,16 +59,13 @@ curl -sH "X-MS-Internal-Secret: dev" \
 ms.DependsOn("oauth-core")   // required — catalog 會先裝這個
 ```
 
-Optional deps 要從 helper function 裡面 declare(auto-detect 會處理):
+Optional deps 用 `ms.Needs(id, handler)` 包住會用到它的 handler:
 
 ```go
-func configureWithUser() {
-    ms.DependsOn("user")     // optional — 就算 `user` module 沒裝也沒關係
-    ms.OnEvent("user.created", onUserCreated)
-}
+ms.OnEvent("user.created", ms.Needs("user", onUserCreated))
 ```
 
-完整的規則看 [concepts/dependencies.md](./concepts/dependencies.md)。
+`ms.Needs` 把 `user` register 成 optional dep,然後把 handler 原樣 return。`ms.Cron`、chi route 都可以這樣用。完整規則看 [concepts/dependencies.md](./concepts/dependencies.md)。
 
 ## 5. Register 一個 agent tool
 

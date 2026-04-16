@@ -11,7 +11,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **Typed role values** for `ms.RequirePermission` via a new `roles` package — `roles.Admin()`, `roles.Viewer()`, `roles.Custom(key)`. Prevents typos, enables IDE autocomplete, and reserves space for future i18n metadata.
 - **Agent orchestration primitives** ([#82], [#84])
   - `ms.Describe(s)` — human-readable module description consumed by the catalog for agent discovery.
-  - `ms.DependsOn(id)` — declare a dependency by module ID. Required vs optional is auto-detected from the call site: `main.main` or `pkg.init[.N]` → required; anywhere else → optional.
+  - `ms.DependsOn(id)` — declare a REQUIRED dependency by module ID. Called at module init.
+  - `ms.Needs(id, handler) HandlerFunc` — wrap a handler to declare an OPTIONAL dependency, co-located with the code that uses it. Works with `OnEvent`, `Cron`, chi routes, any `http.HandlerFunc`.
   - `ms.Resolve[T any](id) (T, bool)` — typed runtime resolver for optional deps. v1 stub; returns zero + false until cross-module client wiring lands.
   - `ms.MCPTool[In, Out](name, description, handler)` — agent-callable tool. Input/output JSON Schema derived from type parameters via reflection.
   - `ms.MCPResource[Out](name, description, handler)` — agent-readable resource.

@@ -26,12 +26,14 @@ ms.Start()
 | Function | Purpose |
 |---|---|
 | `ms.Describe(s string)` | Set the agent-discovery description. |
-| `ms.DependsOn(id string)` | Declare a dependency. Required if called from `main.main` or `pkg.init`; optional otherwise. |
+| `ms.DependsOn(id string)` | Declare a REQUIRED dependency. Called once at module init. |
+| `ms.Needs(id string, h HandlerFunc) HandlerFunc` | Wrap a handler; declares the id as an OPTIONAL dependency. Returns handler unchanged. |
 | `ms.Resolve[T any](id) (T, bool)` | Typed runtime lookup for optional deps (stub in v1). |
 
 ```go
 ms.Describe("Video upload + HLS streaming")
-ms.DependsOn("oauth-core")   // required
+ms.DependsOn("oauth-core")                                          // required
+ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))  // optional
 ```
 
 ## HTTP scopes

@@ -8,86 +8,64 @@ A MirrorStack module declares dependencies on other modules by their ID, not by 
 
 | | Required | Optional |
 |---|---|---|
+| **Declared with** | `ms.DependsOn(id)` at root | `ms.Needs(id, handler)` wrapping a handler |
 | **Install behavior** | Catalog installs the dep first; install fails if the dep is missing. | Catalog ignores; your module installs standalone. |
 | **Uninstall behavior** | The dep cannot be uninstalled while your module is installed. | The dep can be uninstalled anytime; your module keeps running. |
 | **Runtime guarantee** | Always present. | Must check with `ms.Resolve[T](id)` before use. |
-| **Manifest shape** | `{"id":"oauth-core"}` | `{"id":"user","optional":true}` |
+| **Manifest shape** | `{"id":"oauth-core"}` | `{"id":"video","optional":true}` |
 
-## Auto-detection rule
+## Required: `ms.DependsOn`
 
-There is **one** `ms.DependsOn(id)` function. Required vs optional is auto-detected from where you call it:
-
-| Caller | Classification |
-|---|---|
-| `func main()` in package `main` | Required |
-| Any package-level `init()` function (`pkg.init` or `pkg.init.N`) | Required |
-| Anywhere else (helpers, handlers, setup functions) | Optional |
-
-Implementation: the SDK walks the Go call stack with `runtime.Callers` and matches the first non-SDK frame's function name against `main.main` or `*.init[.N]`.
+Declared once at module init. The module cannot start without the dep installed.
 
 ```go
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")   // REQUIRED — caller is main.main
-
-    configureVideoFallback()
-
+    ms.DependsOn("oauth-core")   // required
     ms.Start()
-}
-
-func configureVideoFallback() {
-    ms.DependsOn("video")        // OPTIONAL — caller is helper func
-    ms.OnEvent("video.completed", onVideoCompleted)
 }
 ```
 
-## The extract-function caveat
+`ms.DependsOn` always registers as required — no positional magic. Put it in `main()` or a package-level `init()`; there's no semantic difference.
 
-The auto-detect rule is positional. If you move a `ms.DependsOn(...)` call out of `main()` into a helper, its classification silently changes from required to optional.
+## Optional: `ms.Needs` wraps the handler
+
+Optional deps are declared at the **handler registration site** — co-located with the code that uses them. `ms.Needs(id, handler)` registers the dep as optional and returns the handler unchanged, so it composes with any API that takes an `http.HandlerFunc`.
 
 ```go
-// BEFORE refactor
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")     // required
-    ms.DependsOn("user")           // required
+    ms.DependsOn("oauth-core")                                           // required
+    ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))   // optional
+    ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))     // optional
     ms.Start()
-}
-
-// AFTER "extract function" refactor
-func main() {
-    ms.Init(...)
-    registerDeps()                 // innocuous refactor...
-    ms.Start()
-}
-
-func registerDeps() {
-    ms.DependsOn("oauth-core")     // NOW OPTIONAL — silently!
-    ms.DependsOn("user")           // NOW OPTIONAL — silently!
 }
 ```
 
-### Why this tradeoff
+**Why this shape**:
 
-Explicit alternatives (a flag argument, a second function name) were considered and rejected. The cost — one subtle rule module authors must remember — is lower than the cost of adding ceremony every declaration. The auto-detect rule mirrors how `testing.T.Parallel` works: position in the source is meaningful.
+1. The dep and the handler that uses it are literally on the same line — no "what is this setup function for again" dance.
+2. No positional auto-detect rule. `ms.DependsOn` has one unambiguous meaning. Extract-function refactors can't silently change classification.
+3. Works uniformly across `OnEvent`, `Cron`, chi routes, and anything else that accepts a handler.
 
-### Escape hatch
+### Multiple optional deps
 
-If you genuinely need required deps outside `main()` — e.g. a shared registration package — use a package-level `init()` function. `init()` is classified as required:
+Nest `Needs`:
 
 ```go
-// deps.go — separate registration package
-package deps
-
-import ms "github.com/mirrorstack-ai/app-module-sdk"
-
-func init() {
-    ms.DependsOn("oauth-core")   // REQUIRED — caller is pkg.init
-    ms.DependsOn("user")         // REQUIRED — caller is pkg.init
-}
+ms.OnEvent("payment", ms.Needs("billing", ms.Needs("audit-log", onPayment)))
 ```
 
-`init()` runs before `main()`, and `ms.DependsOn` is safe to call after `ms.Init`. Order your imports so `ms.Init` runs first.
+Each `Needs` call registers one dep; the outermost returns the final wrapped handler.
+
+### Chi route example
+
+```go
+ms.Platform(func(r chi.Router) {
+    r.Get("/transcode", ms.Needs("video", transcodeHandler))
+    r.Post("/ship",     ms.Needs("billing", ms.Needs("shipping", shipHandler)))
+})
+```
 
 ## Dedup rule
 
@@ -95,26 +73,24 @@ If the same dependency is declared multiple times across the codebase, **require
 
 | First declaration | Second declaration | Stored |
 |---|---|---|
-| required | required | required |
-| required | optional | required |
-| optional | required | required (upgraded) |
-| optional | optional | optional |
+| required (`DependsOn`) | required | required |
+| required (`DependsOn`) | optional (`Needs`) | required |
+| optional (`Needs`) | required (`DependsOn`) | required (upgraded) |
+| optional (`Needs`) | optional (`Needs`) | optional |
 
-The second optional call is a no-op; the second required call upgrades a prior optional entry.
+A second optional declaration is a no-op; a required declaration upgrades a prior optional entry. This means it's safe to sprinkle `Needs` freely — if the dep is already required elsewhere, `Needs` degrades gracefully.
 
 ## Runtime use: `ms.Resolve[T]`
 
-For optional deps, check presence at runtime:
+Inside a handler wrapped by `ms.Needs`, check whether the dep is actually present before using it:
 
 ```go
-if user, ok := ms.Resolve[userclient.Client]("user"); ok {
-    // user module is installed — use it
-    uid, _ := user.UpsertByExternalIdentity(ctx, ext)
-    issueSession(uid)
-} else {
-    // fallback — platform-native identity resolution
-    uid, _ := platform.ResolveIdentity(ctx, ext)
-    issueSession(uid)
+func onVideoCompleted(w http.ResponseWriter, r *http.Request) {
+    if video, ok := ms.Resolve[videoclient.Client]("video"); ok {
+        // video module is installed — use it
+        video.MarkProcessed(r.Context(), videoID)
+    }
+    // if not installed, skip gracefully
 }
 ```
 

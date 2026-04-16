@@ -8,86 +8,64 @@ MirrorStack module 用 **module ID** 來 declare 對其他 module 的 dependency
 
 | | Required | Optional |
 |---|---|---|
+| **Declare 方式** | 在 root 用 `ms.DependsOn(id)` | 用 `ms.Needs(id, handler)` 包住 handler |
 | **Install 行為** | Catalog 會先裝好 dep;dep 不在就 install 失敗。 | Catalog 不管;你 module 可以 standalone 裝。 |
 | **Uninstall 行為** | 你 module 還裝著的話,dep 不能被 uninstall。 | Dep 隨時可以 uninstall;你 module 照跑。 |
 | **Runtime 保證** | 一定在。 | 要用 `ms.Resolve[T](id)` 先檢查。 |
-| **Manifest shape** | `{"id":"oauth-core"}` | `{"id":"user","optional":true}` |
+| **Manifest shape** | `{"id":"oauth-core"}` | `{"id":"video","optional":true}` |
 
-## Auto-detection 規則
+## Required:`ms.DependsOn`
 
-只有**一個** `ms.DependsOn(id)` function。Required vs optional 是從「你在哪裡 call 它」自動判斷的:
-
-| Caller | 歸類成 |
-|---|---|
-| `func main()`(package `main` 裡面) | Required |
-| Package-level `init()` function(`pkg.init` 或 `pkg.init.N`) | Required |
-| 其他地方(helpers、handlers、setup functions 等) | Optional |
-
-做法:SDK 用 `runtime.Callers` walk Go 的 call stack,第一個不是 SDK frame 的 function name 去比對 `main.main` 或 `*.init[.N]`。
+在 module init 的時候 declare 一次。沒裝這個 dep,module 起不來。
 
 ```go
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")   // REQUIRED — caller 是 main.main
-
-    configureVideoFallback()
-
+    ms.DependsOn("oauth-core")   // required
     ms.Start()
-}
-
-func configureVideoFallback() {
-    ms.DependsOn("video")        // OPTIONAL — caller 是 helper function
-    ms.OnEvent("video.completed", onVideoCompleted)
 }
 ```
 
-## Extract-function 的坑
+`ms.DependsOn` 永遠 register 成 required — 沒有什麼位置判斷的魔法。放在 `main()` 或 package-level `init()` 都行,意思完全一樣。
 
-Auto-detect 的規則是看位置的。如果你把 `ms.DependsOn(...)` 從 `main()` refactor 出去變成 helper function,它的分類會**悄悄地**從 required 變成 optional。
+## Optional:`ms.Needs` 包住 handler
+
+Optional dep 是在**註冊 handler 的地方**一起 declare — 跟使用它的 code 放在同一行。`ms.Needs(id, handler)` 把 dep register 成 optional 然後把 handler 原樣 return,所以可以搭配任何吃 `http.HandlerFunc` 的 API。
 
 ```go
-// BEFORE refactor
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")     // required
-    ms.DependsOn("user")           // required
+    ms.DependsOn("oauth-core")                                           // required
+    ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))   // optional
+    ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))     // optional
     ms.Start()
-}
-
-// AFTER "extract function" refactor
-func main() {
-    ms.Init(...)
-    registerDeps()                 // 看起來沒什麼大不了的 refactor...
-    ms.Start()
-}
-
-func registerDeps() {
-    ms.DependsOn("oauth-core")     // 現在變成 OPTIONAL 了 — 悄悄地!
-    ms.DependsOn("user")           // 現在變成 OPTIONAL 了 — 悄悄地!
 }
 ```
 
-### 為什麼要這樣 trade-off
+**為什麼這樣設計:**
 
-有考慮過要不要用顯式的方式(加 flag argument、或用第二個 function name)然後都 reject 了。代價 — 你要記住這條規則 — 比每次 declare 都要多寫 ceremony 要來得小。這個 auto-detect 規則跟 `testing.T.Parallel` 是一樣的概念:位置本身就是資訊。
+1. Dep 跟 handler 就在同一行 — 不用多繞一個「這個 setup function 到底是做什麼的」的彎路。
+2. 沒有靠位置判斷的 auto-detect。`ms.DependsOn` 語意明確、只有一種解讀。Extract-function refactor 不會偷偷改掉分類。
+3. 同一個 API 通用在 `OnEvent`、`Cron`、chi route、還有其他任何吃 handler 的地方。
 
-### Escape hatch
+### 一個 handler 要多個 optional dep
 
-如果你真的很需要在 `main()` 外面 declare required deps — 比如說你有一個共用的 registration package — 用 package-level 的 `init()`。`init()` 會被歸類成 required:
+把 `Needs` 疊起來:
 
 ```go
-// deps.go — 獨立的 registration package
-package deps
-
-import ms "github.com/mirrorstack-ai/app-module-sdk"
-
-func init() {
-    ms.DependsOn("oauth-core")   // REQUIRED — caller 是 pkg.init
-    ms.DependsOn("user")         // REQUIRED — caller 是 pkg.init
-}
+ms.OnEvent("payment", ms.Needs("billing", ms.Needs("audit-log", onPayment)))
 ```
 
-`init()` 會比 `main()` 早跑,而 `ms.Init` 之後 call `ms.DependsOn` 是安全的。import 的順序要 arrange 好,讓 `ms.Init` 先跑。
+每一個 `Needs` call 註冊一個 dep;最外層那個 return 最終包好的 handler。
+
+### Chi route 範例
+
+```go
+ms.Platform(func(r chi.Router) {
+    r.Get("/transcode", ms.Needs("video", transcodeHandler))
+    r.Post("/ship",     ms.Needs("billing", ms.Needs("shipping", shipHandler)))
+})
+```
 
 ## Dedup 規則
 
@@ -95,26 +73,24 @@ func init() {
 
 | 第一次 declare | 第二次 declare | 存起來的是 |
 |---|---|---|
-| required | required | required |
-| required | optional | required |
-| optional | required | required(升級) |
-| optional | optional | optional |
+| required(`DependsOn`) | required | required |
+| required(`DependsOn`) | optional(`Needs`) | required |
+| optional(`Needs`) | required(`DependsOn`) | required(升級) |
+| optional(`Needs`) | optional(`Needs`) | optional |
 
-第二次 call optional 的話就 no-op;第二次 call required 會把之前的 optional 升級成 required。
+第二次 call optional 的話就 no-op;第二次 call required 會把之前的 optional 升級成 required。所以 `Needs` 到處用沒關係 — 如果其他地方已經 required 了,`Needs` 會安靜地退讓。
 
 ## Runtime 用:`ms.Resolve[T]`
 
-Optional deps 要在 runtime 檢查有沒有:
+在 `ms.Needs` 包的 handler 裡面,用之前先檢查 dep 有沒有真的在:
 
 ```go
-if user, ok := ms.Resolve[userclient.Client]("user"); ok {
-    // user module 有裝 — 直接 call
-    uid, _ := user.UpsertByExternalIdentity(ctx, ext)
-    issueSession(uid)
-} else {
-    // Fallback — 用 platform 原生的 identity resolution
-    uid, _ := platform.ResolveIdentity(ctx, ext)
-    issueSession(uid)
+func onVideoCompleted(w http.ResponseWriter, r *http.Request) {
+    if video, ok := ms.Resolve[videoclient.Client]("video"); ok {
+        // video module 有裝 — 用它
+        video.MarkProcessed(r.Context(), videoID)
+    }
+    // 沒裝就 skip
 }
 ```
 

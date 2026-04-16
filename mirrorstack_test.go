@@ -668,6 +668,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 		"Describe":          func() { Describe("a module") },
 		"DependsOn":         func() { DependsOn("other") },
+		"Needs":             func() { _ = Needs("other", func(w http.ResponseWriter, r *http.Request) {}) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -707,33 +708,7 @@ func TestModule_ModuleSchema(t *testing.T) {
 	}
 }
 
-// ---- Describe / DependsOn / Resolve ----
-
-func TestIsRootCallerName(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		fn   string
-		want bool
-	}{
-		{"main.main", true},
-		{"main.init", true},
-		{"main.init.0", true},
-		{"main.init.12", true},
-		{"example.com/pkg.init", true},
-		{"example.com/pkg.init.5", true},
-		{"main.helperFunction", false},
-		{"pkg.SomeFunc", false},
-		{"pkg.initSomething", false}, // not an init — just starts with "init"
-		{"pkg.init.notNumber", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := isRootCallerName(tc.fn); got != tc.want {
-			t.Errorf("isRootCallerName(%q) = %v, want %v", tc.fn, got, tc.want)
-		}
-	}
-}
+// ---- Describe / DependsOn / Needs / Resolve ----
 
 func TestDescribe_PopulatesRegistry(t *testing.T) {
 	t.Parallel()
@@ -745,41 +720,93 @@ func TestDescribe_PopulatesRegistry(t *testing.T) {
 	}
 }
 
-func TestDependsOn_FromHelperIsOptional(t *testing.T) {
+func TestDependsOn_AlwaysRequired(t *testing.T) {
 	t.Parallel()
 
 	m, _ := New(Config{ID: "demo"})
-	m.DependsOn("other") // called from test function — NOT main.main or init
+	m.DependsOn("oauth-core")
 	deps := m.registry.Dependencies()
 	if len(deps) != 1 {
 		t.Fatalf("len(Dependencies) = %d, want 1", len(deps))
 	}
-	if deps[0].ID != "other" || !deps[0].Optional {
-		t.Errorf("Dependencies[0] = %+v, want {ID:other, Optional:true}", deps[0])
+	if deps[0].ID != "oauth-core" || deps[0].Optional {
+		t.Errorf("Dependencies[0] = %+v, want {ID:oauth-core, Optional:false}", deps[0])
 	}
 }
 
-func TestDependsOn_CallerDetectionSkipsSDKFrames(t *testing.T) {
-	t.Parallel()
-
-	// Verify both code paths (direct receiver + convenience wrapper) resolve
-	// the caller to the test function, not an SDK frame.
+func TestNeeds_DeclaresOptionalDep(t *testing.T) {
 	resetDefault(t)
-	if err := Init(Config{ID: "demo"}); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	Describe("desc")
-	DependsOn("dep-via-wrapper")
-	defaultModule.DependsOn("dep-via-method")
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
 
-	deps := defaultModule.registry.Dependencies()
+	handler := func(w http.ResponseWriter, r *http.Request) {}
+	wrapped := Needs("video", handler)
+	if wrapped == nil {
+		t.Fatal("Needs returned nil handler")
+	}
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(Dependencies) = %d, want 1", len(deps))
+	}
+	if deps[0].ID != "video" || !deps[0].Optional {
+		t.Errorf("Dependencies[0] = %+v, want {ID:video, Optional:true}", deps[0])
+	}
+}
+
+func TestNeeds_HandlerPassesThrough(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	called := false
+	handler := func(w http.ResponseWriter, r *http.Request) { called = true }
+	wrapped := Needs("video", handler)
+
+	rec := httptest.NewRecorder()
+	wrapped(rec, httptest.NewRequest("GET", "/x", nil))
+	if !called {
+		t.Error("Needs wrapper did not call the underlying handler")
+	}
+}
+
+func TestNeeds_RequiredWinsOverNeedsForSameID(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	// Required first, then Needs with same id.
+	DependsOn("video")
+	_ = Needs("video", func(w http.ResponseWriter, r *http.Request) {})
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(Dependencies) = %d, want 1 (dedup)", len(deps))
+	}
+	if deps[0].Optional {
+		t.Errorf("Dependencies[0].Optional = true, want false (required wins)")
+	}
+}
+
+func TestNeeds_NestedDeclaresMultipleDeps(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	_ = Needs("video", Needs("audit-log", func(w http.ResponseWriter, r *http.Request) {}))
+
+	deps := m.registry.Dependencies()
 	if len(deps) != 2 {
 		t.Fatalf("len(Dependencies) = %d, want 2", len(deps))
 	}
-	for _, d := range deps {
-		if !d.Optional {
-			t.Errorf("dep %q: Optional = false, want true (test caller is not root)", d.ID)
+	ids := map[string]bool{deps[0].ID: deps[0].Optional, deps[1].ID: deps[1].Optional}
+	for id, optional := range ids {
+		if !optional {
+			t.Errorf("dep %q: Optional = false, want true", id)
 		}
+	}
+	if !ids["video"] || !ids["audit-log"] {
+		t.Errorf("deps = %+v, want both video and audit-log", deps)
 	}
 }
 

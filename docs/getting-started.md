@@ -59,16 +59,13 @@ In `main.go`, after `ms.Describe(...)`, add required deps:
 ms.DependsOn("oauth-core")   // required — catalog installs this first
 ```
 
-For optional deps, declare them from a helper function (auto-detected):
+For optional deps, wrap the handler that uses them with `ms.Needs(id, handler)`:
 
 ```go
-func configureWithUser() {
-    ms.DependsOn("user")     // optional — module still runs if `user` missing
-    ms.OnEvent("user.created", onUserCreated)
-}
+ms.OnEvent("user.created", ms.Needs("user", onUserCreated))
 ```
 
-See [concepts/dependencies.md](./concepts/dependencies.md) for the full rule.
+`ms.Needs` registers `user` as an optional dependency and returns the handler unchanged. Works the same with `ms.Cron`, chi routes, etc. See [concepts/dependencies.md](./concepts/dependencies.md) for the full rules.
 
 ## 5. Register an agent tool
 
