@@ -30,6 +30,10 @@ import (
 //	        return GreetResult{Message: "hi " + a.Name}, nil
 //	    })
 //
+// Generics give compile-time type safety on the handler signature; schemas are
+// derived at registration via reflection and validated against incoming JSON
+// at call time (NOT statically against the wire format).
+//
 // Panics before Init or on schema derivation failure.
 func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error)) {
 	m := mustDefault("MCPTool")

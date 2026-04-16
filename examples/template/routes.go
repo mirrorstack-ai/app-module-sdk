@@ -3,8 +3,8 @@ package main
 import (
 	"net/http"
 
-	ms "github.com/mirrorstack-ai/app-module-sdk"
 	"github.com/go-chi/chi/v5"
+	ms "github.com/mirrorstack-ai/app-module-sdk"
 )
 
 func init() {

@@ -10,9 +10,9 @@ package main
 import (
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	ms "github.com/mirrorstack-ai/app-module-sdk"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
-	"github.com/go-chi/chi/v5"
 )
 
 func init() {

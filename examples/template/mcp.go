@@ -31,6 +31,11 @@ type StatusResource struct {
 	Version string `json:"version"`
 }
 
+// moduleVersion should be set at build time via -ldflags, or wire it to your
+// own embed/constant before shipping. The placeholder reports unknown so a
+// copy-pasted template doesn't silently report the wrong version.
+const moduleVersion = "0.0.0-unknown"
+
 func registerMCP() {
 	ms.MCPTool("greet", "Say hi to someone",
 		func(ctx context.Context, args GreetArgs) (GreetResult, error) {
@@ -39,6 +44,6 @@ func registerMCP() {
 
 	ms.MCPResource("status", "Current module health + version",
 		func(ctx context.Context) (StatusResource, error) {
-			return StatusResource{Healthy: true, Version: "v0.1.0"}, nil
+			return StatusResource{Healthy: true, Version: moduleVersion}, nil
 		})
 }
