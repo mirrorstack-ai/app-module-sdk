@@ -15,9 +15,12 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
 
 	"github.com/invopop/jsonschema"
 
@@ -504,45 +507,68 @@ func (m *Module) Describe(s string) {
 	m.registry.SetDescription(s)
 }
 
-// DependsOn declares a REQUIRED dependency on another module by ID. Called at
-// module init time (from main or init()). The catalog installs the dependency
-// before this module; install fails if the dependency is unavailable.
+// DependsOn declares a REQUIRED dependency on another module. The catalog
+// installs the dependency before this module; install fails if the dependency
+// is unavailable or no published version matches the constraint.
+//
+// Spec syntax: "id" (any version) or "id@constraint" where constraint is a
+// SemVer range in npm-style syntax:
+//
+//	ms.DependsOn("oauth-core")           // any version
+//	ms.DependsOn("oauth-core@^1.2.0")    // >=1.2.0, <2.0.0
+//	ms.DependsOn("oauth-core@~1.2.0")    // >=1.2.0, <1.3.0
+//	ms.DependsOn("oauth-core@>=1.2 <2")  // explicit range
+//	ms.DependsOn("oauth-core@1.2.3")     // exact
+//
+// Panics at call time on an invalid constraint — it's a programmer error,
+// not runtime input.
 //
 // For OPTIONAL deps (the module works standalone but integrates with the
-// dependency when present), use ms.Needs at the handler registration site
-// instead — that co-locates the declaration with the code that uses it.
-//
-//	func main() {
-//	    ms.Init(...)
-//	    ms.DependsOn("oauth-core")  // required
-//	    ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted)) // optional
-//	    ms.Start()
-//	}
-func (m *Module) DependsOn(id string) {
-	m.registry.AddDependency(id, false)
+// dependency when present), use ms.Needs at the handler registration site.
+func (m *Module) DependsOn(spec string) {
+	id, constraint := parseDepSpec(spec)
+	m.registry.AddDependency(registry.Dependency{ID: id, Version: constraint, Optional: false})
 }
 
-// Needs declares an OPTIONAL dependency on another module by ID and returns
-// the handler unchanged. Designed to wrap handlers passed to ms.OnEvent,
-// ms.Cron, chi routes, etc. — anywhere a handler is registered where the
-// work may use the dependency.
+// Needs declares an OPTIONAL dependency on another module and returns the
+// handler unchanged. Designed to wrap handlers passed to ms.OnEvent, ms.Cron,
+// chi routes — anywhere a handler is registered where the work may use the
+// dependency.
 //
-// The dependency is recorded on the default module's registry at call time
-// (which is module init, since registration calls run during setup before
-// ms.Start). The manifest lists it as {"id":"<id>","optional":true}.
+// Spec syntax mirrors DependsOn: "id" or "id@constraint".
 //
-// Dedup: if the same ID has also been declared required via ms.DependsOn
-// elsewhere, required wins — an additional Needs is a no-op.
-//
-//	ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))
+//	ms.OnEvent("video.completed", ms.Needs("video@^1", onVideoCompleted))
 //	ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))
 //
 // Nest Needs calls to declare multiple optional deps for one handler:
 //
-//	ms.OnEvent("payment", ms.Needs("billing", ms.Needs("audit-log", onPayment)))
-func (m *Module) Needs(id string, h http.HandlerFunc) http.HandlerFunc {
-	m.registry.AddDependency(id, true)
+//	ms.OnEvent("payment",
+//	    ms.Needs("billing@^1", ms.Needs("audit-log", onPayment)))
+//
+// Dedup: if the same ID has also been declared required via ms.DependsOn
+// elsewhere, required wins — an additional Needs is a no-op.
+func (m *Module) Needs(spec string, h http.HandlerFunc) http.HandlerFunc {
+	id, constraint := parseDepSpec(spec)
+	m.registry.AddDependency(registry.Dependency{ID: id, Version: constraint, Optional: true})
 	return h
+}
+
+// parseDepSpec splits "id@constraint" into its two parts. The id is required;
+// the constraint is optional. Panics on an invalid SemVer constraint.
+func parseDepSpec(spec string) (id, constraint string) {
+	at := strings.Index(spec, "@")
+	if at < 0 {
+		return spec, ""
+	}
+	id = spec[:at]
+	constraint = spec[at+1:]
+	if constraint == "" {
+		return id, ""
+	}
+	if _, err := semver.NewConstraint(constraint); err != nil {
+		panic(fmt.Sprintf("mirrorstack: invalid SemVer constraint in dependency spec %q: %v", spec, err))
+	}
+	return id, constraint
 }
 
 // Describe is the convenience wrapper that dispatches to the default Module.

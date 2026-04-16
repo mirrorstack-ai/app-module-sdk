@@ -253,8 +253,8 @@ func TestManifest_DependenciesPopulated(t *testing.T) {
 	t.Parallel()
 
 	reg := registry.New()
-	reg.AddDependency("oauth-core", false)
-	reg.AddDependency("video", true)
+	reg.AddDependency(registry.Dependency{ID: "oauth-core"})
+	reg.AddDependency(registry.Dependency{ID: "video", Optional: true})
 
 	got := decodeManifest(t, ManifestHandler("demo", "Demo", "box", nil, nil, reg))
 	if len(got.Dependencies) != 2 {
@@ -285,7 +285,7 @@ func TestManifest_OptionalOmittedInJSONWhenFalse(t *testing.T) {
 	t.Parallel()
 
 	reg := registry.New()
-	reg.AddDependency("oauth-core", false)
+	reg.AddDependency(registry.Dependency{ID: "oauth-core"})
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()

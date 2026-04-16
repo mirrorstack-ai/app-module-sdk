@@ -951,3 +951,102 @@ func TestMCPTool_ManifestIncludesMCPSurface(t *testing.T) {
 		t.Errorf("manifest.mcp.tools = %+v, want [greet]", payload.MCP.Tools)
 	}
 }
+
+func TestDependsOn_VersionConstraintStoredInManifest(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	DependsOn("oauth-core@^1.2.0")
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(deps) = %d, want 1", len(deps))
+	}
+	if deps[0].ID != "oauth-core" {
+		t.Errorf("deps[0].ID = %q, want oauth-core", deps[0].ID)
+	}
+	if deps[0].Version != "^1.2.0" {
+		t.Errorf("deps[0].Version = %q, want ^1.2.0", deps[0].Version)
+	}
+	if deps[0].Optional {
+		t.Errorf("deps[0].Optional = true, want false")
+	}
+}
+
+func TestNeeds_VersionConstraint(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	_ = Needs("video@~1.2.0", func(w http.ResponseWriter, r *http.Request) {})
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(deps) = %d, want 1", len(deps))
+	}
+	if deps[0].ID != "video" || deps[0].Version != "~1.2.0" || !deps[0].Optional {
+		t.Errorf("deps[0] = %+v, want {video, ~1.2.0, optional}", deps[0])
+	}
+}
+
+func TestDependsOn_NoConstraintLeavesVersionEmpty(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	DependsOn("oauth-core")
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 || deps[0].Version != "" {
+		t.Errorf("deps[0].Version = %q, want empty", deps[0].Version)
+	}
+}
+
+func TestDependsOn_InvalidConstraintPanics(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on invalid SemVer constraint")
+		}
+	}()
+	DependsOn("oauth-core@not-a-semver")
+}
+
+func TestParseDepSpec_SupportsCommonFormats(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		spec       string
+		wantID     string
+		wantVer    string
+		wantPanic  bool
+	}{
+		{"oauth-core", "oauth-core", "", false},
+		{"oauth-core@^1.2.0", "oauth-core", "^1.2.0", false},
+		{"oauth-core@~1.2.0", "oauth-core", "~1.2.0", false},
+		{"oauth-core@1.2.3", "oauth-core", "1.2.3", false},
+		{"oauth-core@>=1.2.0", "oauth-core", ">=1.2.0", false},
+		{"oauth-core@1.x", "oauth-core", "1.x", false},
+		{"oauth-core@", "oauth-core", "", false}, // empty constraint = any
+	}
+	for _, tc := range cases {
+		t.Run(tc.spec, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if tc.wantPanic && r == nil {
+					t.Errorf("expected panic for spec=%q", tc.spec)
+				} else if !tc.wantPanic && r != nil {
+					t.Errorf("unexpected panic for spec=%q: %v", tc.spec, r)
+				}
+			}()
+			gotID, gotVer := parseDepSpec(tc.spec)
+			if gotID != tc.wantID || gotVer != tc.wantVer {
+				t.Errorf("parseDepSpec(%q) = (%q, %q), want (%q, %q)", tc.spec, gotID, gotVer, tc.wantID, tc.wantVer)
+			}
+		})
+	}
+}

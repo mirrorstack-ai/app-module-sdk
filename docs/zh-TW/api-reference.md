@@ -26,14 +26,14 @@ ms.Start()
 | Function | 用途 |
 |---|---|
 | `ms.Describe(s string)` | 設定給 agent discovery 用的 description。 |
-| `ms.DependsOn(id string)` | Declare REQUIRED dependency。Module init 時 call 一次。 |
-| `ms.Needs(id string, h HandlerFunc) HandlerFunc` | 包住一個 handler;把 id declare 成 OPTIONAL dependency。Handler 原樣 return。 |
+| `ms.DependsOn(spec string)` | Declare REQUIRED dependency。Spec 是 `"id"` 或 `"id@constraint"`(npm 風格 SemVer)。Module init 時 call 一次。 |
+| `ms.Needs(spec string, h HandlerFunc) HandlerFunc` | 包住一個 handler;把 spec declare 成 OPTIONAL dependency。同樣的 spec 語法。Handler 原樣 return。 |
 | `ms.Resolve[T any](id) (T, bool)` | Runtime 查 optional deps 的 typed lookup(v1 是 stub)。 |
 
 ```go
 ms.Describe("Video upload + HLS streaming")
-ms.DependsOn("oauth-core")                                          // required
-ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))  // optional
+ms.DependsOn("oauth-core@^1.2.0")                                       // required, SemVer ^1.2.0
+ms.OnEvent("video.completed", ms.Needs("video@^1", onVideoCompleted))   // optional
 ```
 
 ## HTTP scopes

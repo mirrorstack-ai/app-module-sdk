@@ -8,11 +8,26 @@ A MirrorStack module declares dependencies on other modules by their ID, not by 
 
 | | Required | Optional |
 |---|---|---|
-| **Declared with** | `ms.DependsOn(id)` at root | `ms.Needs(id, handler)` wrapping a handler |
-| **Install behavior** | Catalog installs the dep first; install fails if the dep is missing. | Catalog ignores; your module installs standalone. |
+| **Declared with** | `ms.DependsOn(spec)` at root | `ms.Needs(spec, handler)` wrapping a handler |
+| **Install behavior** | Catalog installs the dep first; install fails if the dep is missing or no published version matches the constraint. | Catalog ignores; your module installs standalone. |
 | **Uninstall behavior** | The dep cannot be uninstalled while your module is installed. | The dep can be uninstalled anytime; your module keeps running. |
 | **Runtime guarantee** | Always present. | Must check with `ms.Resolve[T](id)` before use. |
-| **Manifest shape** | `{"id":"oauth-core"}` | `{"id":"video","optional":true}` |
+| **Manifest shape** | `{"id":"oauth-core","version":"^1.2.0"}` | `{"id":"video","version":"^1","optional":true}` |
+
+## Version constraints
+
+Both `DependsOn` and `Needs` accept a spec of the form `"id"` (any version) or `"id@constraint"`. Constraints use npm-style SemVer syntax, validated at registration time — an invalid constraint panics immediately.
+
+| Spec | Accepts |
+|---|---|
+| `"oauth-core"` | Any version |
+| `"oauth-core@^1.2.0"` | `>=1.2.0, <2.0.0` — compatible within major |
+| `"oauth-core@~1.2.0"` | `>=1.2.0, <1.3.0` — compatible within minor |
+| `"oauth-core@1.x"` | Any `1.x.x` |
+| `"oauth-core@>=1.2.0 <2.0.0"` | Explicit range |
+| `"oauth-core@1.2.3"` | Exact |
+
+The catalog enforces constraints at install time. Missing constraint = module author takes what they get; present constraint = catalog rejects incompatible versions.
 
 ## Required: `ms.DependsOn`
 
@@ -21,7 +36,7 @@ Declared once at module init. The module cannot start without the dep installed.
 ```go
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")   // required
+    ms.DependsOn("oauth-core@^1.2.0")   // required, any 1.2.x through 1.x
     ms.Start()
 }
 ```
@@ -35,9 +50,9 @@ Optional deps are declared at the **handler registration site** — co-located w
 ```go
 func main() {
     ms.Init(...)
-    ms.DependsOn("oauth-core")                                           // required
-    ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))   // optional
-    ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage", runCleanup))     // optional
+    ms.DependsOn("oauth-core@^1")                                             // required
+    ms.OnEvent("video.completed", ms.Needs("video@^1", onVideoCompleted))     // optional
+    ms.Cron("cleanup", "0 3 * * *", ms.Needs("storage@^2.1", runCleanup))     // optional
     ms.Start()
 }
 ```

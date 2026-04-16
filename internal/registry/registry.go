@@ -75,8 +75,13 @@ type Permission struct {
 // the dependent module works standalone and uses the dependency opportunistically
 // at runtime via Resolve[T]; Optional=false means the platform must install the
 // dependency before this module.
+//
+// Version is a SemVer constraint string (npm-style: "^1.2.0", "~1.2.0",
+// ">=1.2.0 <2.0.0", "1.x", exact "1.2.3", or "" for any). The platform
+// catalog enforces matching at install time.
 type Dependency struct {
 	ID       string `json:"id"`
+	Version  string `json:"version,omitempty"`
 	Optional bool   `json:"optional,omitempty"`
 }
 
@@ -144,28 +149,35 @@ func (r *Registry) Description() string {
 	return r.description
 }
 
-// AddDependency records a dependency on another module by ID. The optional flag
+// AddDependency records a dependency on another module. The Optional flag
 // distinguishes required (install-time) from optional (runtime Resolve) deps.
+// Version carries a SemVer constraint string (already validated by the
+// caller); empty means any version is acceptable.
 //
 // Dedup: if the same ID is declared both ways across the codebase, required
-// wins (stricter beats looser). A subsequent required call upgrades a prior
-// optional entry; a subsequent optional call never downgrades a required one.
-// Returns true if the dependency was newly added or upgraded from optional to
-// required, false if the call was a no-op.
-func (r *Registry) AddDependency(id string, optional bool) bool {
-	ValidateName("DependsOn", id)
+// wins (stricter beats looser). When a later required declaration upgrades a
+// prior optional entry, the later declaration's Version replaces the earlier
+// one (the required caller's constraint is authoritative). For same-type
+// redeclarations (both required or both optional), first-wins — including
+// for the Version field.
+//
+// Returns true if the dependency was newly added or upgraded from optional
+// to required, false if the call was a no-op.
+func (r *Registry) AddDependency(dep Dependency) bool {
+	ValidateName("DependsOn", dep.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.dependencies {
-		if existing.ID == id {
-			if existing.Optional && !optional {
+		if existing.ID == dep.ID {
+			if existing.Optional && !dep.Optional {
 				r.dependencies[i].Optional = false
+				r.dependencies[i].Version = dep.Version
 				return true
 			}
 			return false
 		}
 	}
-	r.dependencies = append(r.dependencies, Dependency{ID: id, Optional: optional})
+	r.dependencies = append(r.dependencies, dep)
 	return true
 }
 

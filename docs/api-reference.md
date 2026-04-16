@@ -26,14 +26,14 @@ ms.Start()
 | Function | Purpose |
 |---|---|
 | `ms.Describe(s string)` | Set the agent-discovery description. |
-| `ms.DependsOn(id string)` | Declare a REQUIRED dependency. Called once at module init. |
-| `ms.Needs(id string, h HandlerFunc) HandlerFunc` | Wrap a handler; declares the id as an OPTIONAL dependency. Returns handler unchanged. |
+| `ms.DependsOn(spec string)` | Declare a REQUIRED dependency. Spec is `"id"` or `"id@constraint"` (npm-style SemVer). Called once at module init. |
+| `ms.Needs(spec string, h HandlerFunc) HandlerFunc` | Wrap a handler; declares the spec as an OPTIONAL dependency. Same spec syntax. Returns handler unchanged. |
 | `ms.Resolve[T any](id) (T, bool)` | Typed runtime lookup for optional deps (stub in v1). |
 
 ```go
 ms.Describe("Video upload + HLS streaming")
-ms.DependsOn("oauth-core")                                          // required
-ms.OnEvent("video.completed", ms.Needs("video", onVideoCompleted))  // optional
+ms.DependsOn("oauth-core@^1.2.0")                                       // required, SemVer ^1.2.0
+ms.OnEvent("video.completed", ms.Needs("video@^1", onVideoCompleted))   // optional
 ```
 
 ## HTTP scopes
