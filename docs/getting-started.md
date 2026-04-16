@@ -28,7 +28,7 @@ Drop any file whose feature you aren't using. No edits to `main.go` required; th
 | `events.go` | `ms.OnEvent` + `ms.Emits` |
 | `schedule.go` | `ms.Cron` |
 | `tasks.go` | `ms.OnTask` (ECS task worker mode) |
-| `storage.go` | `ms.Storage` (S3 + presigned multipart) |
+| `storage.go` | `ms.Storage` (S3 origin + presigned multipart upload; R2 + Cloudflare Worker cache for reads) |
 | `cache.go` | `ms.Cache` (Redis) |
 | `meter.go` | `ms.Meter` (billing events) |
 | `module_db.go` | `ms.ModuleDB` / `ms.ModuleTx` (`mod_<id>` schema) |

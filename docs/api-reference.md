@@ -114,7 +114,7 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | Purpose |
 |---|---|
 | `ms.Cache(ctx)` | Per-app Redis client. |
-| `ms.Storage(ctx)` | Per-app S3 storage with presigned multipart. |
+| `ms.Storage(ctx)` | Per-app object storage. S3 as origin + presigned multipart upload; reads served from R2 via a Cloudflare Worker cache layer. |
 | `ms.Meter(ctx).Record(metric, value)` | Emit a billing event via async Lambda invoke. |
 
 ```go

@@ -110,7 +110,7 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | 用途 |
 |---|---|
 | `ms.Cache(ctx)` | Per-app Redis client。 |
-| `ms.Storage(ctx)` | Per-app S3 storage 配 presigned multipart。 |
+| `ms.Storage(ctx)` | Per-app object storage。S3 當 origin + presigned multipart upload;read 的時候走 R2 配 Cloudflare Worker 做 cache。 |
 | `ms.Meter(ctx).Record(metric, value)` | 用 async Lambda invoke emit billing event。 |
 
 ```go

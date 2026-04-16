@@ -50,7 +50,7 @@ Work prior to [#82] was shipped without a changelog. Grouped below by theme.
 ### Data
 - `ms.DB` / `ms.Tx` with per-app credentials ([#3])
 - `ms.ModuleDB` / `ms.ModuleTx` with per-module `mod_<id>` credentials ([#58])
-- Storage (S3 + presigned multipart upload) ([#11])
+- Storage (S3 origin + presigned multipart upload, R2 + Cloudflare Worker read cache) ([#11])
 - Cache ([#12])
 - Meter — `ms.Meter(ctx).Record(metric, value)` via async Lambda invoke ([#13])
 
