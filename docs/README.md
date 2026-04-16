@@ -10,6 +10,7 @@ Reference + conceptual guides for building MirrorStack modules in Go.
 
 ## Concepts
 
+- [Agent tools](./concepts/agent-tools.md) — MCP tools/resources vs skills vs subagents; why modules are agent-first.
 - [Dependencies](./concepts/dependencies.md) — required vs optional deps, auto-detect rule, extract-function caveat.
 - [Manifest](./concepts/manifest.md) — what's in the manifest endpoint, field by field.
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal and when to use each.

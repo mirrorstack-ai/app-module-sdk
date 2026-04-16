@@ -10,6 +10,7 @@
 
 ## 核心概念
 
+- [Agent tools](./concepts/agent-tools.md) — MCP tools/resources vs skills vs subagents;為什麼 module 是 agent-first。
 - [Dependencies](./concepts/dependencies.md) — required vs optional deps、auto-detect 規則、extract-function 的坑。
 - [Manifest](./concepts/manifest.md) — manifest endpoint 裡有什麼,每個 field 的用途。
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal 三種 scope 什麼時候用哪個。
