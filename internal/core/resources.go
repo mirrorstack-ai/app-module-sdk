@@ -1,4 +1,4 @@
-package mirrorstack
+package core
 
 import (
 	"context"
