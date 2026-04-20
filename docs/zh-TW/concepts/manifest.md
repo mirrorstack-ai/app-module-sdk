@@ -2,6 +2,12 @@
 
 > Language: [English](../../concepts/manifest.md) · **繁體中文**
 
+## 資料表命名規則
+
+模組的 `app_<id>` schema 內所有資料表名稱**必須**以模組 ID 加底線開頭：`<module_id>_<table_name>`。這是為了防止多個模組共用同一 schema 時發生名稱衝突。範例：模組 `media` 建立 `media_items`、`media_tags` — 不可以只叫 `items`。
+
+---
+
 每個 MirrorStack module 都會在 Internal scope 下提供 `GET /__mirrorstack/platform/manifest`。平台 catalog 在 deploy 時讀這個 endpoint,取得 module 的身分、routes、events、permissions、agent surface 等資訊。
 
 Manifest 是**向後相容、只追加的** wire contract — 新欄位採用 `omitempty`(或固定輸出空陣列),舊版 catalog consumer 照樣能解析。

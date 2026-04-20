@@ -2,6 +2,12 @@
 
 > Language: **English** · [繁體中文](../zh-TW/concepts/manifest.md)
 
+## Table naming convention
+
+Every table in a module's `app_<id>` schema **must** start with the module ID followed by an underscore: `<module_id>_<table_name>`. This prevents collisions when multiple modules share the same schema. Example: module `media` creates `media_items`, `media_tags` — never bare `items`.
+
+---
+
 Every MirrorStack module serves `GET /__mirrorstack/platform/manifest` under Internal scope. The platform catalog reads this at deploy time to discover the module's identity, routes, events, permissions, and agent surface.
 
 The manifest is an **additive wire contract** — new fields land with `omitempty` (or as always-present empty arrays) so old catalog consumers keep parsing correctly.
