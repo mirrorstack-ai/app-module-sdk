@@ -7,7 +7,7 @@ Go SDK for building modules on [MirrorStack](https://mirrorstack.ai), the Agenti
 
 Built with Go, chi router, and designed for AWS Lambda + local dev.
 
-**[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
+**[Docs](./docs/)** | **[Template module](./examples/template/)** | **[Changelog](./CHANGELOG.md)** | **[Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues)** | **[Good First Issues](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)** | **[Slack](https://join.slack.com/t/mirrorstackai/shared_invite/zt-3twmj15cm-EPfQscE71I~JJj0yHK6EZg)**
 
 > **Status:** Under active development — see the roadmap below.
 >
@@ -173,17 +173,19 @@ Three scopes control who can call your routes:
 
 ### Permissions
 
-Use `ms.RequirePermission` for fine-grained role control:
+Use `ms.RequirePermission` for fine-grained role control. Roles are typed values from the `roles` package — import aliased as `p` by convention:
 
 ```go
+import p "github.com/mirrorstack-ai/app-module-sdk/roles"
+
 ms.Platform(func(r chi.Router) {
-    r.With(ms.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", listItems)
-    r.With(ms.RequirePermission("media.upload", "admin", "member")).Post("/items", uploadItem)
-    r.With(ms.RequirePermission("media.delete", "admin")).Delete("/items/{id}", deleteItem)
+    r.With(ms.RequirePermission("media.view",   p.Admin(), p.Viewer())).Get("/items", listItems)
+    r.With(ms.RequirePermission("media.upload", p.Admin())).Post("/items", uploadItem)
+    r.With(ms.RequirePermission("media.moderate", p.Custom("moderator"))).Post("/flag", flagItem)
 })
 ```
 
-3 roles: `admin` | `member` | `viewer`
+Canonical roles: `p.Admin()`, `p.Viewer()`. Use `p.Custom("key")` for module-specific roles. Typed values prevent typos and enable IDE autocomplete.
 
 Permissions are auto-registered for manifest generation — the platform knows what each module requires.
 
@@ -241,7 +243,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 - [x] `ms.Init()` / `ms.New()` — module registration
 - [x] `ms.Start()` — runtime auto-detection (HTTP server / Lambda handler)
 - [x] `ms.Platform()` / `ms.Public()` / `ms.Internal()` — auth scopes with middleware
-- [x] `ms.RequirePermission()` — per-route permission with auto-registration for manifest
+- [x] `ms.RequirePermission()` — per-route permission with auto-registration for manifest (typed roles: `roles.Admin()`, `roles.Viewer()`, `roles.Custom("...")`)
 
 ### Database
 
@@ -256,7 +258,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 - [x] `ms.Storage(ctx)` — S3 presigned URLs + CDN (R2 cache) + multipart upload
 - [x] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
-- [ ] `ms.Meter(ctx)` — custom usage metrics for billing
+- [x] `ms.Meter(ctx)` — custom usage metrics for billing
 
 ### Events & scheduling
 
@@ -268,24 +270,42 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 - [x] `health` — health check
 - [x] `platform/manifest` — module identity + capabilities
-- [ ] `platform/meter` — custom business metrics
+- [x] `mcp/tools/{list,call}` and `mcp/resources/{list,read}` — agent tool and resource surface
 - [x] `platform/lifecycle/app/install` and `platform/lifecycle/module/install` — fresh install (per-app schema or per-module shared schema)
 - [x] `platform/lifecycle/app/upgrade` and `platform/lifecycle/module/upgrade` — upgrade between versions
 - [x] `platform/lifecycle/app/downgrade` and `platform/lifecycle/module/downgrade` — rollback between versions
 - [x] `platform/lifecycle/app/uninstall` and `platform/lifecycle/module/uninstall` — soft-delete removal
 
-### MCP integration
+### Agent orchestration
 
-- [ ] `ms.MCPTool()` — register MCP tools for AI agents
-- [ ] `ms.MCPResource()` — register MCP resources
-- [ ] `/__mirrorstack/mcp/` — MCP protocol routes
+- [x] `ms.Describe()` — module description for agent discovery
+- [x] `ms.DependsOn()` — dependency declaration with auto-detected required/optional
+- [x] `ms.Resolve[T]()` — typed runtime lookup for optional deps (stub pending cross-module wiring)
+- [x] `ms.MCPTool()` — agent-callable tool with JSON Schema derivation
+- [x] `ms.MCPResource()` — agent-readable resource
+- [x] `/__mirrorstack/mcp/` — MCP protocol routes (tools/resources, list/call/read)
 
 ## SDK structure
 
 ```
 app-module-sdk/
-  mirrorstack.go               Config, Module, Init/Start, DB/Tx, scopes, convenience API
-  mirrorstack_test.go          All root tests
+  mirrorstack.go               Facade: type aliases + wrapper functions for core package
+  internal/core/
+    module.go                  *Module type, lifecycle, route registration
+    db.go                      DB/ModuleDB/Tx/ModuleTx implementation
+    describe.go                Describe, dependency declaration + registry
+    mcp.go                     MCPTool, MCPResource implementation
+    cron.go                    Cron job registration + scheduling
+    event.go                   OnEvent, Emits event wiring
+    task.go                    OnTask, RunTask for SQS-backed background tasks
+    resources.go               System routes (manifest, health, lifecycle)
+    [test files]               Unit + integration tests
+  internal/
+    httputil/respond.go        JSON response helper
+    runtime/
+      detect.go                Lambda detection
+      lambda.go                Lambda handler, credential injection
+    [other internal pkgs]      Registry, migration, IDs, task env, etc.
   auth/
     context.go                 WithUserID/WithAppID/WithAppRole, role constants
     middleware.go              PlatformAuth, PublicAuth, InternalAuth
@@ -296,13 +316,7 @@ app-module-sdk/
     pool_cache.go              PoolCache (LRU), AcquireScoped
     scope.go                   applyScope/resetScope (batch SET/RESET)
     tx.go                      Transaction support
-    db_test.go                 Unit tests
-    db_integration_test.go     Integration tests (build tag: integration)
-  internal/
-    httputil/respond.go        JSON response helper
-    runtime/
-      detect.go                Lambda detection
-      lambda.go                Lambda handler, credential injection
+    [test files]               Unit + integration tests
   system/
     health.go                  Health endpoint
   cache/
@@ -312,8 +326,11 @@ app-module-sdk/
     credential.go              STS credential, context helpers
     storage.go                 Client with PresignPut/Get, URL (CDN)
     multipart.go               Multipart upload for large files
-  meter/                       Custom usage metrics (planned)
-  mcp/                         MCP tool/resource registration (planned)
+  meter/
+    meter.go                   Custom usage metrics recording
+  mcp/                         (unused — MCP impl is in internal/core/mcp.go)
+  roles/
+    roles.go                   Role types for permission declarations
 ```
 
 ## Module structure

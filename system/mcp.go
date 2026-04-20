@@ -15,17 +15,32 @@ import (
 // per module. The list mirrors ManifestPayload.MCP.Tools — either suffices.
 func MCPToolsListHandler(reg *registry.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tools := reg.MCPTools()
-		// Strip Handler (not JSON-serializable, not wire-visible).
-		out := make([]MCPToolEntry, len(tools))
-		for i, t := range tools {
-			out[i] = MCPToolEntry{
-				Name: t.Name, Description: t.Description,
-				InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
-			}
-		}
-		httputil.JSON(w, http.StatusOK, mcpToolsListResponse{Tools: out})
+		httputil.JSON(w, http.StatusOK, mcpToolsListResponse{Tools: toolEntries(reg.MCPTools())})
 	}
+}
+
+// toolEntries projects registry decls into wire entries, stripping Handler
+// (not JSON-serializable). Shared by list handlers and buildManifestMCP.
+func toolEntries(decls []registry.MCPToolDecl) []MCPToolEntry {
+	out := make([]MCPToolEntry, len(decls))
+	for i, t := range decls {
+		out[i] = MCPToolEntry{
+			Name: t.Name, Description: t.Description,
+			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
+		}
+	}
+	return out
+}
+
+// resourceEntries is the resource counterpart to toolEntries.
+func resourceEntries(decls []registry.MCPResourceDecl) []MCPResourceEntry {
+	out := make([]MCPResourceEntry, len(decls))
+	for i, rc := range decls {
+		out[i] = MCPResourceEntry{
+			Name: rc.Name, Description: rc.Description, Schema: rc.Schema,
+		}
+	}
+	return out
 }
 
 // MCPToolsCallHandler invokes a registered tool by name with the given args.
@@ -72,14 +87,7 @@ func MCPToolsCallHandler(reg *registry.Registry) http.HandlerFunc {
 // MCPResourcesListHandler returns the handler for GET /__mirrorstack/mcp/resources/list.
 func MCPResourcesListHandler(reg *registry.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		resources := reg.MCPResources()
-		out := make([]MCPResourceEntry, len(resources))
-		for i, rc := range resources {
-			out[i] = MCPResourceEntry{
-				Name: rc.Name, Description: rc.Description, Schema: rc.Schema,
-			}
-		}
-		httputil.JSON(w, http.StatusOK, mcpResourcesListResponse{Resources: out})
+		httputil.JSON(w, http.StatusOK, mcpResourcesListResponse{Resources: resourceEntries(reg.MCPResources())})
 	}
 }
 

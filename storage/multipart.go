@@ -134,4 +134,3 @@ func (u *MultipartUpload) Abort(ctx context.Context) error {
 	}
 	return nil
 }
-

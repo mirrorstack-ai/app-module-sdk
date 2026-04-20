@@ -1,4 +1,4 @@
-package mirrorstack
+package core
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	p "github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
@@ -242,7 +243,7 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
 	})
@@ -258,7 +259,7 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.delete", "admin")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.delete", p.Admin())).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("deleted"))
 		})
 	})
@@ -279,11 +280,11 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 	m2, _ := New(Config{ID: "video", Name: "Video"})
 
 	m1.Platform(func(r chi.Router) {
-		r.With(m1.RequirePermission("media.upload", "admin", "member")).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
-		r.With(m1.RequirePermission("media.view", "admin", "member", "viewer")).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.upload", p.Admin(), p.Custom("member"))).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
 	})
 	m2.Platform(func(r chi.Router) {
-		r.With(m2.RequirePermission("video.transcode", "admin")).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m2.RequirePermission("video.transcode", p.Admin())).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
 	})
 
 	rec := doRequestWithSecret(t, m1.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
@@ -656,7 +657,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Platform":          func() { Platform(func(r chi.Router) {}) },
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
-		"RequirePermission": func() { RequirePermission("media.view", "admin") },
+		"RequirePermission": func() { RequirePermission("media.view", p.Admin()) },
 		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
 		"Emits":             func() { Emits("created") },
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
@@ -667,6 +668,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 		"Describe":          func() { Describe("a module") },
 		"DependsOn":         func() { DependsOn("other") },
+		"Needs":             func() { _ = Needs("other", func(w http.ResponseWriter, r *http.Request) {}) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -703,223 +705,5 @@ func TestModule_ModuleSchema(t *testing.T) {
 				t.Errorf("moduleSchema() = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-// ---- Describe / DependsOn / Resolve ----
-
-func TestIsRootCallerName(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		fn   string
-		want bool
-	}{
-		{"main.main", true},
-		{"main.init", true},
-		{"main.init.0", true},
-		{"main.init.12", true},
-		{"example.com/pkg.init", true},
-		{"example.com/pkg.init.5", true},
-		{"main.helperFunction", false},
-		{"pkg.SomeFunc", false},
-		{"pkg.initSomething", false}, // not an init — just starts with "init"
-		{"pkg.init.notNumber", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := isRootCallerName(tc.fn); got != tc.want {
-			t.Errorf("isRootCallerName(%q) = %v, want %v", tc.fn, got, tc.want)
-		}
-	}
-}
-
-func TestDescribe_PopulatesRegistry(t *testing.T) {
-	t.Parallel()
-
-	m, _ := New(Config{ID: "demo"})
-	m.Describe("A demo module")
-	if got := m.registry.Description(); got != "A demo module" {
-		t.Errorf("Description = %q, want %q", got, "A demo module")
-	}
-}
-
-func TestDependsOn_FromHelperIsOptional(t *testing.T) {
-	t.Parallel()
-
-	m, _ := New(Config{ID: "demo"})
-	m.DependsOn("other") // called from test function — NOT main.main or init
-	deps := m.registry.Dependencies()
-	if len(deps) != 1 {
-		t.Fatalf("len(Dependencies) = %d, want 1", len(deps))
-	}
-	if deps[0].ID != "other" || !deps[0].Optional {
-		t.Errorf("Dependencies[0] = %+v, want {ID:other, Optional:true}", deps[0])
-	}
-}
-
-func TestDependsOn_CallerDetectionSkipsSDKFrames(t *testing.T) {
-	t.Parallel()
-
-	// Verify both code paths (direct receiver + convenience wrapper) resolve
-	// the caller to the test function, not an SDK frame.
-	resetDefault(t)
-	if err := Init(Config{ID: "demo"}); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	Describe("desc")
-	DependsOn("dep-via-wrapper")
-	defaultModule.DependsOn("dep-via-method")
-
-	deps := defaultModule.registry.Dependencies()
-	if len(deps) != 2 {
-		t.Fatalf("len(Dependencies) = %d, want 2", len(deps))
-	}
-	for _, d := range deps {
-		if !d.Optional {
-			t.Errorf("dep %q: Optional = false, want true (test caller is not root)", d.ID)
-		}
-	}
-}
-
-func TestResolve_UnregisteredReturnsZeroAndFalse(t *testing.T) {
-	t.Parallel()
-
-	type fakeClient struct{ X int }
-	got, ok := Resolve[fakeClient]("not-registered")
-	if ok {
-		t.Error("Resolve for unregistered id returned ok=true, want false")
-	}
-	if got.X != 0 {
-		t.Errorf("Resolve returned non-zero value %+v, want zero", got)
-	}
-}
-
-// ---- MCP integration ----
-
-type greetArgs struct {
-	Name string `json:"name"`
-}
-
-type greetResult struct {
-	Message string `json:"message"`
-}
-
-func TestMCPTool_RegistersAndInvokesViaRoute(t *testing.T) {
-	// No t.Parallel: newTestModuleWithSecret calls t.Setenv, which is incompatible with parallel.
-	resetDefault(t)
-	m := newTestModuleWithSecret(t, "demo")
-	defaultModule = m
-
-	MCPTool("greet", "Say hi", func(ctx context.Context, a greetArgs) (greetResult, error) {
-		return greetResult{Message: "hi " + a.Name}, nil
-	})
-
-	// Call via the mounted route.
-	body := strings.NewReader(`{"name":"greet","args":{"name":"world"}}`)
-	req := httptest.NewRequest("POST", "/__mirrorstack/mcp/tools/call", body)
-	req.Header.Set("X-MS-Internal-Secret", "secret")
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("tools/call status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Result greetResult `json:"result"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Result.Message != "hi world" {
-		t.Errorf("result.message = %q, want %q", resp.Result.Message, "hi world")
-	}
-}
-
-func TestMCPTool_ToolsListRequiresInternalAuth(t *testing.T) {
-	resetDefault(t)
-	m := newTestModuleWithSecret(t, "demo")
-	defaultModule = m
-
-	MCPTool("greet", "Say hi", func(ctx context.Context, a greetArgs) (greetResult, error) {
-		return greetResult{Message: "hi"}, nil
-	})
-
-	// No secret header.
-	req := httptest.NewRequest("GET", "/__mirrorstack/mcp/tools/list", nil)
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
-	if rec.Code == 200 {
-		t.Errorf("tools/list without auth returned 200, want 401/403")
-	}
-}
-
-func TestMCPTool_SchemasDerivedFromStructs(t *testing.T) {
-	resetDefault(t)
-	m := newTestModuleWithSecret(t, "demo")
-	defaultModule = m
-
-	MCPTool("greet", "Say hi", func(ctx context.Context, a greetArgs) (greetResult, error) {
-		return greetResult{}, nil
-	})
-
-	tool, ok := m.registry.MCPTool("greet")
-	if !ok {
-		t.Fatal("tool not registered")
-	}
-	// The JSON Schema must describe the args struct's fields.
-	if !strings.Contains(string(tool.InputSchema), `"name"`) {
-		t.Errorf("InputSchema missing 'name' field: %s", tool.InputSchema)
-	}
-	if !strings.Contains(string(tool.OutputSchema), `"message"`) {
-		t.Errorf("OutputSchema missing 'message' field: %s", tool.OutputSchema)
-	}
-}
-
-func TestMCPResource_RegistersAndReadsViaRoute(t *testing.T) {
-	resetDefault(t)
-	m := newTestModuleWithSecret(t, "demo")
-	defaultModule = m
-
-	type statusOut struct {
-		Healthy bool `json:"healthy"`
-	}
-	MCPResource("status", "Module status", func(ctx context.Context) (statusOut, error) {
-		return statusOut{Healthy: true}, nil
-	})
-
-	req := httptest.NewRequest("GET", "/__mirrorstack/mcp/resources/read?name=status", nil)
-	req.Header.Set("X-MS-Internal-Secret", "secret")
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("resources/read status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"healthy":true`) {
-		t.Errorf("body = %s, want content with healthy:true", rec.Body.String())
-	}
-}
-
-func TestMCPTool_ManifestIncludesMCPSurface(t *testing.T) {
-	resetDefault(t)
-	m := newTestModuleWithSecret(t, "demo")
-	defaultModule = m
-
-	MCPTool("greet", "Say hi", func(ctx context.Context, a greetArgs) (greetResult, error) {
-		return greetResult{}, nil
-	})
-
-	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
-	req.Header.Set("X-MS-Internal-Secret", "secret")
-	rec := httptest.NewRecorder()
-	m.Router().ServeHTTP(rec, req)
-
-	var payload system.ManifestPayload
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(payload.MCP.Tools) != 1 || payload.MCP.Tools[0].Name != "greet" {
-		t.Errorf("manifest.mcp.tools = %+v, want [greet]", payload.MCP.Tools)
 	}
 }
