@@ -7,6 +7,13 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-05-04
+
+First tagged release. Establishes the public Go module path
+`github.com/mirrorstack-ai/app-module-sdk` so downstream modules scaffolded
+by the CLI can `require` a real version instead of leaning on a `replace`
+directive into a sibling checkout.
+
 ### Added
 - **Typed role values** for `ms.RequirePermission` via a new `roles` package — `roles.Admin()`, `roles.Viewer()`, `roles.Custom(key)`. Prevents typos, enables IDE autocomplete, and reserves space for future i18n metadata.
 - **Agent orchestration primitives** ([#82], [#84])
