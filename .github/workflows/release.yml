@@ -1,0 +1,74 @@
+name: Release
+
+# Mirrors the org's web-ui-kit / api-client-shared release flow, adapted for
+# Go: a PR labeled `release` cuts a new git tag + GitHub Release on merge.
+# The Go module proxy picks the tag up automatically the first time a
+# downstream `go get` resolves the module — no publish step needed here.
+#
+# To cut a release:
+#   1. Bump the VERSION file in your PR
+#   2. Move the CHANGELOG `[Unreleased]` section under `[vX.Y.Z] - DATE`
+#   3. Add the `release` label
+#   4. Merge — the workflow tags + publishes a GitHub Release
+#
+# Pre-1.0 the convention is patch-only bumps even for new SDK surface (per
+# org policy on 0.x packages).
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read VERSION
+        id: version
+        run: |
+          VERSION="$(cat VERSION | tr -d '[:space:]')"
+          if [[ -z "$VERSION" ]]; then
+            echo "VERSION file is empty" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Determine if prerelease
+        id: pre
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify tag does not already exist
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists — bump VERSION before merging." >&2
+            exit 1
+          fi
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --prerelease=${{ steps.pre.outputs.prerelease }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
