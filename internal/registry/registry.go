@@ -123,6 +123,7 @@ type Registry struct {
 	permissions  []Permission
 	description  string
 	dependencies []Dependency
+	exposures    []Exposure
 	mcpTools     []MCPToolDecl
 	mcpResources []MCPResourceDecl
 }

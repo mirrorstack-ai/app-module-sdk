@@ -19,6 +19,7 @@ type ManifestPayload struct {
 	Defaults     ManifestDefaults                    `json:"defaults"`
 	Description  string                              `json:"description,omitempty"`
 	Dependencies []registry.Dependency               `json:"dependencies"`
+	Exposures    []registry.Exposure                 `json:"exposures"`
 	Migration    MigrationVersions                   `json:"migration"`
 	Versions     map[string]MigrationVersions        `json:"versions"`
 	Routes       map[registry.Scope][]registry.Route `json:"routes"`
@@ -108,6 +109,7 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]Mig
 			Defaults:     ManifestDefaults{Name: name, Icon: icon},
 			Description:  reg.Description(),
 			Dependencies: reg.Dependencies(),
+			Exposures:    reg.Exposures(),
 			Migration:    MigrationVersions{App: appVersion, Module: moduleVersion},
 			Versions:     versions,
 			Routes:       reg.Routes(),
