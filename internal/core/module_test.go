@@ -116,11 +116,11 @@ func TestNew_EmptyID(t *testing.T) {
 
 func TestNew_RejectsBadID(t *testing.T) {
 	bad := []string{
-		"Media",  // uppercase
-		"media!", // special char
-		"1media", // starts with digit
-		"_media", // starts with underscore
-		"../etc", // path traversal
+		"Media",                                 // uppercase
+		"media!",                                // special char
+		"1media",                                // starts with digit
+		"_media",                                // starts with underscore
+		"../etc",                                // path traversal
 		"abcdefghijklmnopqrstuvwxyz0123456789a", // 37 chars — one over the 36-char ceiling
 	}
 	for _, id := range bad {
@@ -147,6 +147,52 @@ func TestNew_AcceptsValidID(t *testing.T) {
 		if err != nil {
 			t.Errorf("unexpected error for ID %q: %v", id, err)
 		}
+	}
+}
+
+func TestNew_AcceptsEmptySlug(t *testing.T) {
+	t.Parallel()
+	if _, err := New(Config{ID: "media"}); err != nil {
+		t.Errorf("expected empty Slug to be accepted in dev mode, got %v", err)
+	}
+}
+
+func TestNew_AcceptsValidSlug(t *testing.T) {
+	t.Parallel()
+	good := []string{
+		"oauth",
+		"oauth-v2",
+		"a",
+		"abcdefghijklmnop", // 16-char boundary
+		"x1",
+		"my-app-store",
+	}
+	for _, slug := range good {
+		t.Run(slug, func(t *testing.T) {
+			if _, err := New(Config{ID: "media", Slug: slug}); err != nil {
+				t.Errorf("unexpected error for Slug %q: %v", slug, err)
+			}
+		})
+	}
+}
+
+func TestNew_RejectsBadSlug(t *testing.T) {
+	t.Parallel()
+	bad := []string{
+		"OAuth",             // uppercase
+		"oauth_v2",          // underscore (slugs are kebab-case)
+		"-oauth",            // starts with hyphen
+		"1oauth",            // starts with digit
+		"oauth.v2",          // dot
+		"oauth v2",          // space
+		"abcdefghijklmnopq", // 17 chars — one over
+	}
+	for _, slug := range bad {
+		t.Run(slug, func(t *testing.T) {
+			if _, err := New(Config{ID: "media", Slug: slug}); err == nil {
+				t.Errorf("expected error for Slug %q", slug)
+			}
+		})
 	}
 }
 
@@ -677,7 +723,6 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 		"Describe":          func() { Describe("a module") },
 		"DependsOn":         func() { DependsOn("other") },
-		"Needs":             func() { _ = Needs("other", func(w http.ResponseWriter, r *http.Request) {}) },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
@@ -692,13 +737,12 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 	}
 }
 
-func TestModule_ModuleSchema(t *testing.T) {
+func TestModule_ModuleSchemaFor_DevFallback(t *testing.T) {
 	t.Parallel()
 
-	// Pin the schema-naming convention: mod_<id>. The platform's per-module
-	// DB role provisioning depends on this exact format being predictable
-	// from Config.ID alone — a future change here would require lockstep
-	// updates to platform-side role-creation scripts.
+	// Pin the dev/legacy fallback convention: mod_<id>. The platform's
+	// per-module DB role provisioning AND the pre-Phase-2 backfill of
+	// module_install.prefix both depend on this exact shape.
 	cases := []struct {
 		id   string
 		want string
@@ -710,9 +754,22 @@ func TestModule_ModuleSchema(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
 			m, _ := New(Config{ID: tc.id})
-			if got := m.moduleSchema(); got != tc.want {
-				t.Errorf("moduleSchema() = %q, want %q", got, tc.want)
+			if got := m.moduleSchemaFor(context.Background()); got != tc.want {
+				t.Errorf("moduleSchemaFor(empty ctx) = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestModule_ModuleSchemaFor_PrefixFromContext(t *testing.T) {
+	t.Parallel()
+
+	// When the platform's invoke shim has resolved the live prefix and
+	// injected it via db.WithPrefix, moduleSchemaFor returns the injected
+	// value verbatim. This is the production path.
+	m, _ := New(Config{ID: "oauth"})
+	ctx := db.WithPrefix(context.Background(), "anna_oauth_")
+	if got := m.moduleSchemaFor(ctx); got != "anna_oauth_" {
+		t.Errorf("moduleSchemaFor(ctx with prefix) = %q, want %q", got, "anna_oauth_")
 	}
 }

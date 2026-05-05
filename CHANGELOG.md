@@ -7,6 +7,39 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-05-06
+
+Phase 2 — module identity, prefix-aware schema resolution, and the cross-module data-routing contract. **Trust model: app owner is the trust root** for cross-module reads. The contributor declares nothing about who can read; the consumer declares what it wants from each dep; the catalog surfaces the pairing to the app owner at install time. Read-only by design — `GRANT SELECT` only, never write. Cross-module *writes* go through events or internal HTTP.
+
+### Added
+- **`Config.Slug`** — catalog-owned kebab-case handle (e.g. `"oauth"`). `^[a-z][a-z0-9-]{0,15}$`, max 16 chars (Postgres NAMEDATALEN budget). Optional in dev; required for publishing.
+- **`ms.Need`** — opaque builder passed to DependsOn / OptionalDependOn callbacks:
+  - `n.Table(name)` — request a SELECT against the dep's `mod_<id>.<name>` relation
+  - `n.Event(name)` — subscribe to an event the dep emits
+- **`ms.OptionalDependOn(spec, ...func(*Need)) OnEventOption`** — declare an optional dep co-located with an event handler:
+  ```go
+  ms.OnEvent("@anna/billing/payment", onPayment,
+      ms.OptionalDependOn("@anna/billing@^1", func(n *ms.Need) {
+          n.Table("invoices")
+      }))
+  ```
+  If the dep isn't installed, the event source doesn't exist, the handler never fires — missing-dep failures are harmless.
+- **`db.WithPrefix(ctx, prefix)` / `db.PrefixFrom(ctx)`** — context plumbing the platform's Lambda invoke shim uses to inject the live storage prefix from `app_<app_id>.module_install.prefix` per request. Distinct from `db.WithSchema` (search_path target) — prefix is the leading segment baked into per-app table names (`<username>_<slug>_<table>`).
+- **`Dependency.Tables []string` + `Dependency.Events []string`** on the manifest. Both `omitempty`.
+- **Manifest payload addition**: `slug` (`omitempty`).
+
+### Changed
+- **`ms.DependsOn(spec)` is now variadic** — second argument is `...func(*ms.Need)`. Existing one-arg calls still work unchanged.
+- **Dependency IDs accept `@<owner>/<name>` shape** in addition to bare module IDs (`oauth-core`). Existing bare IDs continue to validate. `parseDepSpec` now splits at the **last** `@` so `@<owner>/<name>@<version>` parses correctly.
+- **`ms.OnEvent` is now variadic** — third argument is `...OnEventOption`. Existing two-arg calls work unchanged. The first option-producer is `ms.OptionalDependOn`.
+- `Module.ModuleDB` / `Module.ModuleTx` resolve their schema via a new `moduleSchemaFor(ctx)` helper. Production reads the prefix the platform injected via `db.WithPrefix`; dev/legacy falls back to `mod_<Config.ID>`. Compiled SQL stays vanilla.
+
+### Removed
+- **`ms.Needs(spec, handler)`** — removed in favor of `ms.OptionalDependOn` returning an `OnEventOption` for variadic `ms.OnEvent`. Migration: `ms.OnEvent("e", ms.Needs("dep", h))` → `ms.OnEvent("e", h, ms.OptionalDependOn("dep"))`. The new shape lets the same callback (`func(n *ms.Need)`) describe both required and optional deps uniformly.
+
+### Design notes
+There is no `ms.ExposeTable`-style contributor-side declaration in this release. The catalog can introspect `pg_class` at publish time to know what relations exist in the contributor's `mod_<id>` schema; consumer-side `n.Table("name")` requests are validated against that introspection at install time, then approved or rejected by the app owner. This avoids the publisher-allowlist trap (a contributor can't pre-list every future third-party consumer) and keeps the surface small.
+
 ## [v0.1.1] - 2026-05-05
 
 ### Changed

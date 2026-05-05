@@ -99,12 +99,28 @@ func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
 // Describe sets the default module's human-readable description.
 func Describe(s string) { core.Describe(s) }
 
-// DependsOn declares a REQUIRED dependency on the default module. See the
-// core package for the full spec syntax (id or id@constraint).
-func DependsOn(spec string) { core.DependsOn(spec) }
+// Need is the configuration handle passed to DependsOn /
+// OptionalDependOn callbacks. Use n.Table(name) to declare a SELECT
+// request, n.Event(name) to declare an event subscription.
+type Need = core.Need
 
-// Needs declares an OPTIONAL dependency and returns the handler unchanged.
-func Needs(spec string, h http.HandlerFunc) http.HandlerFunc { return core.Needs(spec, h) }
+// OnEventOption configures an OnEvent registration.
+type OnEventOption = core.OnEventOption
+
+// DependsOn declares a REQUIRED dependency on the default module. The
+// optional configure callback names what the consumer wants from the
+// dep — relations (n.Table) and events (n.Event). See the core package
+// for the full spec syntax (id or id@constraint).
+func DependsOn(spec string, configure ...func(*Need)) {
+	core.DependsOn(spec, configure...)
+}
+
+// OptionalDependOn declares an OPTIONAL dependency and returns an
+// OnEventOption to pass into ms.OnEvent. The dep is scoped to the
+// handler — if the dep isn't installed, the event never fires.
+func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
+	return core.OptionalDependOn(spec, configure...)
+}
 
 // Resolve looks up a typed client registered by another module. v1 stub
 // always returns (zero, false).
@@ -126,7 +142,15 @@ func MCPResource[Out any](name, description string, handler func(ctx context.Con
 // --- Events / crons / tasks ---
 
 // OnEvent subscribes the default module to an event from another module.
-func OnEvent(name string, handler http.HandlerFunc) { core.OnEvent(name, handler) }
+// Optional cross-module deps can be co-located via OptionalDependOn:
+//
+//	ms.OnEvent("@anna/billing/payment", onPayment,
+//	    ms.OptionalDependOn("@anna/billing@^1", func(n *ms.Need) {
+//	        n.Table("invoices")
+//	    }))
+func OnEvent(name string, handler http.HandlerFunc, opts ...OnEventOption) {
+	core.OnEvent(name, handler, opts...)
+}
 
 // Emits declares that the default module emits the named event.
 func Emits(name string) { core.Emits(name) }

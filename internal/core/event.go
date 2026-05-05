@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
 // eventPathPrefix mounts under the reserved /__mirrorstack/ namespace so
@@ -12,22 +14,51 @@ import (
 // /__mirrorstack/health and /__mirrorstack/platform/*.
 const eventPathPrefix = "/__mirrorstack/events/"
 
-// OnEvent registers handler for events of the given name from another module.
-// Mounts the handler on this module's Internal scope at
-// /__mirrorstack/events/{name} and records the subscription in the manifest's
-// events.subscribes map.
+// OnEventOption configures an OnEvent registration. Today its only
+// producer is ms.OptionalDependOn, which co-locates an optional
+// cross-module dep declaration with the event handler that uses it.
+type OnEventOption func(*onEventOptions)
+
+// onEventOptions accumulates state from the variadic options applied to
+// an OnEvent call. Kept unexported so the option-application is fully
+// owned by this package.
+type onEventOptions struct {
+	optionalDeps []registry.Dependency
+}
+
+// OnEvent registers handler for events of the given name from another
+// module. Mounts on this module's Internal scope at
+// /__mirrorstack/events/{name} and records the subscription in the
+// manifest's events.subscribes map.
+//
+// Optional dependency declarations co-locate via the variadic opts:
+//
+//	ms.OnEvent("@anna/billing/payment", onPayment,
+//	    ms.OptionalDependOn("@anna/billing@^1", func(n *ms.Need) {
+//	        n.Table("invoices")
+//	    }))
+//
+// Each OptionalDependOn-produced option appends an optional dep to the
+// manifest. The dep is "scoped" to this handler in spirit — if the dep
+// isn't installed, the event never fires and the handler never runs, so
+// missing-dep failures are harmless.
 //
 // The platform guarantees AT-LEAST-ONCE delivery — handlers must be
-// idempotent or implement their own deduplication. Do not rely on
-// r.RemoteAddr to identify the sender; in Lambda + API Gateway it is
-// always the AGW IP, not the original event source.
+// idempotent or implement their own deduplication.
 //
 // Names must not contain path separators (/, \), whitespace, dot-segments
 // (..), or null bytes. Call from startup code (init / main), not from
-// inside a request handler.
-//
-// Panics on duplicate registration with the same name.
-func (m *Module) OnEvent(name string, handler http.HandlerFunc) {
+// inside a request handler. Panics on duplicate registration.
+func (m *Module) OnEvent(name string, handler http.HandlerFunc, opts ...OnEventOption) {
+	o := &onEventOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(o)
+		}
+	}
+	for _, dep := range o.optionalDeps {
+		m.registry.AddDependency(dep)
+	}
 	path := eventPathPrefix + name
 	if !m.registry.AddSubscribe(name, path) {
 		panic("mirrorstack: OnEvent(" + name + ") registered twice")
@@ -53,8 +84,8 @@ func (m *Module) Emits(name string) {
 
 // OnEvent registers an event handler on the default Module created by Init().
 // Panics before Init — matches Platform/Public/Internal.
-func OnEvent(name string, handler http.HandlerFunc) {
-	mustDefault("OnEvent").OnEvent(name, handler)
+func OnEvent(name string, handler http.HandlerFunc, opts ...OnEventOption) {
+	mustDefault("OnEvent").OnEvent(name, handler, opts...)
 }
 
 // Emits declares an emitted event on the default Module. Panics before Init.

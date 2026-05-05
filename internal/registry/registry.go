@@ -71,18 +71,28 @@ type Permission struct {
 	Roles []string `json:"roles"`
 }
 
-// Dependency is a declared dependency on another module. Optional=true means
-// the dependent module works standalone and uses the dependency opportunistically
-// at runtime via Resolve[T]; Optional=false means the platform must install the
-// dependency before this module.
+// Dependency is a declared dependency on another module. Optional=true
+// means the consumer integrates with the dep opportunistically (typically
+// co-located with an event subscription via ms.OptionalDependOn);
+// Optional=false means the platform must install the dep before this
+// module.
 //
 // Version is a SemVer constraint string (npm-style: "^1.2.0", "~1.2.0",
 // ">=1.2.0 <2.0.0", "1.x", exact "1.2.3", or "" for any). The platform
 // catalog enforces matching at install time.
+//
+// Tables and Events list relations and event names the consumer wants
+// from the dep's `mod_<id>` schema. The catalog validates each name
+// against the dep's manifest at install time, then issues the
+// corresponding GRANT SELECT (Tables) and event-routing rules (Events)
+// after app-owner approval. The consumer's binary doesn't need the
+// dep's manifest to compile — names are strings.
 type Dependency struct {
-	ID       string `json:"id"`
-	Version  string `json:"version,omitempty"`
-	Optional bool   `json:"optional,omitempty"`
+	ID       string   `json:"id"`
+	Version  string   `json:"version,omitempty"`
+	Optional bool     `json:"optional,omitempty"`
+	Tables   []string `json:"tables,omitempty"`
+	Events   []string `json:"events,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -162,34 +172,76 @@ func (r *Registry) Description() string {
 // for the Version field.
 //
 // Returns true if the dependency was newly added or upgraded from optional
-// to required, false if the call was a no-op.
+// to required, false if the call was a no-op (in either case Tables and
+// Events from dep merge into the existing entry as a set union — repeated
+// declarations only add, never remove).
 func (r *Registry) AddDependency(dep Dependency) bool {
-	ValidateName("DependsOn", dep.ID)
+	ValidateDepID(dep.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.dependencies {
-		if existing.ID == dep.ID {
-			if existing.Optional && !dep.Optional {
-				r.dependencies[i].Optional = false
-				r.dependencies[i].Version = dep.Version
-				return true
-			}
-			return false
+		if existing.ID != dep.ID {
+			continue
 		}
+		r.dependencies[i].Tables = mergeStrings(existing.Tables, dep.Tables)
+		r.dependencies[i].Events = mergeStrings(existing.Events, dep.Events)
+		if existing.Optional && !dep.Optional {
+			r.dependencies[i].Optional = false
+			r.dependencies[i].Version = dep.Version
+			return true
+		}
+		return false
 	}
+	dep.Tables = slices.Clone(dep.Tables)
+	dep.Events = slices.Clone(dep.Events)
 	r.dependencies = append(r.dependencies, dep)
 	return true
 }
 
-// Dependencies returns a non-nil copy of all declared dependencies in
-// registration order.
+// mergeStrings returns the set union of two string slices, preserving the
+// order: existing entries keep their position, new entries append in
+// declaration order. The output is a fresh slice so callers can mutate it
+// without aliasing into either input.
+func mergeStrings(existing, additions []string) []string {
+	if len(additions) == 0 {
+		return slices.Clone(existing)
+	}
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	out := slices.Clone(existing)
+	for _, s := range existing {
+		seen[s] = struct{}{}
+	}
+	for _, s := range additions {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// Dependencies returns a non-nil deep copy of all declared dependencies in
+// registration order. Tables and Events on each entry are cloned —
+// slices.Clone is shallow, and a shared slice would let callers mutate
+// the registry through the returned clone.
 func (r *Registry) Dependencies() []Dependency {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.dependencies == nil {
 		return []Dependency{}
 	}
-	return slices.Clone(r.dependencies)
+	out := make([]Dependency, len(r.dependencies))
+	for i, d := range r.dependencies {
+		out[i] = Dependency{
+			ID:       d.ID,
+			Version:  d.Version,
+			Optional: d.Optional,
+			Tables:   slices.Clone(d.Tables),
+			Events:   slices.Clone(d.Events),
+		}
+	}
+	return out
 }
 
 // AddRoute records a route under the given scope. First-wins: duplicate
