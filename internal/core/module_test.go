@@ -116,12 +116,12 @@ func TestNew_EmptyID(t *testing.T) {
 
 func TestNew_RejectsBadID(t *testing.T) {
 	bad := []string{
-		"Media",                            // uppercase
-		"media!",                           // special char
-		"1media",                           // starts with digit
-		"_media",                           // starts with underscore
-		"../etc",                           // path traversal
-		"abcdefghijklmnopqrstuvwxyz012345", // 32 chars
+		"Media",  // uppercase
+		"media!", // special char
+		"1media", // starts with digit
+		"_media", // starts with underscore
+		"../etc", // path traversal
+		"abcdefghijklmnopqrstuvwxyz0123456789a", // 37 chars — one over the 36-char ceiling
 	}
 	for _, id := range bad {
 		_, err := New(Config{ID: id})
@@ -132,7 +132,16 @@ func TestNew_RejectsBadID(t *testing.T) {
 }
 
 func TestNew_AcceptsValidID(t *testing.T) {
-	good := []string{"media", "oauth", "billing_engine", "v2_oauth"}
+	good := []string{
+		"media",
+		"oauth",
+		"billing_engine",
+		"v2_oauth",
+		// UUID-derived shape the CLI scaffold emits: "m" + 32 hex chars = 33.
+		"m0123456789abcdef0123456789abcdef0",
+		// 36-char boundary (max accepted).
+		"abcdefghijklmnopqrstuvwxyz0123456789",
+	}
 	for _, id := range good {
 		_, err := New(Config{ID: id})
 		if err != nil {
