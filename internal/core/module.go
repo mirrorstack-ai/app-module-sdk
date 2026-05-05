@@ -92,9 +92,11 @@ type Module struct {
 	meterClient    *meter.Client        // prod (MS_METER_LAMBDA_ARN set) or dev-mode stderr
 }
 
-// moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 31 chars.
-// Leaves room for the "mod_" prefix without exceeding Postgres's 63-char identifier limit.
-var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+// moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 36 chars.
+// 36 chars accommodates UUID-derived IDs ("m" + 32 hex digits = 33 chars) with
+// a small safety margin. The "mod_" prefix the SDK adds when constructing
+// schema names still fits comfortably under Postgres's 63-char identifier limit.
+var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
@@ -102,7 +104,7 @@ func New(cfg Config) (*Module, error) {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
 	if !moduleIDPattern.MatchString(cfg.ID) {
-		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 31 chars)", cfg.ID, moduleIDPattern)
+		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 36 chars)", cfg.ID, moduleIDPattern)
 	}
 	m := &Module{
 		config:       cfg,
