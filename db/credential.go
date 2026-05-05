@@ -9,6 +9,7 @@ type contextKey string
 
 const (
 	schemaKey           = contextKey("ms-app-schema")
+	prefixKey           = contextKey("ms-table-prefix")
 	credentialKey       = contextKey("ms-db-credential")
 	moduleCredentialKey = contextKey("ms-db-module-credential")
 )
@@ -49,6 +50,27 @@ func WithSchema(ctx context.Context, schema string) context.Context {
 func SchemaFrom(ctx context.Context) string {
 	s, _ := ctx.Value(schemaKey).(string)
 	return s
+}
+
+// WithPrefix returns a context with the module's resolved table prefix set.
+// The platform's Lambda invoke shim populates this from
+// app_<app_id>.module_install.prefix per request, so the SDK can resolve a
+// module's per-app table names without a fresh catalog round-trip on each
+// call. Empty prefix means "no resolution available" — callers should fall
+// back to the dev/legacy mod_<id> form.
+//
+// Distinct from WithSchema: the schema is the Postgres search_path
+// (app_<app_id>); the prefix is the leading segment baked into the table's
+// name inside that schema (<username>_<slug>_<table>).
+func WithPrefix(ctx context.Context, prefix string) context.Context {
+	return context.WithValue(ctx, prefixKey, prefix)
+}
+
+// PrefixFrom reads the module's resolved table prefix from the context.
+// Returns the empty string when unset.
+func PrefixFrom(ctx context.Context) string {
+	p, _ := ctx.Value(prefixKey).(string)
+	return p
 }
 
 // WithCredential returns a context with the per-app DB credential set.

@@ -12,7 +12,9 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"sync"
 )
@@ -79,10 +81,19 @@ type Permission struct {
 // Version is a SemVer constraint string (npm-style: "^1.2.0", "~1.2.0",
 // ">=1.2.0 <2.0.0", "1.x", exact "1.2.3", or "" for any). The platform
 // catalog enforces matching at install time.
+//
+// Reads lists relations the consumer wants to SELECT from the dependency's
+// `mod_<id>` schema. Each entry must match a name the dependency declared
+// via `ms.ExposeTable`; the catalog validates this at install time. After
+// the app owner approves the install, the catalog emits one
+// `GRANT SELECT` per entry against the consumer's per-app DB role. Empty
+// list means "no cross-module reads" (the consumer only uses the dep via
+// events, HTTP, or `ms.Resolve`).
 type Dependency struct {
-	ID       string `json:"id"`
-	Version  string `json:"version,omitempty"`
-	Optional bool   `json:"optional,omitempty"`
+	ID       string   `json:"id"`
+	Version  string   `json:"version,omitempty"`
+	Optional bool     `json:"optional,omitempty"`
+	Reads    []string `json:"reads,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -111,6 +122,26 @@ type MCPResourceDecl struct {
 	Handler     MCPResourceHandler `json:"-"`
 }
 
+// Exposure declares one relation in the module's `mod_<id>` schema as part
+// of the module's public READ API. Consumed by the platform catalog at
+// install time: when a consumer module's manifest declares it reads this
+// relation (via Dependency.Reads on its own DependsOn/Needs declaration),
+// and the app owner approves the install, the catalog issues a single
+// `GRANT SELECT` against the consumer's per-app DB role.
+//
+// Read-only by design: there is no INSERT/UPDATE/DELETE grant on this
+// surface. Cross-module writes go through events or internal HTTP, not
+// raw GRANTs — that keeps each module's data ownership boundary
+// auditable.
+//
+// `Name` is a Postgres-identifier-shaped string (lowercase, leading
+// letter, [a-z0-9_], ≤63 chars). The exposed object lives under the
+// module's `mod_<id>` schema; the platform composes the fully-qualified
+// name itself.
+type Exposure struct {
+	Name string `json:"name"`
+}
+
 // Registry is the per-module registry of routes/events/schedules/tasks/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
@@ -123,6 +154,7 @@ type Registry struct {
 	permissions  []Permission
 	description  string
 	dependencies []Dependency
+	exposures    []Exposure
 	mcpTools     []MCPToolDecl
 	mcpResources []MCPResourceDecl
 }
@@ -162,34 +194,75 @@ func (r *Registry) Description() string {
 // for the Version field.
 //
 // Returns true if the dependency was newly added or upgraded from optional
-// to required, false if the call was a no-op.
+// to required, false if the call was a no-op (in either case, Reads from
+// dep are merged into the existing entry's Reads as a set union).
 func (r *Registry) AddDependency(dep Dependency) bool {
-	ValidateName("DependsOn", dep.ID)
+	ValidateDepID(dep.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.dependencies {
-		if existing.ID == dep.ID {
-			if existing.Optional && !dep.Optional {
-				r.dependencies[i].Optional = false
-				r.dependencies[i].Version = dep.Version
-				return true
-			}
-			return false
+		if existing.ID != dep.ID {
+			continue
 		}
+		// Reads merge regardless of optional/required outcome — a second
+		// declaration adding requested relations is additive, never
+		// destructive.
+		r.dependencies[i].Reads = mergeStrings(existing.Reads, dep.Reads)
+		if existing.Optional && !dep.Optional {
+			r.dependencies[i].Optional = false
+			r.dependencies[i].Version = dep.Version
+			return true
+		}
+		return false
 	}
+	dep.Reads = slices.Clone(dep.Reads)
 	r.dependencies = append(r.dependencies, dep)
 	return true
 }
 
-// Dependencies returns a non-nil copy of all declared dependencies in
-// registration order.
+// mergeStrings returns the set union of two string slices in order:
+// existing entries stay where they are, new entries append. The output
+// slice is fresh so the caller can mutate it without aliasing into either
+// input.
+func mergeStrings(existing, additions []string) []string {
+	if len(additions) == 0 {
+		return slices.Clone(existing)
+	}
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	out := slices.Clone(existing)
+	for _, s := range existing {
+		seen[s] = struct{}{}
+	}
+	for _, s := range additions {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// Dependencies returns a non-nil deep copy of all declared dependencies in
+// registration order. Reads on each entry is cloned — slices.Clone is
+// shallow, and a shared Reads slice would let callers mutate the registry
+// through the returned clone.
 func (r *Registry) Dependencies() []Dependency {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.dependencies == nil {
 		return []Dependency{}
 	}
-	return slices.Clone(r.dependencies)
+	out := make([]Dependency, len(r.dependencies))
+	for i, d := range r.dependencies {
+		out[i] = Dependency{
+			ID:       d.ID,
+			Version:  d.Version,
+			Optional: d.Optional,
+			Reads:    slices.Clone(d.Reads),
+		}
+	}
+	return out
 }
 
 // AddRoute records a route under the given scope. First-wins: duplicate
@@ -367,6 +440,42 @@ func (r *Registry) Permissions() []Permission {
 		out[i] = Permission{Name: p.Name, Roles: slices.Clone(p.Roles)}
 	}
 	return out
+}
+
+// exposureNamePattern: Postgres-safe identifier. Lowercase, starts with a
+// letter, only [a-z0-9_], up to 63 chars (the Postgres NAMEDATALEN ceiling).
+var exposureNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
+
+// AddExposure records a relation as part of the module's public READ API.
+// First-wins by name (matches AddPermission/AddSchedule/AddTask semantics).
+// Panics on an invalid name — programmer error caught at module init, not
+// runtime input.
+func (r *Registry) AddExposure(name string) {
+	ValidateName("Expose", name)
+	if !exposureNamePattern.MatchString(name) {
+		panic(fmt.Sprintf(
+			"mirrorstack/registry: Expose(%q) name must be lowercase, start with a letter, only [a-z0-9_], <=63 chars",
+			name,
+		))
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.exposures {
+		if existing.Name == name {
+			return
+		}
+	}
+	r.exposures = append(r.exposures, Exposure{Name: name})
+}
+
+// Exposures returns a non-nil clone of the declared exposure list.
+func (r *Registry) Exposures() []Exposure {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.exposures == nil {
+		return []Exposure{}
+	}
+	return slices.Clone(r.exposures)
 }
 
 // AddMCPTool registers an MCP tool. First-wins: if a tool with the same name

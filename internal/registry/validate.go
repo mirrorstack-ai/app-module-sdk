@@ -1,6 +1,31 @@
 package registry
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// depIDPattern accepts either a bare module ID (`oauth-core`,
+// `billing_engine`) or an owner-prefixed reference (`@anna/oauth`,
+// `@anna/oauth-google`). The owner-prefixed form is what catalog-published
+// modules look like once the catalog assigns ownership; the bare form is
+// kept for pre-catalog and platform-internal deps.
+//
+// Each segment is `[a-z][a-z0-9_-]*` so it composes safely with Postgres
+// identifier rules and the storage-prefix grammar
+// (<username>_<slug>_<table>). The Config.Slug regex is stricter (kebab
+// only); this one is more permissive to accept both prefix shapes
+// uniformly.
+var depIDPattern = regexp.MustCompile(`^(@[a-z][a-z0-9_-]*/)?[a-z][a-z0-9_-]*$`)
+
+// ValidateDepID rejects dependency IDs that don't match the bare or
+// owner-prefixed shape. Used by AddDependency in place of ValidateName,
+// which is too restrictive (it forbids `/` and `@`).
+func ValidateDepID(spec string) {
+	if !depIDPattern.MatchString(spec) {
+		panic("mirrorstack/registry: DependsOn(" + spec + ") must match `<id>` or `@<owner>/<id>` (lowercase, leading letter, [a-z0-9_-])")
+	}
+}
 
 // ValidateName rejects names that are empty, contain a path
 // separator (/, \), contain a dot-segment (..), contain whitespace, or

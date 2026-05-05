@@ -15,10 +15,16 @@ import (
 // migration versions, and the semver→migration mapping it needs to translate
 // lifecycle calls.
 type ManifestPayload struct {
-	ID           string                              `json:"id"`
+	ID string `json:"id"`
+	// Slug is the catalog handle (e.g. "oauth"). Mutable via catalog UI;
+	// renames force a new published version. Empty for dev/legacy modules
+	// that haven't been assigned a slug yet — consumers should fall back to
+	// ID-based addressing in that case.
+	Slug         string                              `json:"slug,omitempty"`
 	Defaults     ManifestDefaults                    `json:"defaults"`
 	Description  string                              `json:"description,omitempty"`
 	Dependencies []registry.Dependency               `json:"dependencies"`
+	Exposures    []registry.Exposure                 `json:"exposures"`
 	Migration    MigrationVersions                   `json:"migration"`
 	Versions     map[string]MigrationVersions        `json:"versions"`
 	Routes       map[registry.Scope][]registry.Route `json:"routes"`
@@ -83,7 +89,7 @@ func buildManifestMCP(reg *registry.Registry) ManifestMCP {
 // instead of `"versions":null` — the handler owns the output contract and
 // normalizes here the same way Registry normalizes Routes/Emits/Subscribes/
 // Schedules at their getters.
-func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry) http.HandlerFunc {
+func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry) http.HandlerFunc {
 	if versions == nil {
 		versions = map[string]MigrationVersions{}
 	}
@@ -105,9 +111,11 @@ func ManifestHandler(id, name, icon string, sqlFS fs.FS, versions map[string]Mig
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
 			ID:           id,
+			Slug:         slug,
 			Defaults:     ManifestDefaults{Name: name, Icon: icon},
 			Description:  reg.Description(),
 			Dependencies: reg.Dependencies(),
+			Exposures:    reg.Exposures(),
 			Migration:    MigrationVersions{App: appVersion, Module: moduleVersion},
 			Versions:     versions,
 			Routes:       reg.Routes(),

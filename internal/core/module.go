@@ -37,7 +37,13 @@ import (
 
 // Config holds the module identity. Passed to Init() or New().
 type Config struct {
-	ID   string // Unique module identifier (required)
+	ID string // Immutable module identifier (required). Minted once by the
+	// platform at first publish; never changes. Anchors the mod_<id> schema
+	// and the catalog primary key.
+	Slug string // Human-readable handle owned by the catalog (optional in
+	// dev; required for publishing). Mutable via catalog UI; the storage
+	// prefix at install time is <username>_<slug>_. Renames force a new
+	// published version with auto-generated rename migrations.
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
 
@@ -98,6 +104,16 @@ type Module struct {
 // schema names still fits comfortably under Postgres's 63-char identifier limit.
 var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 
+// moduleSlugPattern matches catalog slugs: lowercase letter, then lowercase
+// alphanumerics/hyphens, max 16 chars. The 16-char cap exists so the
+// worst-case constructed identifier `<username>_<slug>_<table>_<col>_fkey`
+// fits inside Postgres's 63-byte NAMEDATALEN ceiling (see
+// docs/module-identity-and-storage-prefix.md "Postgres identifier
+// budget"). The CLI's publish-time linter is the real gate against
+// overflow; this regex catches the obvious shape errors at New() time so
+// a malformed slug doesn't reach the manifest.
+var moduleSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,15}$`)
+
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
@@ -105,6 +121,12 @@ func New(cfg Config) (*Module, error) {
 	}
 	if !moduleIDPattern.MatchString(cfg.ID) {
 		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 36 chars)", cfg.ID, moduleIDPattern)
+	}
+	// Slug is optional at New() time so dev-mode iteration works before the
+	// CLI scaffold has assigned one. When set, it must match the catalog's
+	// shape so the manifest stays valid.
+	if cfg.Slug != "" && !moduleSlugPattern.MatchString(cfg.Slug) {
+		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must match %s (lowercase, starts with letter, hyphens allowed, max 16 chars)", cfg.Slug, moduleSlugPattern)
 	}
 	m := &Module{
 		config:       cfg,
@@ -409,7 +431,7 @@ func (m *Module) mountSystemRoutes() {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
-				m.config.ID, m.config.Name, m.config.Icon,
+				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon,
 				m.config.SQL, m.config.Versions, m.registry,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {

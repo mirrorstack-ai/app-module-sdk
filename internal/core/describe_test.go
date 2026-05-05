@@ -219,3 +219,110 @@ func TestParseDepSpec_SupportsCommonFormats(t *testing.T) {
 		})
 	}
 }
+
+// ---- Dep callback (Reads) ----
+
+func TestDependsOn_CallbackReadsRecorded(t *testing.T) {
+	t.Parallel()
+
+	m, _ := New(Config{ID: "demo"})
+	m.DependsOn("@anna/oauth@^0.4.0", func(d *Dep) {
+		d.Reads("oauth_users")
+		d.Reads("recent_orders")
+	})
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(Dependencies) = %d, want 1", len(deps))
+	}
+	want := []string{"oauth_users", "recent_orders"}
+	if !slicesEqual(deps[0].Reads, want) {
+		t.Errorf("Reads = %+v, want %+v", deps[0].Reads, want)
+	}
+	if deps[0].Version != "^0.4.0" {
+		t.Errorf("Version = %q, want %q", deps[0].Version, "^0.4.0")
+	}
+}
+
+func TestDependsOn_NoCallbackLeavesReadsEmpty(t *testing.T) {
+	t.Parallel()
+
+	m, _ := New(Config{ID: "demo"})
+	m.DependsOn("@anna/oauth@^0.4.0")
+	deps := m.registry.Dependencies()
+	if len(deps[0].Reads) != 0 {
+		t.Errorf("Reads = %+v, want empty (no callback supplied)", deps[0].Reads)
+	}
+}
+
+func TestDependsOn_RepeatedCallbackMergesReads(t *testing.T) {
+	t.Parallel()
+
+	// Feature-flagged additions in different code paths can declare reads
+	// across multiple calls; the registry merges them as a set union.
+	m, _ := New(Config{ID: "demo"})
+	m.DependsOn("@anna/oauth", func(d *Dep) { d.Reads("a"); d.Reads("b") })
+	m.DependsOn("@anna/oauth", func(d *Dep) { d.Reads("b"); d.Reads("c") })
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("expected dedup to keep one entry, got %d", len(deps))
+	}
+	want := []string{"a", "b", "c"}
+	if !slicesEqual(deps[0].Reads, want) {
+		t.Errorf("Reads = %+v, want %+v", deps[0].Reads, want)
+	}
+}
+
+func TestNeeds_CallbackReadsRecorded(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	wrapped := Needs("@anna/billing@^1", func(http.ResponseWriter, *http.Request) {}, func(d *Dep) {
+		d.Reads("invoices")
+	})
+	if wrapped == nil {
+		t.Fatal("Needs returned nil handler")
+	}
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 || !deps[0].Optional {
+		t.Fatalf("expected one optional dep, got %+v", deps)
+	}
+	if !slicesEqual(deps[0].Reads, []string{"invoices"}) {
+		t.Errorf("Reads = %+v, want [invoices]", deps[0].Reads)
+	}
+}
+
+func TestNeeds_RequiredWinsButReadsAccumulate(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	// Optional first with one read, required second with another. The flag
+	// upgrades to required (stricter), and Reads is the union.
+	_ = Needs("@anna/oauth", func(http.ResponseWriter, *http.Request) {}, func(d *Dep) { d.Reads("a") })
+	DependsOn("@anna/oauth", func(d *Dep) { d.Reads("b") })
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("expected one dep, got %+v", deps)
+	}
+	if deps[0].Optional {
+		t.Error("expected Optional=false after required upgrade")
+	}
+	if !slicesEqual(deps[0].Reads, []string{"a", "b"}) {
+		t.Errorf("Reads = %+v, want [a b]", deps[0].Reads)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

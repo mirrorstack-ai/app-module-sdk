@@ -99,12 +99,33 @@ func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
 // Describe sets the default module's human-readable description.
 func Describe(s string) { core.Describe(s) }
 
-// DependsOn declares a REQUIRED dependency on the default module. See the
-// core package for the full spec syntax (id or id@constraint).
-func DependsOn(spec string) { core.DependsOn(spec) }
+// Dep is the configuration handle passed to DependsOn / Needs callbacks.
+// Use d.Reads(name) inside the callback to declare cross-module SELECT
+// requests against the dependency's public READ API.
+type Dep = core.Dep
+
+// DependsOn declares a REQUIRED dependency on the default module. The
+// optional configure callback names relations to read from the dep's
+// `mod_<id>` schema; see the core package for the full spec syntax (id
+// or id@constraint).
+func DependsOn(spec string, configure ...func(*Dep)) {
+	core.DependsOn(spec, configure...)
+}
 
 // Needs declares an OPTIONAL dependency and returns the handler unchanged.
-func Needs(spec string, h http.HandlerFunc) http.HandlerFunc { return core.Needs(spec, h) }
+// The optional configure callback names relations to read from the dep's
+// `mod_<id>` schema (active only when the dep actually gets installed).
+func Needs(spec string, h http.HandlerFunc, configure ...func(*Dep)) http.HandlerFunc {
+	return core.Needs(spec, h, configure...)
+}
+
+// ExposeTable declares a relation in the default module's `mod_<id>` schema
+// (table, view, or materialized view) as part of the module's public READ
+// API. Read-only — `GRANT SELECT` only. Consumers name the relations they
+// want via `ms.DependsOn`/`ms.Needs` callback; the catalog emits the GRANT
+// after the app owner approves the install. See the core package for the
+// full contract.
+func ExposeTable(name string) { core.ExposeTable(name) }
 
 // Resolve looks up a typed client registered by another module. v1 stub
 // always returns (zero, false).

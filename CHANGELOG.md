@@ -7,6 +7,34 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-05-06
+
+Phase 2 SDK surface — module identity, prefix-aware schema resolution, and the cross-module data-routing contract (declarative half).
+
+### Added
+- **`Config.Slug`** — catalog-owned human-readable handle (e.g. `"oauth"`). Mutable via catalog UI; renames force a new published version. Validated as kebab-case (`^[a-z][a-z0-9-]{0,15}$`, max 16 chars). Optional at `New()` so dev iteration works before the CLI scaffold has assigned one — the publish pipeline is where slugs become required. See `docs/module-identity-and-storage-prefix.md` for the rename-safety design.
+- **`ms.ExposeTable(name)`** — declare a relation in this module's `mod_<id>` schema as part of its public READ API. Read-only by design — `GRANT SELECT` only, never INSERT/UPDATE/DELETE. Cross-module *writes* go through events or internal HTTP endpoints; the SDK doesn't have a write-grant surface. Despite the name, the call works for any Postgres relation kind (table, view, materialized view) since `GRANT SELECT` applies uniformly. First-wins on duplicate names.
+- **`ms.DependsOn(spec, ...func(*ms.Dep))`** + **`ms.Needs(spec, h, ...func(*ms.Dep))`** — variadic callback form. The callback receives a `*ms.Dep`; call `d.Reads(name)` per relation requested from the dependency. The catalog validates each name against the dep's manifest at install time, then emits one `GRANT SELECT` per entry against this module's per-app DB role after app-owner approval.
+  ```go
+  ms.DependsOn("@anna/oauth@^0.4.0", func(d *ms.Dep) {
+      d.Reads("oauth_users")
+      d.Reads("recent_orders")
+  })
+  ```
+  Repeated declarations with the same dep ID merge `Reads` as a set union — feature-flagged additions compose safely without dropping previously-requested relations.
+- **`db.WithPrefix(ctx, prefix)`** / **`db.PrefixFrom(ctx)`** — context plumbing the platform's Lambda invoke shim uses to inject the live storage prefix from `app_<app_id>.module_install.prefix` per request. Distinct from `db.WithSchema` (search_path) — prefix is the leading segment baked into per-app table names (`<username>_<slug>_<table>`).
+- **Manifest payload additions**: `slug` (`omitempty`), `exposures` (always present, possibly empty), `dependencies[].reads` (`omitempty`).
+
+### Changed
+- **`ms.DependsOn(spec)` / `ms.Needs(spec, h)` are now variadic** — second argument is `...func(*ms.Dep)`. Existing one-arg calls still work unchanged. **No breaking change** for callers that didn't supply a callback.
+- **Dependency IDs accept `@<owner>/<name>` shape** in addition to bare module IDs (`oauth-core`). Existing bare IDs continue to validate. This is the catalog-published handle shape — modules referencing newly-published deps will use it.
+- `parseDepSpec` now splits at the **last** `@` so `@<owner>/<name>@<version>` parses correctly. Bare-id usages (`oauth-core@^1`) are unchanged because they have only one `@`.
+- `Module.ModuleDB` / `Module.ModuleTx` resolve their schema via a new `moduleSchemaFor(ctx)` helper. In production the helper returns the prefix the platform injected via `db.WithPrefix`; in dev/legacy it falls back to `mod_<Config.ID>`. Compiled SQL stays vanilla — no per-version schema literals get baked into the binary.
+- `ManifestPayload` wire shape gains the `slug`, `exposures`, and per-dep `reads` fields. Existing consumers that ignore unknown fields continue to deserialize cleanly.
+
+### Design notes
+The trust model: **app owner is the trust root** for cross-module reads. The contributor declares only the public READ surface (no consumer allowlist). The consumer declares which relations they want. The catalog surfaces the pairing to the app owner at install time, who approves or rejects. There is no publisher-controlled allowlist — that doesn't fit a marketplace where third-party consumers show up after publish. See `docs/module-identity-and-storage-prefix.md` for the full rationale.
+
 ## [v0.1.1] - 2026-05-05
 
 ### Changed
