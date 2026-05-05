@@ -6,21 +6,13 @@ import (
 	"slices"
 )
 
-// ExposureKind distinguishes "I'm exposing a view" from "I'm exposing a raw
-// table". Views are the recommended path — they let the data owner shape the
-// public projection of their schema independently of the physical storage —
-// but tables are supported for cases where the consumer needs raw write
-// access (rare; rely on the catalog to gate write grants).
-type ExposureKind string
-
-const (
-	ExposureKindView  ExposureKind = "view"
-	ExposureKindTable ExposureKind = "table"
-)
-
-// Exposure declares one schema element (a view or table) and the set of
-// modules permitted to read it. Consumed by the platform catalog at install
-// time to translate into Postgres GRANTs against the consumers' DB roles.
+// Exposure declares one relation (table, view, or materialized view) in
+// the module's `mod_<id>` schema as readable by a set of consumer modules.
+// Consumed by the platform catalog at install time to translate into
+// Postgres GRANTs against the consumers' DB roles. The kind is not
+// recorded — `GRANT SELECT` applies uniformly to all relation kinds, so
+// the SDK doesn't need to distinguish them. The catalog can introspect
+// `pg_class` at publish time if a UI needs to render the kind.
 //
 // `Name` is a Postgres-identifier-shaped string — lowercase letters, digits,
 // underscores, leading letter, ≤63 chars. The exposed object lives under
@@ -36,9 +28,8 @@ const (
 // yet" — the platform emits no GRANT until the contributor names a
 // reader.
 type Exposure struct {
-	Name       string       `json:"name"`
-	Kind       ExposureKind `json:"kind"`
-	ReadableBy []string     `json:"readableBy"`
+	Name       string   `json:"name"`
+	ReadableBy []string `json:"readableBy"`
 }
 
 // exposureNamePattern: Postgres-safe identifier. Lowercase, starts with a
@@ -56,15 +47,12 @@ var readerPattern = regexp.MustCompile(`^@[a-z0-9_\-]+/[a-z0-9_\-]+$`)
 // the rest of the registry, an invalid declaration is a programmer error
 // caught at module init, not a runtime input.
 //
-// Dedup: if the same (Name, Kind) is declared twice, ReadableBy entries
-// from both calls are merged (set union). Re-declaring the same name with
-// a different Kind panics — that's a contradiction, not composition.
-//
-// Why merge instead of last-wins or first-wins: a security-adjacent
-// declaration like `ms.ExposeView("orders", "@me/analytics")` losing the
-// `@me/analytics` reader if a second file forgets to re-list it would be
-// surprising. Merging makes feature-flagged additions compose safely
-// (each call adds; nothing silently drops).
+// Dedup: if the same Name is declared twice, ReadableBy entries from both
+// calls are merged (set union). A security-adjacent declaration like
+// `ms.ExposeTable("orders", "@anna/analytics")` losing the
+// `@anna/analytics` reader because a second file forgets to re-list it
+// would be surprising. Merging makes feature-flagged additions compose
+// safely (each call adds; nothing silently drops).
 func (r *Registry) AddExposure(e Exposure) {
 	ValidateName("Expose", e.Name)
 	if !exposureNamePattern.MatchString(e.Name) {
@@ -72,9 +60,6 @@ func (r *Registry) AddExposure(e Exposure) {
 			"mirrorstack/registry: Expose(%q) name must be lowercase, start with a letter, only [a-z0-9_], <=63 chars",
 			e.Name,
 		))
-	}
-	if e.Kind != ExposureKindView && e.Kind != ExposureKindTable {
-		panic(fmt.Sprintf("mirrorstack/registry: Expose(%q) unknown kind %q", e.Name, e.Kind))
 	}
 	for _, reader := range e.ReadableBy {
 		if !readerPattern.MatchString(reader) {
@@ -89,12 +74,6 @@ func (r *Registry) AddExposure(e Exposure) {
 	for i, existing := range r.exposures {
 		if existing.Name != e.Name {
 			continue
-		}
-		if existing.Kind != e.Kind {
-			panic(fmt.Sprintf(
-				"mirrorstack/registry: Expose(%q) kind conflict — already registered as %q, now %q",
-				e.Name, existing.Kind, e.Kind,
-			))
 		}
 		r.exposures[i].ReadableBy = mergeReaders(existing.ReadableBy, e.ReadableBy)
 		return
@@ -139,7 +118,6 @@ func (r *Registry) Exposures() []Exposure {
 	for i, e := range r.exposures {
 		out[i] = Exposure{
 			Name:       e.Name,
-			Kind:       e.Kind,
 			ReadableBy: slices.Clone(e.ReadableBy),
 		}
 	}
