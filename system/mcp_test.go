@@ -254,7 +254,7 @@ func TestManifest_IncludesMCP(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("demo", "Demo", "box", nil, nil, reg).ServeHTTP(rec, req)
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, reg).ServeHTTP(rec, req)
 
 	var got ManifestPayload
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -278,7 +278,7 @@ func TestManifest_EmptyMCPIsEmptyArrays(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("demo", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `"mcp":{"tools":[],"resources":[]}`) {

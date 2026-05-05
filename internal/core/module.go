@@ -37,7 +37,12 @@ import (
 
 // Config holds the module identity. Passed to Init() or New().
 type Config struct {
-	ID   string // Unique module identifier (required)
+	ID string // Immutable module identifier (required). Minted once by the
+	// platform at first publish; never changes. Anchors the mod_<id> schema
+	// and the catalog primary key.
+	Slug string // Human-readable handle owned by the catalog. Mutable via
+	// catalog UI; the storage prefix at install time is <username>_<slug>_.
+	// Optional in dev; the publish pipeline is where slugs become required.
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
 
@@ -98,6 +103,13 @@ type Module struct {
 // schema names still fits comfortably under Postgres's 63-char identifier limit.
 var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 
+// moduleSlugPattern matches catalog slugs: lowercase letter, then lowercase
+// alphanumerics/hyphens, max 16 chars. The 16-char cap keeps the worst-case
+// constructed identifier `<username>_<slug>_<table>_<col>_fkey` inside
+// Postgres's 63-byte NAMEDATALEN ceiling. The CLI's publish-time linter is
+// the real gate; this regex catches obvious shape errors at New() time.
+var moduleSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,15}$`)
+
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
@@ -105,6 +117,9 @@ func New(cfg Config) (*Module, error) {
 	}
 	if !moduleIDPattern.MatchString(cfg.ID) {
 		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 36 chars)", cfg.ID, moduleIDPattern)
+	}
+	if cfg.Slug != "" && !moduleSlugPattern.MatchString(cfg.Slug) {
+		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must match %s (lowercase, starts with letter, hyphens allowed, max 16 chars)", cfg.Slug, moduleSlugPattern)
 	}
 	m := &Module{
 		config:       cfg,
@@ -149,7 +164,7 @@ func New(cfg Config) (*Module, error) {
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
 
-// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/Needs,
+// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/OptionalDependOn,
 // MCPTool/MCPResource: see db.go, resources.go, describe.go, and mcp.go.
 
 // Platform registers routes with platform auth scope.
@@ -409,7 +424,7 @@ func (m *Module) mountSystemRoutes() {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
-				m.config.ID, m.config.Name, m.config.Icon,
+				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon,
 				m.config.SQL, m.config.Versions, m.registry,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {

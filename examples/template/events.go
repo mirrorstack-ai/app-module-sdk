@@ -18,12 +18,13 @@ func registerEvents() {
 	ms.Emits("template.created")
 
 	// Subscribe to another module's event. Platform delivers via Internal-scope POST.
-	// Wrap the handler with ms.Needs(id, ...) to declare an OPTIONAL dependency
-	// on the module that emits the event — catalog treats it as optional and
-	// the module still installs if "user" isn't present.
-	ms.OnEvent("user.created", ms.Needs("user@^1", func(w http.ResponseWriter, r *http.Request) {
+	// Co-locate an OPTIONAL dependency declaration via ms.OptionalDependOn —
+	// catalog treats the dep as optional, and the module still installs if
+	// "user" isn't present (the event source just doesn't exist, so the
+	// handler never fires).
+	ms.OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {
 		// Handle the event. Body contains the event payload.
 		// Inside, use ms.Resolve[T]("user") to call into the user module if present.
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	}, ms.OptionalDependOn("user@^1"))
 }

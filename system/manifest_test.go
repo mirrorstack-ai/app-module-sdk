@@ -29,7 +29,7 @@ func decodeManifest(t *testing.T, h http.HandlerFunc) ManifestPayload {
 func TestManifest_IDAndDefaults(t *testing.T) {
 	t.Parallel()
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, registry.New()))
 
 	if got.ID != "media" {
 		t.Errorf("id = %q, want media", got.ID)
@@ -42,6 +42,24 @@ func TestManifest_IDAndDefaults(t *testing.T) {
 	}
 }
 
+func TestManifest_SlugSurfaced(t *testing.T) {
+	t.Parallel()
+	got := decodeManifest(t, ManifestHandler("m15c0f543cf164433b524d312dbf68159", "oauth", "Google Sign-In", "vpn_key", nil, nil, registry.New()))
+	if got.Slug != "oauth" {
+		t.Errorf("slug = %q, want oauth", got.Slug)
+	}
+}
+
+func TestManifest_SlugOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("media", "", "Media", "perm_media", nil, nil, registry.New()).ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), `"slug"`) {
+		t.Errorf("expected \"slug\" key to be omitted when empty, got: %s", rec.Body.String())
+	}
+}
+
 func TestManifest_RoutesFromAllScopes(t *testing.T) {
 	t.Parallel()
 
@@ -51,7 +69,7 @@ func TestManifest_RoutesFromAllScopes(t *testing.T) {
 	reg.AddRoute(registry.ScopePublic, "GET", "/items")
 	reg.AddRoute(registry.ScopeInternal, "POST", "/events/on-user-deleted")
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, reg))
 
 	if len(got.Routes[registry.ScopePlatform]) != 2 {
 		t.Errorf("platform routes = %d, want 2", len(got.Routes[registry.ScopePlatform]))
@@ -67,7 +85,7 @@ func TestManifest_RoutesFromAllScopes(t *testing.T) {
 func TestManifest_EmptyScopesPresent(t *testing.T) {
 	t.Parallel()
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, registry.New()))
 
 	for _, scope := range registry.AllScopes() {
 		s, ok := got.Routes[scope]
@@ -88,7 +106,7 @@ func TestManifest_EventsAndSchedules(t *testing.T) {
 	reg.AddSubscribe("oauth.user_deleted", "/internal/events/on-user-deleted")
 	reg.AddSchedule("cleanup-temp", "0 3 * * *", "/crons/cleanup-temp")
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, reg))
 
 	if len(got.Events.Emits) != 1 || got.Events.Emits[0] != "created" {
 		t.Errorf("events.emits = %v, want [created]", got.Events.Emits)
@@ -107,7 +125,7 @@ func TestManifest_EmptyEventsAndSchedules_NotNull(t *testing.T) {
 	// Verify the JSON has [] / {} not null when nothing is declared.
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()).ServeHTTP(rec, req)
+	ManifestHandler("media", "", "Media", "perm_media", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	// Note: "module" is omitempty on MigrationVersions and VersionEntry, so
@@ -149,7 +167,7 @@ func TestManifest_MigrationVersions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", tc.fsys, nil, registry.New()))
+			got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", tc.fsys, nil, registry.New()))
 			if got.Migration != tc.want {
 				t.Errorf("migration = %+v, want %+v", got.Migration, tc.want)
 			}
@@ -160,7 +178,7 @@ func TestManifest_MigrationVersions(t *testing.T) {
 func TestManifest_NilSQL_EmptyMigration(t *testing.T) {
 	t.Parallel()
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, registry.New()))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, registry.New()))
 	if got.Migration.App != "" || got.Migration.Module != "" {
 		t.Errorf("migration = %+v, want both empty when SQL fs is nil", got.Migration)
 	}
@@ -179,7 +197,7 @@ func TestManifest_Versions(t *testing.T) {
 		"v0.1.0": {App: "0008", Module: "0002"},
 		"v0.2.0": {App: "0012"},
 	}
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, versions, registry.New()))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, versions, registry.New()))
 
 	if len(got.Versions) != 2 {
 		t.Fatalf("versions = %v, want 2 entries", got.Versions)
@@ -204,7 +222,7 @@ func TestManifest_Permissions(t *testing.T) {
 	reg.AddPermission("media.upload", []string{"admin", "member"})
 	reg.AddPermission("media.view", []string{"admin"}) // duplicate name → dropped
 
-	got := decodeManifest(t, ManifestHandler("media", "Media", "perm_media", nil, nil, reg))
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, reg))
 
 	if len(got.Permissions) != 2 {
 		t.Fatalf("permissions = %d, want 2: %+v", len(got.Permissions), got.Permissions)
@@ -231,7 +249,7 @@ func TestManifest_DescriptionPopulated(t *testing.T) {
 	reg := registry.New()
 	reg.SetDescription("A demo module")
 
-	got := decodeManifest(t, ManifestHandler("demo", "Demo", "box", nil, nil, reg))
+	got := decodeManifest(t, ManifestHandler("demo", "", "Demo", "box", nil, nil, reg))
 	if got.Description != "A demo module" {
 		t.Errorf("description = %q, want %q", got.Description, "A demo module")
 	}
@@ -242,7 +260,7 @@ func TestManifest_DescriptionOmittedWhenEmpty(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("demo", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	if strings.Contains(rec.Body.String(), `"description"`) {
 		t.Errorf("expected \"description\" key to be omitted when empty, got: %s", rec.Body.String())
@@ -256,7 +274,7 @@ func TestManifest_DependenciesPopulated(t *testing.T) {
 	reg.AddDependency(registry.Dependency{ID: "oauth-core"})
 	reg.AddDependency(registry.Dependency{ID: "video", Optional: true})
 
-	got := decodeManifest(t, ManifestHandler("demo", "Demo", "box", nil, nil, reg))
+	got := decodeManifest(t, ManifestHandler("demo", "", "Demo", "box", nil, nil, reg))
 	if len(got.Dependencies) != 2 {
 		t.Fatalf("len(dependencies) = %d, want 2", len(got.Dependencies))
 	}
@@ -273,7 +291,7 @@ func TestManifest_EmptyDependenciesIsArrayNotNull(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("demo", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `"dependencies":[]`) {
@@ -289,7 +307,7 @@ func TestManifest_OptionalOmittedInJSONWhenFalse(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
 	rec := httptest.NewRecorder()
-	ManifestHandler("demo", "Demo", "box", nil, nil, reg).ServeHTTP(rec, req)
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, reg).ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	// Required dep should not carry "optional":false in wire shape.
