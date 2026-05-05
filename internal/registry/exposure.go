@@ -27,12 +27,14 @@ const (
 // the module's `mod_<id>` schema; the platform composes the fully-qualified
 // name itself.
 //
-// `ReadableBy` entries are `@<owner>/<module>` patterns. Wildcards are
-// supported: `@*/analytics` (any owner's analytics module), `@me/oauth-*`
-// (my modules whose name starts with `oauth-`), `@*/*` (everyone — use
-// sparingly). Empty list means "no consumers declared yet" — the platform
-// emits no GRANT until the contributor names a reader. The detailed pattern
-// matching lives on the catalog side; the SDK just enforces the shape.
+// `ReadableBy` entries are exact `@<owner>/<module>` references — no
+// wildcards. Matching by module *name* across owners (`@*/analytics`)
+// would only be meaningful if the platform had a module-spec system
+// declaring what a module named `analytics` must implement; it doesn't,
+// so each consumer is listed explicitly and the GRANT surface stays
+// auditable from the source. Empty list means "no consumers declared
+// yet" — the platform emits no GRANT until the contributor names a
+// reader.
 type Exposure struct {
 	Name       string       `json:"name"`
 	Kind       ExposureKind `json:"kind"`
@@ -43,11 +45,11 @@ type Exposure struct {
 // letter, only [a-z0-9_], up to 63 chars (the Postgres NAMEDATALEN ceiling).
 var exposureNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
-// readerPattern: `@<owner-pattern>/<module-pattern>`. Each half is one
-// non-empty segment of `[a-z0-9_*-]` characters — narrow enough to fail
-// loud on typos like `me/foo` (missing `@`) or `@me//foo` (empty middle
-// segment) without baking in the catalog's full glob semantics.
-var readerPattern = regexp.MustCompile(`^@[a-z0-9_*\-]+/[a-z0-9_*\-]+$`)
+// readerPattern: exact `@<owner>/<module>`. Each half is one non-empty
+// segment of `[a-z0-9_-]` characters. Both halves must be concrete
+// identifiers — no `*`, no wildcards. The platform translates each entry
+// into a Postgres GRANT against that specific consumer module's DB role.
+var readerPattern = regexp.MustCompile(`^@[a-z0-9_\-]+/[a-z0-9_\-]+$`)
 
 // AddExposure records an exposure. Name must match exposureNamePattern;
 // each ReadableBy entry must match readerPattern. Validation panics — like
@@ -77,7 +79,7 @@ func (r *Registry) AddExposure(e Exposure) {
 	for _, reader := range e.ReadableBy {
 		if !readerPattern.MatchString(reader) {
 			panic(fmt.Sprintf(
-				"mirrorstack/registry: Expose(%q) readableBy entry %q must match `@<owner>/<module>` (wildcards allowed: `@*/*`, `@me/oauth-*`, etc.)",
+				"mirrorstack/registry: Expose(%q) readableBy entry %q must match exact `@<owner>/<module>` — wildcards are not supported",
 				e.Name, reader,
 			))
 		}

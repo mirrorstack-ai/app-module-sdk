@@ -5,7 +5,7 @@ import (
 )
 
 // ExposeView declares that a view in the module's `mod_<id>` schema is
-// readable by the listed module patterns. Used by the catalog at install
+// readable by the listed consumer modules. Used by the catalog at install
 // time to translate into Postgres GRANTs against the consumers' DB roles.
 //
 // Pair with the consumer module calling `ms.DependsOn("@<owner>/<this>.<view>")`
@@ -14,16 +14,15 @@ import (
 // docs/oauth-modules-plan.md.
 //
 //	ms.ExposeView("recent_orders",
-//	    "@*/analytics",
+//	    "@anna/dashboard",
+//	    "@anna/reporting",
 //	)
 //
-// Wildcards are supported: `@me/oauth-*` for "any of my own oauth modules",
-// `@*/analytics` for "any owner's analytics module", `@*/*` for everyone
-// (use sparingly — wider audit surface). Detailed pattern semantics live
-// on the catalog side; the SDK enforces only the `@<owner>/<module>` shape.
-//
-// Last-call-wins on the same view name, so feature-flagged additions to the
-// allow list compose by re-declaring with the merged set.
+// Each `readableBy` entry is an exact `@<owner>/<module>` reference. No
+// wildcards — every consumer is listed individually so the GRANT surface
+// is auditable from the source. Calling `ExposeView` multiple times with
+// the same name merges the reader lists (set union), so feature-flagged
+// additions compose safely.
 func (m *Module) ExposeView(name string, readableBy ...string) {
 	m.registry.AddExposure(registry.Exposure{
 		Name:       name,
@@ -37,7 +36,7 @@ func (m *Module) ExposeView(name string, readableBy ...string) {
 // stored. Tables are exposed when consumers genuinely need raw access (and
 // the catalog still gates write GRANTs separately).
 //
-//	ms.ExposeTable("audit_log_writes", "@*/audit-log")
+//	ms.ExposeTable("audit_log_writes", "@security/audit-collector")
 func (m *Module) ExposeTable(name string, readableBy ...string) {
 	m.registry.AddExposure(registry.Exposure{
 		Name:       name,

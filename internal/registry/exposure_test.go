@@ -11,36 +11,36 @@ func TestAddExposure_StoresAndReturns(t *testing.T) {
 	r.AddExposure(Exposure{
 		Name:       "recent_orders",
 		Kind:       ExposureKindView,
-		ReadableBy: []string{"@*/analytics"},
+		ReadableBy: []string{"@anna/analytics"},
 	})
 	out := r.Exposures()
 	if len(out) != 1 || out[0].Name != "recent_orders" || out[0].Kind != ExposureKindView {
 		t.Fatalf("unexpected exposures: %+v", out)
 	}
-	if !slices.Equal(out[0].ReadableBy, []string{"@*/analytics"}) {
+	if !slices.Equal(out[0].ReadableBy, []string{"@anna/analytics"}) {
 		t.Errorf("ReadableBy round-trip lost: %+v", out[0].ReadableBy)
 	}
 }
 
 func TestAddExposure_MergesReadersAcrossCalls(t *testing.T) {
 	r := New()
-	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@me/oauth-google"}})
-	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@*/oauth-*"}})
+	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@anna/oauth-google"}})
+	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@anna/oauth-github"}})
 	out := r.Exposures()
 	if len(out) != 1 {
 		t.Fatalf("expected dedup to keep one entry, got %d", len(out))
 	}
-	if !slices.Equal(out[0].ReadableBy, []string{"@me/oauth-google", "@*/oauth-*"}) {
+	if !slices.Equal(out[0].ReadableBy, []string{"@anna/oauth-google", "@anna/oauth-github"}) {
 		t.Errorf("expected merge-union, got %+v", out[0].ReadableBy)
 	}
 }
 
 func TestAddExposure_MergeDeduplicatesIdenticalReader(t *testing.T) {
 	r := New()
-	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@me/a", "@me/b"}})
-	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@me/b", "@me/c"}})
+	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@anna/a", "@anna/b"}})
+	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@anna/b", "@anna/c"}})
 	out := r.Exposures()
-	if !slices.Equal(out[0].ReadableBy, []string{"@me/a", "@me/b", "@me/c"}) {
+	if !slices.Equal(out[0].ReadableBy, []string{"@anna/a", "@anna/b", "@anna/c"}) {
 		t.Errorf("expected dedup-on-merge, got %+v", out[0].ReadableBy)
 	}
 }
@@ -69,12 +69,12 @@ func TestExposures_DefensiveCopy(t *testing.T) {
 	r.AddExposure(Exposure{
 		Name:       "recent",
 		Kind:       ExposureKindView,
-		ReadableBy: []string{"@*/analytics"},
+		ReadableBy: []string{"@anna/analytics"},
 	})
 	clone := r.Exposures()
-	clone[0].ReadableBy[0] = "@*/MUTATED"
+	clone[0].ReadableBy[0] = "@anna/mutated"
 	again := r.Exposures()
-	if again[0].ReadableBy[0] != "@*/analytics" {
+	if again[0].ReadableBy[0] != "@anna/analytics" {
 		t.Errorf("registry mutated through returned clone: %+v", again[0])
 	}
 }
@@ -126,6 +126,15 @@ func TestAddExposure_RejectsBadReader(t *testing.T) {
 		"@me/foo bar", // whitespace
 		"@me//foo",    // empty middle
 		"@Me/foo",     // uppercase
+		// Wildcards are not supported. Matching "any owner's analytics
+		// module" only makes sense if the platform has a module-spec
+		// system declaring what a module named `analytics` must implement;
+		// we don't, so each consumer is listed explicitly.
+		"@*/analytics",
+		"@me/oauth-*",
+		"@*/oauth-*",
+		"@me/*",
+		"@*/*",
 	}
 	for _, reader := range bad {
 		assertExposurePanics(t, "AddExposure readableBy "+reader+" should panic", func() {
@@ -137,14 +146,16 @@ func TestAddExposure_RejectsBadReader(t *testing.T) {
 	}
 }
 
-func TestAddExposure_AcceptsWildcardReaders(t *testing.T) {
+func TestAddExposure_AcceptsExactReaders(t *testing.T) {
 	good := []string{
-		"@me/analytics",
-		"@*/analytics",
-		"@me/oauth-*",
-		"@*/oauth-*",
-		"@me/*",
-		"@*/*",
+		"@anna/analytics",
+		"@anna/oauth-google",
+		"@bob/dashboard",
+		"@security/audit-collector",
+		// Single-char halves at the lower bound.
+		"@a/b",
+		// Underscores allowed; mirrors Config.ID's regex.
+		"@anna/billing_engine",
 	}
 	for _, reader := range good {
 		r := New()

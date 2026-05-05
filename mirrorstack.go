@@ -107,10 +107,10 @@ func DependsOn(spec string) { core.DependsOn(spec) }
 func Needs(spec string, h http.HandlerFunc) http.HandlerFunc { return core.Needs(spec, h) }
 
 // ExposeView declares a view on the default module's `mod_<id>` schema as
-// readable by the listed `@<owner>/<module>` patterns. The catalog
-// translates this into Postgres GRANTs at install time. Pair with the
-// consumer's `ms.DependsOn`. See the core package for the full contract
-// + wildcard semantics.
+// readable by the listed `@<owner>/<module>` consumers (exact references —
+// no wildcards). The catalog translates each entry into a Postgres GRANT
+// at install time. Pair with the consumer's `ms.DependsOn`. See the core
+// package for the full contract.
 func ExposeView(name string, readableBy ...string) { core.ExposeView(name, readableBy...) }
 
 // ExposeTable is the rarely-used twin of ExposeView. Prefer views — they

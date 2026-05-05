@@ -11,7 +11,7 @@ func TestExposeView_Records(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m.ExposeView("recent_orders", "@*/analytics")
+	m.ExposeView("recent_orders", "@anna/analytics")
 	got := m.registry.Exposures()
 	if len(got) != 1 {
 		t.Fatalf("expected 1 exposure, got %d", len(got))
@@ -23,7 +23,7 @@ func TestExposeView_Records(t *testing.T) {
 
 func TestExposeTable_RecordsKindTable(t *testing.T) {
 	m, _ := New(Config{ID: "audit", Name: "Audit"})
-	m.ExposeTable("entries", "@*/audit-log")
+	m.ExposeTable("entries", "@security/audit-collector")
 	got := m.registry.Exposures()
 	if got[0].Kind != registry.ExposureKindTable {
 		t.Errorf("kind = %q, want table", got[0].Kind)
@@ -32,7 +32,7 @@ func TestExposeTable_RecordsKindTable(t *testing.T) {
 
 func TestExposeView_VariadicReadersComposeIntoSlice(t *testing.T) {
 	m, _ := New(Config{ID: "x", Name: "X"})
-	m.ExposeView("links", "@me/oauth-google", "@me/oauth-github")
+	m.ExposeView("links", "@anna/oauth-google", "@anna/oauth-github")
 	got := m.registry.Exposures()
 	if len(got[0].ReadableBy) != 2 {
 		t.Errorf("expected 2 readers, got %+v", got[0].ReadableBy)
@@ -56,7 +56,7 @@ func TestExposeView_Default_PanicsWithoutInit(t *testing.T) {
 			t.Error("expected panic when default module not initialized")
 		}
 	}()
-	ExposeView("x", "@*/y")
+	ExposeView("x", "@anna/y")
 }
 
 func TestExposeView_Default_RoutesToInitializedModule(t *testing.T) {
@@ -64,7 +64,7 @@ func TestExposeView_Default_RoutesToInitializedModule(t *testing.T) {
 	if err := Init(Config{ID: "media", Name: "Media"}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	ExposeView("links", "@*/oauth-*")
+	ExposeView("links", "@anna/dashboard")
 	got := DefaultModule().registry.Exposures()
 	if len(got) != 1 || got[0].Name != "links" {
 		t.Errorf("default-module dispatch broken: %+v", got)
