@@ -105,7 +105,7 @@ func (m *Module) ModuleDB(ctx context.Context) (db.Querier, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
+	moduleCtx := db.WithSchema(ctx, m.moduleSchemaFor(ctx))
 	querier, releaseConn, err := db.AcquireScoped(moduleCtx, pool)
 	if err != nil {
 		releasePool()
@@ -133,7 +133,7 @@ func (m *Module) ModuleTx(ctx context.Context, fn func(q db.Querier) error) erro
 		return err
 	}
 	defer releasePool()
-	moduleCtx := db.WithSchema(ctx, m.moduleSchema())
+	moduleCtx := db.WithSchema(ctx, m.moduleSchemaFor(ctx))
 	return db.Tx(moduleCtx, pool, fn)
 }
 
@@ -143,11 +143,28 @@ func (m *Module) resolveModulePool(ctx context.Context) (*pgxpool.Pool, func(), 
 	return m.resolvePoolFor(ctx, db.ModuleCredentialFrom)
 }
 
-// moduleSchema returns the Postgres schema name for this module's shared
-// state. Convention: "mod_" + the developer's Config.ID. The platform must
-// pre-create this schema and grant the per-module DB role USAGE on it
-// before any module handler runs.
-func (m *Module) moduleSchema() string {
+// moduleSchemaFor returns the Postgres schema (search_path target) for this
+// module's shared cross-app state.
+//
+// In production, the platform's Lambda invoke shim resolves the live prefix
+// from app_<app_id>.module_install.prefix and injects it via db.WithPrefix
+// before invoking the module's handler. This lets the same compiled binary
+// run against both pre-Phase-2 installs (where the resolved prefix is the
+// legacy "mod_<id>" form) and Phase-2 installs renamed via slug or username
+// changes — all without baking the prefix into compiled SQL.
+//
+// In dev mode (no platform shim) and for legacy modules with no
+// module_install row, the helper falls back to "mod_" + Config.ID. This
+// matches the pre-Phase-2 default and the one-time backfill that runs at
+// platform upgrade time, so the same dev-mode binary keeps working in
+// freshly-spun-up local Postgres without any per-app metadata.
+//
+// The platform must pre-create this schema and grant the per-module DB role
+// USAGE on it before any module handler runs.
+func (m *Module) moduleSchemaFor(ctx context.Context) string {
+	if p := db.PrefixFrom(ctx); p != "" {
+		return p
+	}
 	return "mod_" + m.config.ID
 }
 

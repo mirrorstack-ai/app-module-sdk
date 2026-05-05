@@ -14,10 +14,14 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   Pair with the consumer's `ms.DependsOn("@<owner>/<this>.<view>")` — both sides must match for the read to actually happen. This is the SDK side of Phase 2's data-routing story (DB proxy enforcement lands separately on the platform).
   Wildcards in `readableBy`: `@*/analytics`, `@me/oauth-*`, `@*/*`. Detailed pattern matching lives on the catalog side; the SDK enforces only the `@<owner>/<module>` shape and the Postgres-identifier shape of the resource name.
   **Dedup semantics**: declaring the same name twice merges the `readableBy` slices (set union, preserving order). A second call can never silently drop a reader the first call established — feature-flagged additions compose safely. Re-declaring with a different `Kind` panics (contradiction, not composition).
+- **`Config.Slug`** — catalog-owned human-readable handle (e.g. `"oauth"`). Mutable via catalog UI; renames force a new published version with auto-generated rename migrations. Validated as kebab-case (`^[a-z][a-z0-9-]{0,15}$`, max 16 chars). Optional at `New()` time so dev iteration works before the CLI scaffold has assigned one — the publish pipeline is where slugs become required. See `docs/module-identity-and-storage-prefix.md` for the rename-safety design.
 - **Manifest payload addition**: `Exposures []registry.Exposure` (additive — empty array when nothing is declared).
+- **Manifest payload addition**: `Slug string` (`omitempty` — absent when unset, so dev/legacy modules round-trip cleanly).
+- **`db.WithPrefix(ctx, prefix)` / `db.PrefixFrom(ctx)`** — context plumbing the platform's Lambda invoke shim uses to inject the live storage prefix resolved from `app_<app_id>.module_install.prefix`. Distinct from `db.WithSchema`: schema is the search_path; prefix is the leading segment baked into per-app table names (`<username>_<slug>_<table>`).
 
 ### Changed
-- `ManifestPayload` wire shape gains the `exposures` field. Existing consumers that ignore unknown fields continue to deserialize cleanly.
+- `Module.ModuleDB` / `Module.ModuleTx` resolve their schema via a new `moduleSchemaFor(ctx)` helper. In production, the helper returns the prefix the platform has injected via `db.WithPrefix`; in dev/legacy, it falls back to the existing `mod_<Config.ID>` form. Compiled SQL stays vanilla — no per-version schema literals get baked into the binary.
+- `ManifestPayload` wire shape gains the `exposures` and `slug` fields. Existing consumers that ignore unknown fields continue to deserialize cleanly.
 
 ## [v0.1.1] - 2026-05-05
 
