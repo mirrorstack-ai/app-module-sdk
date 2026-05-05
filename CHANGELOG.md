@@ -13,6 +13,7 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`ms.ExposeView(name, readableBy ...string)`** + **`ms.ExposeTable(name, readableBy ...string)`** — declare which views/tables in this module's `mod_<id>` schema are readable by which other modules. Per-module + per-call; the catalog translates these declarations into Postgres `GRANT SELECT` against the consumer modules' DB roles at install time.
   Pair with the consumer's `ms.DependsOn("@<owner>/<this>.<view>")` — both sides must match for the read to actually happen. This is the SDK side of Phase 2's data-routing story (DB proxy enforcement lands separately on the platform).
   Wildcards in `readableBy`: `@*/analytics`, `@me/oauth-*`, `@*/*`. Detailed pattern matching lives on the catalog side; the SDK enforces only the `@<owner>/<module>` shape and the Postgres-identifier shape of the resource name.
+  **Dedup semantics**: declaring the same name twice merges the `readableBy` slices (set union, preserving order). A second call can never silently drop a reader the first call established — feature-flagged additions compose safely. Re-declaring with a different `Kind` panics (contradiction, not composition).
 - **Manifest payload addition**: `Exposures []registry.Exposure` (additive — empty array when nothing is declared).
 
 ### Changed

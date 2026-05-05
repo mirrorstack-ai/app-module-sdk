@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strings"
 )
 
 // ExposureKind distinguishes "I'm exposing a view" from "I'm exposing a raw
@@ -55,10 +54,15 @@ var readerPattern = regexp.MustCompile(`^@[a-z0-9_*\-]+/[a-z0-9_*\-]+$`)
 // the rest of the registry, an invalid declaration is a programmer error
 // caught at module init, not a runtime input.
 //
-// Dedup: if the same Name is declared twice, the second call replaces the
-// first (last-wins). Different from how Routes / Emits dedup as first-wins
-// — exposures are deliberately re-declarable so a module can extend its
-// `ReadableBy` list across files (e.g., feature-gated additions).
+// Dedup: if the same (Name, Kind) is declared twice, ReadableBy entries
+// from both calls are merged (set union). Re-declaring the same name with
+// a different Kind panics — that's a contradiction, not composition.
+//
+// Why merge instead of last-wins or first-wins: a security-adjacent
+// declaration like `ms.ExposeView("orders", "@me/analytics")` losing the
+// `@me/analytics` reader if a second file forgets to re-list it would be
+// surprising. Merging makes feature-flagged additions compose safely
+// (each call adds; nothing silently drops).
 func (r *Registry) AddExposure(e Exposure) {
 	ValidateName("Expose", e.Name)
 	if !exposureNamePattern.MatchString(e.Name) {
@@ -78,18 +82,48 @@ func (r *Registry) AddExposure(e Exposure) {
 			))
 		}
 	}
-	// Defensive copy so a caller mutating their slice after registration
-	// can't change what we hold.
-	e.ReadableBy = slices.Clone(e.ReadableBy)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.exposures {
-		if existing.Name == e.Name {
-			r.exposures[i] = e
-			return
+		if existing.Name != e.Name {
+			continue
 		}
+		if existing.Kind != e.Kind {
+			panic(fmt.Sprintf(
+				"mirrorstack/registry: Expose(%q) kind conflict — already registered as %q, now %q",
+				e.Name, existing.Kind, e.Kind,
+			))
+		}
+		r.exposures[i].ReadableBy = mergeReaders(existing.ReadableBy, e.ReadableBy)
+		return
 	}
+	// Defensive copy so a caller mutating their slice after registration
+	// can't change what we hold.
+	e.ReadableBy = slices.Clone(e.ReadableBy)
 	r.exposures = append(r.exposures, e)
+}
+
+// mergeReaders returns the set union of two reader slices, preserving the
+// order: existing entries stay where they are, new entries append in
+// declaration order. Order matters only for the manifest's deterministic
+// output; the catalog's GRANT emission is order-independent.
+func mergeReaders(existing, additions []string) []string {
+	if len(additions) == 0 {
+		return existing
+	}
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	for _, r := range existing {
+		seen[r] = struct{}{}
+	}
+	out := slices.Clone(existing)
+	for _, r := range additions {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	return out
 }
 
 // Exposures returns a non-nil clone in registration order.
@@ -108,9 +142,4 @@ func (r *Registry) Exposures() []Exposure {
 		}
 	}
 	return out
-}
-
-// String returns a debug-friendly summary. Used in panic messages elsewhere.
-func (e Exposure) String() string {
-	return fmt.Sprintf("Exposure{%s %s readableBy=[%s]}", e.Kind, e.Name, strings.Join(e.ReadableBy, ","))
 }

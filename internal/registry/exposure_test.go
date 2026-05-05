@@ -2,6 +2,7 @@ package registry
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -21,17 +22,35 @@ func TestAddExposure_StoresAndReturns(t *testing.T) {
 	}
 }
 
-func TestAddExposure_LastWinsOnSameName(t *testing.T) {
+func TestAddExposure_MergesReadersAcrossCalls(t *testing.T) {
 	r := New()
 	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@me/oauth-google"}})
 	r.AddExposure(Exposure{Name: "links", Kind: ExposureKindView, ReadableBy: []string{"@*/oauth-*"}})
 	out := r.Exposures()
 	if len(out) != 1 {
-		t.Fatalf("expected dedup, got %d", len(out))
+		t.Fatalf("expected dedup to keep one entry, got %d", len(out))
 	}
-	if !slices.Equal(out[0].ReadableBy, []string{"@*/oauth-*"}) {
-		t.Errorf("expected last-wins, got %+v", out[0].ReadableBy)
+	if !slices.Equal(out[0].ReadableBy, []string{"@me/oauth-google", "@*/oauth-*"}) {
+		t.Errorf("expected merge-union, got %+v", out[0].ReadableBy)
 	}
+}
+
+func TestAddExposure_MergeDeduplicatesIdenticalReader(t *testing.T) {
+	r := New()
+	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@me/a", "@me/b"}})
+	r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView, ReadableBy: []string{"@me/b", "@me/c"}})
+	out := r.Exposures()
+	if !slices.Equal(out[0].ReadableBy, []string{"@me/a", "@me/b", "@me/c"}) {
+		t.Errorf("expected dedup-on-merge, got %+v", out[0].ReadableBy)
+	}
+}
+
+func TestAddExposure_PanicsOnKindConflict(t *testing.T) {
+	assertExposurePanics(t, "view→table on same name should panic", func() {
+		r := New()
+		r.AddExposure(Exposure{Name: "x", Kind: ExposureKindView})
+		r.AddExposure(Exposure{Name: "x", Kind: ExposureKindTable})
+	})
 }
 
 func TestAddExposure_PreservesOrderAcrossDifferentNames(t *testing.T) {
@@ -79,6 +98,22 @@ func TestAddExposure_RejectsBadName(t *testing.T) {
 func TestAddExposure_RejectsBadKind(t *testing.T) {
 	assertExposurePanics(t, "unknown kind should panic", func() {
 		New().AddExposure(Exposure{Name: "ok", Kind: "matview"})
+	})
+}
+
+func TestAddExposure_NameLengthBoundary(t *testing.T) {
+	// 63 chars: max accepted (Postgres NAMEDATALEN ceiling).
+	max := "a" + strings.Repeat("b", 62) // 1 + 62 = 63
+	r := New()
+	r.AddExposure(Exposure{Name: max, Kind: ExposureKindView})
+	if r.Exposures()[0].Name != max {
+		t.Error("63-char name should accept")
+	}
+
+	// 64 chars: one over.
+	overflow := "a" + strings.Repeat("b", 63) // 1 + 63 = 64
+	assertExposurePanics(t, "64-char name should panic", func() {
+		New().AddExposure(Exposure{Name: overflow, Kind: ExposureKindView})
 	})
 }
 
