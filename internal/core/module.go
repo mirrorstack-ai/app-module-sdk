@@ -286,6 +286,12 @@ func (m *Module) Start() error {
 		return m.startTaskWorker()
 	}
 
+	if m.devMigrateEnabled() {
+		if err := m.applyDevMigrations(context.Background()); err != nil {
+			return err
+		}
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

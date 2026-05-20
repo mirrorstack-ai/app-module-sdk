@@ -17,7 +17,11 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
-const defaultDevURL = "postgres://postgres:postgres@localhost:5433/module?sslmode=disable"
+// Matches the mirrorstack-cli's bundled `templates/dev/docker-compose.yml.tmpl`
+// (mirrorstack/mirrorstack on :5433). The CLI exports MS_LOCAL_DB_URL which
+// takes precedence, but if a developer runs `go run .` outside `mirrorstack
+// dev` and forgot to set anything, this connects to the compose Postgres.
+const defaultDevURL = "postgres://mirrorstack:mirrorstack@localhost:5433/mirrorstack?sslmode=disable"
 
 // Querier is the interface for database operations.
 // Compatible with pgxpool.Conn and sqlc's DBTX interface.
@@ -32,14 +36,22 @@ type DB struct {
 	pool *pgxpool.Pool
 }
 
-// Open creates a DB from DATABASE_URL env var, falling back to local dev default.
+// Open creates a DB for local development. Precedence:
+//
+//	MS_LOCAL_DB_URL    — set by `mirrorstack dev` to point at the bundled compose Postgres
+//	DATABASE_URL       — generic 12-factor name, honored for non-CLI dev flows
+//	defaultDevURL      — falls back to the compose-shape default
+//
 // Use this for dev mode only. Production uses PoolCache with injected credentials.
 // Returns an error if called inside AWS Lambda (credentials should be injected per-invocation).
 func Open(ctx context.Context) (*DB, error) {
 	if lambdaenv.IsSet() {
 		return nil, fmt.Errorf("mirrorstack/db: Open() cannot be used in Lambda — credentials are injected per-invocation")
 	}
-	url := os.Getenv("DATABASE_URL")
+	url := os.Getenv("MS_LOCAL_DB_URL")
+	if url == "" {
+		url = os.Getenv("DATABASE_URL")
+	}
 	if url == "" {
 		url = defaultDevURL
 	}
