@@ -238,3 +238,114 @@ type errFS struct{}
 func (errFS) Open(name string) (fs.File, error) {
 	return nil, fs.ErrInvalid
 }
+
+// capturingTxRunner records the context it was invoked with so tests can
+// assert what credentials/schema flowed through from the request body.
+// Pair with oneMigrationFS so Apply invokes the runner exactly once.
+func capturingTxRunner(t *testing.T, gotCtx *context.Context) migration.TxRunner {
+	return func(ctx context.Context, fn func(q db.Querier) error) error {
+		t.Helper()
+		*gotCtx = ctx
+		return nil
+	}
+}
+
+// oneMigrationFS returns an fs.FS with a single empty .up.sql so Apply
+// invokes the runner exactly once without running real SQL.
+func oneMigrationFS() fs.FS {
+	return fstest.MapFS{
+		"sql/app/0001_init.up.sql": {Data: []byte("")},
+	}
+}
+
+func TestInstallHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
+	t.Parallel()
+
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+
+	body := strings.NewReader(`{
+		"appId":  "6c8d1234-abcd-ef01-2345-6789abcdef00",
+		"schema": "app_6c8d1234_abcd_ef01_2345_6789abcdef00",
+		"credential": {
+			"host":     "127.0.0.1",
+			"port":     5432,
+			"database": "platform_apps",
+			"username": "r_6c8d1234_oauth-core",
+			"token":    "secret-token"
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — Apply short-circuited unexpectedly")
+	}
+	if got := db.SchemaFrom(captured); got != "app_6c8d1234_abcd_ef01_2345_6789abcdef00" {
+		t.Errorf("SchemaFrom = %q, want app_6c8d1234_...", got)
+	}
+	cred := db.CredentialFrom(captured)
+	if cred == nil {
+		t.Fatal("CredentialFrom returned nil; expected per-module credential")
+	}
+	if cred.Username != "r_6c8d1234_oauth-core" || cred.Token != "secret-token" {
+		t.Errorf("credential = %+v, want username=r_6c8d1234_oauth-core token=secret-token", cred)
+	}
+}
+
+func TestInstallHandler_EmptyBodyFallsThrough(t *testing.T) {
+	t.Parallel()
+
+	// Dev-mount migration auto-apply posts no body. Handler must succeed and
+	// leave ctx without injected schema or credential so resolvePoolFor
+	// falls back to the dev pool.
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if db.SchemaFrom(captured) != "" {
+		t.Errorf("SchemaFrom = %q, want empty for body-less request", db.SchemaFrom(captured))
+	}
+	if db.CredentialFrom(captured) != nil {
+		t.Errorf("CredentialFrom = %+v, want nil for body-less request", db.CredentialFrom(captured))
+	}
+}
+
+func TestInstallHandler_MalformedBody_400(t *testing.T) {
+	t.Parallel()
+
+	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", strings.NewReader(`{not json`)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for malformed body", rec.Code)
+	}
+}
+
+func TestInstallHandler_PartialBodyOmitsMissingFields(t *testing.T) {
+	t.Parallel()
+
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	body := strings.NewReader(`{"schema": "app_only"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := db.SchemaFrom(captured); got != "app_only" {
+		t.Errorf("SchemaFrom = %q, want app_only", got)
+	}
+	if db.CredentialFrom(captured) != nil {
+		t.Error("CredentialFrom should be nil when body omits credential")
+	}
+}

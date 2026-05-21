@@ -1,12 +1,15 @@
 package system
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
 
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 )
@@ -36,6 +39,20 @@ type VersionRequest struct {
 	To   string `json:"to"`
 }
 
+// InstallRequest is the optional body for the install endpoint. The
+// platform's install service populates Credential + Schema so the SDK can
+// run migrations under the per-(app, module) Postgres role provisioned at
+// install time; AppID is metadata for module-side logging/auditing.
+//
+// All fields are optional — an empty body falls back to the dev path
+// (DATABASE_URL pool, default schema), matching the pre-B2b behavior that
+// `mirrorstack dev`'s migration auto-apply relies on.
+type InstallRequest struct {
+	AppID      string         `json:"appId,omitempty"`
+	Schema     string         `json:"schema,omitempty"`
+	Credential *db.Credential `json:"credential,omitempty"`
+}
+
 // UninstallResult is the response for uninstall.
 type UninstallResult struct {
 	Status string `json:"status"`
@@ -52,12 +69,16 @@ type UninstallResult struct {
 // — platform-side saga logic is responsible for preventing that.
 func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, ok := injectInstallContext(w, r)
+		if !ok {
+			return
+		}
 		migrations, err := migration.List(sqlFS, scope)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
 		}
-		applied, err := migration.Apply(r.Context(), runTx, sqlFS, migrations)
+		applied, err := migration.Apply(ctx, runTx, sqlFS, migrations)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, LifecycleError{
 				LifecycleResult: LifecycleResult{Applied: applied},
@@ -67,6 +88,37 @@ func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner
 		}
 		httputil.JSON(w, http.StatusOK, LifecycleResult{Applied: applied})
 	}
+}
+
+// injectInstallContext reads an optional InstallRequest body and folds its
+// Credential + Schema into the request context. Empty body is allowed —
+// the dev/legacy path keeps working with no body at all, falling through
+// to the SDK's DATABASE_URL pool when nothing is in ctx.
+//
+// Returns ok=false after writing the response (400 or 413) when the body
+// is present but malformed; callers must return without touching w again.
+func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Context, bool) {
+	ctx := r.Context()
+	var req InstallRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if errors.Is(err, io.EOF) {
+			return ctx, true
+		}
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			httputil.JSON(w, http.StatusRequestEntityTooLarge, httputil.ErrorResponse{Error: "request body too large"})
+		} else {
+			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
+		}
+		return ctx, false
+	}
+	if req.Schema != "" {
+		ctx = db.WithSchema(ctx, req.Schema)
+	}
+	if req.Credential != nil {
+		ctx = db.WithCredential(ctx, *req.Credential)
+	}
+	return ctx, true
 }
 
 // UpgradeHandler applies the migrations strictly between (req.From, req.To].
