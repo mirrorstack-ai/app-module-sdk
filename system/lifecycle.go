@@ -40,17 +40,32 @@ type VersionRequest struct {
 }
 
 // InstallRequest is the optional body for the install endpoint. The
-// platform's install service populates Credential + Schema so the SDK can
-// run migrations under the per-(app, module) Postgres role provisioned at
-// install time; AppID is metadata for module-side logging/auditing.
+// platform populates Credential + Schema so the SDK runs migrations
+// under the per-(app, module) role provisioned at install time; AppID
+// is metadata for module-side logging/auditing.
 //
 // All fields are optional — an empty body falls back to the dev path
-// (DATABASE_URL pool, default schema), matching the pre-B2b behavior that
-// `mirrorstack dev`'s migration auto-apply relies on.
+// (DATABASE_URL pool, default schema), matching the pre-B2b behavior
+// that `mirrorstack dev`'s migration auto-apply relies on.
 type InstallRequest struct {
-	AppID      string         `json:"appId,omitempty"`
-	Schema     string         `json:"schema,omitempty"`
-	Credential *db.Credential `json:"credential,omitempty"`
+	AppID      string             `json:"appId,omitempty"`
+	Schema     string             `json:"schema,omitempty"`
+	Credential *InstallCredential `json:"credential,omitempty"`
+}
+
+// InstallCredential is the per-install Postgres credential delivered in
+// the install request body. Only Username + Token live here — those are
+// the per-(app, module) values only the platform knows (minted when the
+// per-module role was created).
+//
+// Host/Port/Database deliberately do NOT live here. They come from the
+// module's own environment (db.EnvBaseCredential — backed by
+// MS_LOCAL_DB_URL / DATABASE_URL in dev, AWS Secrets Manager in
+// production) so the platform doesn't leak its DB location to every
+// install payload.
+type InstallCredential struct {
+	Username string `json:"username"`
+	Token    string `json:"token"`
 }
 
 // UninstallResult is the response for uninstall.
@@ -115,8 +130,15 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 	if req.Schema != "" {
 		ctx = db.WithSchema(ctx, req.Schema)
 	}
-	if req.Credential != nil {
-		ctx = db.WithCredential(ctx, *req.Credential)
+	if req.Credential != nil && (req.Credential.Username != "" || req.Credential.Token != "") {
+		base, err := db.EnvBaseCredential()
+		if err != nil {
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "resolve DB env base: " + err.Error()})
+			return ctx, false
+		}
+		base.Username = req.Credential.Username
+		base.Token = req.Credential.Token
+		ctx = db.WithCredential(ctx, base)
 	}
 	return ctx, true
 }
