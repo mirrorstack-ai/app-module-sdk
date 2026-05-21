@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -104,25 +103,18 @@ func ModuleCredentialFrom(ctx context.Context) *Credential {
 }
 
 // EnvBaseCredential returns the Host/Port/Database derived from the SDK's
-// standard dev env vars (MS_LOCAL_DB_URL → DATABASE_URL → defaultDevURL),
-// matching what db.Open consults. Username and Token are left empty for
-// the caller to fill from per-invocation credentials — e.g. the install
-// request body carries a per-(app, module) username + token but the DB
-// location it should connect to comes from this helper.
+// standard dev env vars (resolved via devEnvURL — same ladder db.Open
+// consults). Username and Token are left empty for the caller to fill
+// from per-invocation credentials — e.g. the install request body carries
+// a per-(app, module) username + token but the DB location it should
+// connect to comes from this helper.
 //
-// Production (deployed Lambda) will replace this with a Secrets Manager
-// fetch when that infra lands; the contract (returns a partial
-// Credential the caller completes with per-invocation fields) stays
-// identical so the install handler doesn't change.
+// Production (deployed runtime) will replace this with a managed-secret
+// fetch when that infra lands; the contract (returns a partial Credential
+// the caller completes with per-invocation fields) stays identical so the
+// install handler doesn't change.
 func EnvBaseCredential() (Credential, error) {
-	url := os.Getenv("MS_LOCAL_DB_URL")
-	if url == "" {
-		url = os.Getenv("DATABASE_URL")
-	}
-	if url == "" {
-		url = defaultDevURL
-	}
-	cfg, err := pgxpool.ParseConfig(url)
+	cfg, err := pgxpool.ParseConfig(devEnvURL())
 	if err != nil {
 		return Credential{}, fmt.Errorf("mirrorstack/db: parse env URL: %w", err)
 	}

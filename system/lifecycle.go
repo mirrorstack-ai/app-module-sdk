@@ -130,6 +130,11 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 	if req.Schema != "" {
 		ctx = db.WithSchema(ctx, req.Schema)
 	}
+	// Treat empty username AND empty token as "no credential supplied" —
+	// caller sent `"credential":{}` for shape compat but the dev pool
+	// fallback should still apply. Avoids injecting a half-credential that
+	// would later trip resolvePool's "credential missing required fields"
+	// validation.
 	if req.Credential != nil && (req.Credential.Username != "" || req.Credential.Token != "") {
 		base, err := db.EnvBaseCredential()
 		if err != nil {
