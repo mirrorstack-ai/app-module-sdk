@@ -315,3 +315,43 @@ func TestManifest_OptionalOmittedInJSONWhenFalse(t *testing.T) {
 		t.Errorf("required dep should omit \"optional\":false, got: %s", body)
 	}
 }
+
+func TestManifest_UIPopulatedWhenRegistered(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	reg.SetUI(registry.ModuleUI{
+		Components: []registry.UIComponent{
+			{Name: "SettingsForm", Export: "SettingsForm", Props: []registry.UIProp{
+				{Key: "appId", Type: "text", Required: true},
+			}},
+		},
+		DefaultPages: []registry.UIPage{
+			{Slug: "", Title: "Settings", Export: "SettingsPage"},
+			{Slug: "audit", Title: "Audit", Export: "AuditPage"},
+		},
+	})
+
+	got := decodeManifest(t, ManifestHandler("demo", "", "Demo", "box", nil, nil, reg))
+	if got.UI == nil {
+		t.Fatal("manifest.ui is nil; expected populated UI")
+	}
+	if len(got.UI.Components) != 1 || got.UI.Components[0].Name != "SettingsForm" {
+		t.Errorf("manifest.ui.components = %+v", got.UI.Components)
+	}
+	if len(got.UI.DefaultPages) != 2 {
+		t.Errorf("manifest.ui.defaultPages len = %d, want 2", len(got.UI.DefaultPages))
+	}
+}
+
+func TestManifest_UIOmittedWhenNotRegistered(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("demo", "", "Demo", "box", nil, nil, registry.New()).ServeHTTP(rec, req)
+
+	if strings.Contains(rec.Body.String(), `"ui"`) {
+		t.Errorf("expected \"ui\" key omitted when no RegisterUI was called, got: %s", rec.Body.String())
+	}
+}

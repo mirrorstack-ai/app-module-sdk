@@ -31,6 +31,9 @@ type ManifestPayload struct {
 	Tasks        []registry.Task                     `json:"tasks"`
 	Permissions  []registry.Permission               `json:"permissions"`
 	MCP          ManifestMCP                         `json:"mcp"`
+	// UI is the module's declared UI surface (RegisterUI). Nil/absent when
+	// the module ships no UI — callers must nil-check before reading.
+	UI *registry.ModuleUI `json:"ui,omitempty"`
 }
 
 // ManifestMCP declares the MCP tool and resource surface of the module. The
@@ -121,6 +124,7 @@ func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[stri
 			Tasks:        reg.Tasks(),
 			Permissions:  reg.Permissions(),
 			MCP:          buildManifestMCP(reg),
+			UI:           reg.UI(),
 		})
 	}
 }
