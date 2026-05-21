@@ -7,6 +7,14 @@ import (
 	"strings"
 )
 
+// validPropTypes locks the v0 prop type vocabulary. Adding a new type means
+// updating the renderer in web-applications + the agent's schema awareness;
+// rejecting unknown types here surfaces that as a programmer error at
+// module init instead of as a silent render failure later. The slice is
+// also used to compose the panic message so the "allowed" list stays in
+// lockstep with the actual check.
+var validPropTypes = []string{"text", "secret", "textarea", "bool", "number", "text-list"}
+
 // ModuleUI is the module's declared UI surface. Two parts:
 //
 //   - Components: the module's agent-visible React vocabulary. Each entry
@@ -55,19 +63,6 @@ type UIPage struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 	Export      string `json:"export"`
-}
-
-// validPropTypes locks the v0 prop type vocabulary. Adding a new type means
-// updating the renderer in web-applications + the agent's schema awareness;
-// rejecting unknown types here surfaces that as a programmer error at
-// module init instead of as a silent render failure later.
-var validPropTypes = map[string]struct{}{
-	"text":      {},
-	"secret":    {},
-	"textarea":  {},
-	"bool":      {},
-	"number":    {},
-	"text-list": {},
 }
 
 // pageSlugRe is the slug rule from the v0 plan: lowercase letters, digits,
@@ -148,8 +143,8 @@ func validateProps(componentName string, props []UIProp) {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: %s has duplicate Prop key %q", componentName, p.Key))
 		}
 		seen[p.Key] = struct{}{}
-		if _, ok := validPropTypes[p.Type]; !ok {
-			panic(fmt.Sprintf("mirrorstack: RegisterUI: %s.Props[%d] (%q) invalid type %q (allowed: text, secret, textarea, bool, number, text-list)", componentName, i, p.Key, p.Type))
+		if !slices.Contains(validPropTypes, p.Type) {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: %s.Props[%d] (%q) invalid type %q (allowed: %s)", componentName, i, p.Key, p.Type, strings.Join(validPropTypes, ", ")))
 		}
 	}
 }

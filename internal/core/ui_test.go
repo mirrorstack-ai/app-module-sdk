@@ -63,7 +63,6 @@ func TestRegisterUI_LastWriteWins(t *testing.T) {
 func TestRegisterUI_StoresDeepCopy(t *testing.T) {
 	t.Parallel()
 
-	// Mutating the input after RegisterUI must not corrupt the registry.
 	m, _ := New(Config{ID: "demo"})
 	pages := []UIPage{{Slug: "", Title: "Original", Export: "P"}}
 	m.RegisterUI(ModuleUI{DefaultPages: pages})
@@ -79,7 +78,6 @@ func TestRegisterUI_StoresDeepCopy(t *testing.T) {
 func TestRegisterUI_UIReturnsDeepCopy(t *testing.T) {
 	t.Parallel()
 
-	// Mutating the returned manifest must not corrupt the registry.
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
 		DefaultPages: []UIPage{{Slug: "", Title: "Original", Export: "P"}},
