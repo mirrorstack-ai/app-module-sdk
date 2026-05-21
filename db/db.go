@@ -48,14 +48,22 @@ func Open(ctx context.Context) (*DB, error) {
 	if lambdaenv.IsSet() {
 		return nil, fmt.Errorf("mirrorstack/db: Open() cannot be used in Lambda — credentials are injected per-invocation")
 	}
-	url := os.Getenv("MS_LOCAL_DB_URL")
-	if url == "" {
-		url = os.Getenv("DATABASE_URL")
+	return New(ctx, devEnvURL())
+}
+
+// devEnvURL is the single source of truth for the dev DB URL precedence
+// ladder (MS_LOCAL_DB_URL > DATABASE_URL > defaultDevURL). Both Open
+// (production pool construction) and EnvBaseCredential (per-install
+// credential base) consult it so adding a new env var or changing the
+// fallback chain is a one-line edit.
+func devEnvURL() string {
+	if url := os.Getenv("MS_LOCAL_DB_URL"); url != "" {
+		return url
 	}
-	if url == "" {
-		url = defaultDevURL
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		return url
 	}
-	return New(ctx, url)
+	return defaultDevURL
 }
 
 // New creates a DB with the given connection string. The pool gets the same

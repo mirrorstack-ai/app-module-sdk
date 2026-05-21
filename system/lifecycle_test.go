@@ -259,7 +259,12 @@ func oneMigrationFS() fs.FS {
 }
 
 func TestInstallHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel because t.Setenv on MS_LOCAL_DB_URL would race with
+	// concurrent tests reading the env base.
+
+	// Point the env base at a known URL so we can assert host/port/database
+	// come from the environment, not the body.
+	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
 
 	var captured context.Context
 	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
@@ -268,9 +273,6 @@ func TestInstallHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
 		"appId":  "6c8d1234-abcd-ef01-2345-6789abcdef00",
 		"schema": "app_6c8d1234_abcd_ef01_2345_6789abcdef00",
 		"credential": {
-			"host":     "127.0.0.1",
-			"port":     5432,
-			"database": "platform_apps",
 			"username": "r_6c8d1234_oauth-core",
 			"token":    "secret-token"
 		}
@@ -291,8 +293,13 @@ func TestInstallHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
 	if cred == nil {
 		t.Fatal("CredentialFrom returned nil; expected per-module credential")
 	}
+	// Per-install fields from the body.
 	if cred.Username != "r_6c8d1234_oauth-core" || cred.Token != "secret-token" {
-		t.Errorf("credential = %+v, want username=r_6c8d1234_oauth-core token=secret-token", cred)
+		t.Errorf("credential per-install = username=%q token=%q, want r_6c8d1234_oauth-core / secret-token", cred.Username, cred.Token)
+	}
+	// Static fields from the env URL — the body does NOT carry these any more.
+	if cred.Host != "db.platform.local" || cred.Port != 6543 || cred.Database != "platform_apps" {
+		t.Errorf("credential env-base = host=%q port=%d db=%q, want db.platform.local/6543/platform_apps", cred.Host, cred.Port, cred.Database)
 	}
 }
 

@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type contextKey string
@@ -98,4 +100,24 @@ func WithModuleCredential(ctx context.Context, cred Credential) context.Context 
 func ModuleCredentialFrom(ctx context.Context) *Credential {
 	c, _ := ctx.Value(moduleCredentialKey).(*Credential)
 	return c
+}
+
+// EnvBaseCredential returns the Host/Port/Database derived from the SDK's
+// standard dev env vars (resolved via devEnvURL — same ladder db.Open
+// consults). Username and Token are left empty for the caller to fill
+// from per-invocation credentials — e.g. the install request body carries
+// a per-(app, module) username + token but the DB location it should
+// connect to comes from this helper.
+//
+// Production (deployed runtime) will replace this with a managed-secret
+// fetch when that infra lands; the contract (returns a partial Credential
+// the caller completes with per-invocation fields) stays identical so the
+// install handler doesn't change.
+func EnvBaseCredential() (Credential, error) {
+	cfg, err := pgxpool.ParseConfig(devEnvURL())
+	if err != nil {
+		return Credential{}, fmt.Errorf("mirrorstack/db: parse env URL: %w", err)
+	}
+	cc := cfg.ConnConfig
+	return Credential{Host: cc.Host, Port: int(cc.Port), Database: cc.Database}, nil
 }
