@@ -126,6 +126,28 @@ func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
 // always returns (zero, false).
 func Resolve[T any](id string) (T, bool) { return core.Resolve[T](id) }
 
+// --- UI surface ---
+
+// ModuleUI is the module's declared UI surface. Pass to ms.RegisterUI.
+type ModuleUI = core.ModuleUI
+
+// UIComponent declares one agent-visible React component shipped by the
+// module's web bundle. See ms.ModuleUI for the full shape.
+type UIComponent = core.UIComponent
+
+// UIProp is one prop declared on a UIComponent. Type is one of "text",
+// "secret", "textarea", "bool", "number", "text-list".
+type UIProp = core.UIProp
+
+// UIPage is one entry in DefaultPages — a module-shipped React page
+// mounted by the platform under /apps/<app-slug>/<module-slug>/<Slug>.
+type UIPage = core.UIPage
+
+// RegisterUI declares the module's UI surface (agent-visible Components
+// plus DefaultPages). Panics on programmer errors (duplicate names,
+// invalid slug, unknown prop type). Last-write-wins.
+func RegisterUI(ui ModuleUI) { core.RegisterUI(ui) }
+
 // --- Agent surface (MCP) ---
 
 // MCPTool registers an agent-callable tool on the default module with JSON

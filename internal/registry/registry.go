@@ -135,6 +135,7 @@ type Registry struct {
 	dependencies []Dependency
 	mcpTools     []MCPToolDecl
 	mcpResources []MCPResourceDecl
+	ui           *ModuleUI
 }
 
 func New() *Registry {
