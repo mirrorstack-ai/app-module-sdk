@@ -33,14 +33,8 @@ func PublicAuth() func(http.Handler) http.Handler {
 }
 
 // InternalAuth returns middleware that validates the internal secret.
-// Reads MS_INTERNAL_SECRET env var at construction time.
-//
-// When MS_INTERNAL_SECRET is unset, requests get 503 in Lambda mode (so
-// platform alerting can split operator misconfig from wrong-secret events)
-// and 401 otherwise (dev intentionally runs without a secret). Module.Start()
-// also fail-fasts on the missing-secret case in Lambda mode, but a caller
-// can still bypass Start() via Module.Router().ServeHTTP — this branch is
-// the runtime safety net for that case.
+// Reads MS_INTERNAL_SECRET env var at construction time. Behavior matrix
+// (see internalAuth doc).
 //
 // CONTRACT: the returned middleware captures the expected secret once at
 // construction time. Callers (e.g., Module.internalAuth) cache and reuse
@@ -53,20 +47,39 @@ func InternalAuth() func(http.Handler) http.Handler {
 
 // internalAuth is the test seam; inLambda is injected so tests don't mutate
 // process env captured at package init.
+//
+// Behavior matrix (secret = MS_INTERNAL_SECRET env var):
+//
+//	inLambda + secret unset → 503 (operator misconfig; platform alerting)
+//	inLambda + secret set   → enforce X-MS-Internal-Secret header
+//	local    + secret unset → BYPASS (local-only; `mirrorstack dev` ergonomics)
+//	local    + secret set   → enforce (e.g. `mirrorstack dev --tunnel` exposes
+//	                          localhost to the platform, so the secret must
+//	                          be present and validated)
+//
+// The local-bypass lets a developer running `mirrorstack dev` curl
+// /__mirrorstack/platform/manifest directly without exporting the secret —
+// while still preventing tunnel mode from accidentally accepting
+// unauthenticated traffic forwarded by dispatch (the CLI sets the secret
+// when tunneling).
 func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 	expected := os.Getenv("MS_INTERNAL_SECRET")
 	if expected == "" {
-		// SECURITY: never echo the `expected` value (or any prefix/suffix of it)
-		// in this log line — Lambda log output goes to CloudWatch which is
-		// commonly accessible to many roles in the org.
-		log.Printf("mirrorstack: WARNING — MS_INTERNAL_SECRET not set, all internal routes will be rejected")
+		if inLambda {
+			// SECURITY: never echo the `expected` value (or any prefix/suffix of it)
+			// in this log line — Lambda log output goes to CloudWatch which is
+			// commonly accessible to many roles in the org.
+			log.Printf("mirrorstack: WARNING — MS_INTERNAL_SECRET not set, all internal routes will be rejected")
+		} else {
+			log.Printf("mirrorstack: MS_INTERNAL_SECRET not set; internal routes bypass auth (local dev)")
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if expected == "" {
-				log.Printf("mirrorstack: internal auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
 				if inLambda {
+					log.Printf("mirrorstack: internal auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
 					// SECURITY: generic body. The detailed reason is in the
 					// construction-time log line above; the 503 status itself
 					// is the platform's alerting signal. We don't want to
@@ -77,7 +90,8 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 					})
 					return
 				}
-				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "internal authentication required"})
+				// Local dev bypass — see the doc-comment matrix above.
+				next.ServeHTTP(w, r)
 				return
 			}
 

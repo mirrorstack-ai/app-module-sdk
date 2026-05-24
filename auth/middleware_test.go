@@ -113,19 +113,21 @@ func TestInternalAuth_ValidSecret(t *testing.T) {
 	}
 }
 
-func TestInternalAuth_NoSecret_NotLambda(t *testing.T) {
-	// Dev / HTTP server: secret intentionally absent → preserve the historical
-	// 401 so local tooling probing endpoints sees an auth-failure shape.
+func TestInternalAuth_NoSecret_NotLambda_Bypasses(t *testing.T) {
+	// Local dev with no secret configured: bypass auth so `mirrorstack dev`
+	// can serve /__mirrorstack/* directly without the developer exporting a
+	// secret. Tunnel mode (where the platform reaches localhost via
+	// dispatch) is responsible for setting the secret so this branch
+	// doesn't fire.
 	t.Setenv("MS_INTERNAL_SECRET", "")
 	handler := internalAuth(false)(http.HandlerFunc(okHandler))
 
 	req := httptest.NewRequest("POST", "/event", nil)
-	req.Header.Set("X-MS-Internal-Secret", "anything")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 not-lambda + no secret, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 bypass not-lambda + no secret, got %d", rec.Code)
 	}
 }
 
@@ -171,13 +173,16 @@ func TestInternalAuth_WrongSecret_InLambda_Still401(t *testing.T) {
 	}
 }
 
-func TestInternalAuth_LogsOnNoSecret(t *testing.T) {
+func TestInternalAuth_LogsOnNoSecret_Lambda(t *testing.T) {
+	// In Lambda mode (rejection path), each rejected request emits a log
+	// line including the path. Local mode bypasses so there's no per-
+	// request log there — only the construction-time "bypass auth" notice.
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	t.Setenv("MS_INTERNAL_SECRET", "")
-	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+	handler := internalAuth(true)(http.HandlerFunc(okHandler))
 
 	req := httptest.NewRequest("POST", "/platform/lifecycle/tick", nil)
 	rec := httptest.NewRecorder()
@@ -189,6 +194,23 @@ func TestInternalAuth_LogsOnNoSecret(t *testing.T) {
 	}
 	if !strings.Contains(got, "/platform/lifecycle/tick") {
 		t.Errorf("expected log to mention request path, got: %q", got)
+	}
+}
+
+func TestInternalAuth_LogsBypassNotice_LocalNoSecret(t *testing.T) {
+	// Construction-time notice: local dev + no secret prints a single
+	// "bypass auth (local dev)" line so the operator knows internal routes
+	// are open. Per-request logs are silent in this mode.
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	_ = internalAuth(false) // construction-time log fires here
+
+	got := buf.String()
+	if !strings.Contains(got, "bypass auth") {
+		t.Errorf("expected construction log to mention 'bypass auth', got: %q", got)
 	}
 }
 
