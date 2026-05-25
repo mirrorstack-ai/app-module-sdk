@@ -154,9 +154,9 @@ func TestNewLambdaHandler_StripXMSHeaders(t *testing.T) {
 		Method: "GET",
 		Path:   "/check",
 		Headers: map[string]string{
-			"X-MS-App-Role": "admin",       // spoofed — should be stripped
-			"x-ms-user-id":  "fake-user",   // case-insensitive — should be stripped
-			"Content-Type":  "text/plain",   // legit — should pass through
+			"X-MS-App-Role": "admin",      // spoofed — should be stripped
+			"x-ms-user-id":  "fake-user",  // case-insensitive — should be stripped
+			"Content-Type":  "text/plain", // legit — should pass through
 		},
 	})
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
@@ -34,6 +35,11 @@ type ManifestPayload struct {
 	// UI is the module's declared UI surface (RegisterUI). Nil/absent when
 	// the module ships no UI — callers must nil-check before reading.
 	UI *registry.ModuleUI `json:"ui,omitempty"`
+	// DefinedContributions lists the contribution slots this module
+	// accepts (ms.DefineContribute). The catalog reads this to know
+	// what other modules can plug into. Always present; empty array
+	// when no slots are declared.
+	DefinedContributions []contributions.SlotInfo `json:"definedContributions"`
 }
 
 // ManifestMCP declares the MCP tool and resource surface of the module. The
@@ -90,7 +96,10 @@ func buildManifestMCP(reg *registry.Registry) ManifestMCP {
 // instead of `"versions":null` — the handler owns the output contract and
 // normalizes here the same way Registry normalizes Routes/Emits/Subscribes/
 // Schedules at their getters.
-func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry) http.HandlerFunc {
+//
+// contribReg is the module's contribution-slot registry. Pass nil to omit
+// declared contributions from the manifest entirely (e.g. tests).
+func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry) http.HandlerFunc {
 	if versions == nil {
 		versions = map[string]MigrationVersions{}
 	}
@@ -110,21 +119,29 @@ func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[stri
 			log.Printf("mirrorstack: manifest module migration version unavailable (check Config.SQL is set correctly)")
 		}
 
+		var contribSlots []contributions.SlotInfo
+		if contribReg != nil {
+			contribSlots = contribReg.List()
+		} else {
+			contribSlots = []contributions.SlotInfo{}
+		}
+
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
-			ID:           id,
-			Slug:         slug,
-			Defaults:     ManifestDefaults{Name: name, Icon: icon},
-			Description:  reg.Description(),
-			Dependencies: reg.Dependencies(),
-			Migration:    MigrationVersions{App: appVersion, Module: moduleVersion},
-			Versions:     versions,
-			Routes:       reg.Routes(),
-			Events:       ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Schedules:    reg.Schedules(),
-			Tasks:        reg.Tasks(),
-			Permissions:  reg.Permissions(),
-			MCP:          buildManifestMCP(reg),
-			UI:           reg.UI(),
+			ID:                   id,
+			Slug:                 slug,
+			Defaults:             ManifestDefaults{Name: name, Icon: icon},
+			Description:          reg.Description(),
+			Dependencies:         reg.Dependencies(),
+			Migration:            MigrationVersions{App: appVersion, Module: moduleVersion},
+			Versions:             versions,
+			Routes:               reg.Routes(),
+			Events:               ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Schedules:            reg.Schedules(),
+			Tasks:                reg.Tasks(),
+			Permissions:          reg.Permissions(),
+			MCP:                  buildManifestMCP(reg),
+			UI:                   reg.UI(),
+			DefinedContributions: contribSlots,
 		})
 	}
 }
