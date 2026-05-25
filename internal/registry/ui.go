@@ -21,7 +21,7 @@ var validPropTypes = []string{"text", "secret", "textarea", "bool", "number", "t
 //     names a React export the module's bundle ships, plus a prop schema
 //     so the agent envelope layer (dynamic-ui v1) can compose them.
 //   - DefaultPages: the module's own React pages, mounted by the platform
-//     under /apps/<app-slug>/<module-slug>/<page-slug>. Each page is a
+//     under /apps/<app-slug>/<module-slug><Route>. Each page is a
 //     full React export — the module has total layout freedom.
 //
 // A module without a UI surface omits the ms.RegisterUI call entirely;
@@ -55,30 +55,35 @@ type UIProp struct {
 }
 
 // UIPage is one entry in DefaultPages — the module's own React page mounted
-// at /apps/<app-slug>/<module-slug>/<Slug>. Empty Slug is the index page.
-// Export names the bundle's React export to mount.
+// at /apps/<app-slug>/<module-slug><Route>. "/" is the index page; "/users"
+// is a sub-page. Export names the bundle's React export to mount; the
+// platform fetches the module's web bundle and renders the matching
+// named export for the requested route.
+//
+// The page's nav-rail icon is the module's icon (Config.Icon). Pages
+// don't carry their own icon today — when distinct icons per page are
+// needed, an Icon field will be added back as optional.
 type UIPage struct {
-	Slug        string `json:"slug"`
-	Icon        string `json:"icon,omitempty"`
+	Route       string `json:"route"`
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 	Export      string `json:"export"`
 }
 
-// pageSlugRe is the slug rule from the v0 plan: lowercase letters, digits,
-// and hyphens, 1–32 chars, must start and end with a letter or digit (no
-// leading/trailing hyphens). Empty slug (the index page) is checked
-// separately and skips this pattern.
-var pageSlugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
+// pageSegmentRe is the route-segment rule: lowercase letters, digits,
+// and hyphens, 1–32 chars, must start and end with a letter or digit
+// (no leading/trailing hyphens). Each "/"-separated piece of a non-index
+// route must match.
+var pageSegmentRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
-// reservedSlugPrefixes are platform-reserved namespaces under the module
-// route. The platform may mount its own surfaces under these prefixes in
-// the future (e.g. /__ms/* for platform-rendered fallbacks); reserving
+// reservedRouteFirstSegments are platform-reserved namespaces under the
+// module route. The platform may mount its own surfaces under these prefixes
+// in the future (e.g. /__ms/* for platform-rendered fallbacks); reserving
 // them at the SDK avoids a future collision.
-var reservedSlugPrefixes = []string{"_", "__ms"}
+var reservedRouteFirstSegments = []string{"_", "__ms"}
 
 // SetUI stores the module's declared UI manifest. Validates the input and
-// panics on programmer errors (duplicate names, invalid slug, unknown prop
+// panics on programmer errors (duplicate names, invalid route, unknown prop
 // type). Last-write-wins; a second call replaces the first. The stored
 // value is a deep copy so callers can mutate their input afterwards
 // without aliasing into the registry.
@@ -117,7 +122,7 @@ func validateUI(ui ModuleUI) {
 		validateProps(c.Name, c.Props)
 	}
 
-	seenSlug := make(map[string]struct{}, len(ui.DefaultPages))
+	seenRoute := make(map[string]struct{}, len(ui.DefaultPages))
 	for i, p := range ui.DefaultPages {
 		if p.Title == "" {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Title is empty", i))
@@ -125,11 +130,11 @@ func validateUI(ui ModuleUI) {
 		if p.Export == "" {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] (%q) Export is empty", i, p.Title))
 		}
-		validatePageSlug(p.Slug, i)
-		if _, dup := seenSlug[p.Slug]; dup {
-			panic(fmt.Sprintf("mirrorstack: RegisterUI: duplicate DefaultPages slug %q", p.Slug))
+		validatePageRoute(p.Route, i)
+		if _, dup := seenRoute[p.Route]; dup {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: duplicate DefaultPages route %q", p.Route))
 		}
-		seenSlug[p.Slug] = struct{}{}
+		seenRoute[p.Route] = struct{}{}
 	}
 }
 
@@ -149,17 +154,34 @@ func validateProps(componentName string, props []UIProp) {
 	}
 }
 
-func validatePageSlug(slug string, index int) {
-	if slug == "" {
+// validatePageRoute enforces URL-shaped routes. "/" is the index page.
+// Non-index routes must look like "/seg(/seg)*" where each segment matches
+// pageSegmentRe and the first segment isn't reserved.
+func validatePageRoute(route string, index int) {
+	if route == "" {
+		panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Route is empty (use \"/\" for the index page)", index))
+	}
+	if route == "/" {
 		return
 	}
-	for _, prefix := range reservedSlugPrefixes {
-		if slug == prefix || strings.HasPrefix(slug, prefix+"/") || strings.HasPrefix(slug, prefix+"-") {
-			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] slug %q uses reserved prefix %q", index, slug, prefix))
-		}
+	if !strings.HasPrefix(route, "/") {
+		panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Route %q must start with \"/\"", index, route))
 	}
-	if !pageSlugRe.MatchString(slug) {
-		panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] slug %q is invalid (lowercase letters, digits, hyphens; 1-32 chars; must start with a letter or digit)", index, slug))
+	if strings.HasSuffix(route, "/") {
+		panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Route %q must not end with \"/\"", index, route))
+	}
+	segments := strings.Split(strings.TrimPrefix(route, "/"), "/")
+	for j, seg := range segments {
+		if !pageSegmentRe.MatchString(seg) {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Route %q segment %q is invalid (lowercase letters, digits, hyphens; 1-32 chars; must start and end with a letter or digit)", index, route, seg))
+		}
+		if j == 0 {
+			for _, reserved := range reservedRouteFirstSegments {
+				if seg == reserved || strings.HasPrefix(seg, reserved+"-") {
+					panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Route %q first segment uses reserved prefix %q", index, route, reserved))
+				}
+			}
+		}
 	}
 }
 
