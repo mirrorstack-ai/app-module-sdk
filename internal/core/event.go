@@ -62,8 +62,6 @@ func (m *Module) OnEvent(name string, handler http.HandlerFunc, opts ...OnEventO
 	if !m.registry.AddSubscribe(name, path) {
 		panic("mirrorstack: OnEvent(" + name + ") registered twice")
 	}
-	// SDK system path — bypass Module.Internal()'s /internal/ auto-prefix
-	// so the manifest URL matches the eventPathPrefix contract.
 	m.mountSystemInternalRoute("POST", path, handler)
 }
 

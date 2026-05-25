@@ -384,105 +384,93 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 
 // --- Auto-prefix behavior ---
 
-func TestRequirePermission_AutoPrefixesWithSlug(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "oauth", Slug: "oauth-core", Name: "OAuth"})
-	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("users.view", p.Admin())).Get("/users", func(w http.ResponseWriter, r *http.Request) {})
-	})
-
+// fetchManifest hits the system /__mirrorstack/platform/manifest endpoint
+// with the test secret and decodes the response. Shared by the permission
+// auto-prefix tests so each test asserts on the manifest shape directly.
+func fetchManifest(t *testing.T, m *Module) system.ManifestPayload {
+	t.Helper()
 	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
 	var got system.ManifestPayload
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if len(got.Permissions) != 1 || got.Permissions[0].Name != "oauth-core.users.view" {
-		t.Errorf("expected one permission 'oauth-core.users.view', got %+v", got.Permissions)
-	}
+	return got
 }
 
-func TestRequirePermission_PreservesAlreadyQualifiedName(t *testing.T) {
-	// If the developer passes the slug-prefixed name (e.g. importing a
-	// shared constant), don't double-prefix.
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "oauth", Slug: "oauth-core", Name: "OAuth"})
-	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("oauth-core.users.view", p.Admin())).Get("/users", func(w http.ResponseWriter, r *http.Request) {})
-	})
-
-	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
-	var got system.ManifestPayload
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode manifest: %v", err)
+func TestRequirePermission_AutoPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		slug       string
+		permission string
+		want       string
+	}{
+		{"adds slug prefix", "oauth-core", "users.view", "oauth-core.users.view"},
+		{"preserves already-qualified name", "oauth-core", "oauth-core.users.view", "oauth-core.users.view"},
+		{"slug-less module skips prefix", "", "media.view", "media.view"},
 	}
-	if len(got.Permissions) != 1 || got.Permissions[0].Name != "oauth-core.users.view" {
-		t.Errorf("expected 'oauth-core.users.view' (no double-prefix), got %+v", got.Permissions)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MS_INTERNAL_SECRET", "secret")
+			m, _ := New(Config{ID: "test", Slug: tc.slug, Name: "Test"})
+			m.Platform(func(r chi.Router) {
+				r.With(m.RequirePermission(tc.permission, p.Admin())).Get("/x", func(w http.ResponseWriter, r *http.Request) {})
+			})
 
-func TestRequirePermission_SlugLessLeavesNameUnchanged(t *testing.T) {
-	// Modules with no slug (test fixtures, internal-only) skip the prefix.
-	t.Setenv("MS_INTERNAL_SECRET", "secret")
-	m, _ := New(Config{ID: "raw", Name: "Raw"})
-	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.view", p.Admin())).Get("/media", func(w http.ResponseWriter, r *http.Request) {})
-	})
-
-	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
-	var got system.ManifestPayload
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode manifest: %v", err)
-	}
-	if len(got.Permissions) != 1 || got.Permissions[0].Name != "media.view" {
-		t.Errorf("expected 'media.view' (unprefixed), got %+v", got.Permissions)
-	}
-}
-
-func TestPlatform_AutoMountsUnderPlatformPrefix(t *testing.T) {
-	// r.Get("/users", ...) inside Platform() → resolves at /platform/users
-	// AND the route is NOT reachable at the bare path.
-	m, _ := New(Config{ID: "test", Name: "Test"})
-	m.Platform(func(r chi.Router) {
-		r.Get("/users", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("ok"))
+			got := fetchManifest(t, m)
+			if len(got.Permissions) != 1 || got.Permissions[0].Name != tc.want {
+				t.Errorf("permissions = %+v, want one entry %q", got.Permissions, tc.want)
+			}
 		})
-	})
-	// Local-dev bypass injects synthetic admin; both 200 prefixed AND 404 bare are required.
-	if rec := doRequest(t, m.Router(), "GET", "/platform/users"); rec.Code != 200 {
-		t.Errorf("prefixed /platform/users: got %d, want 200", rec.Code)
-	}
-	if rec := doRequest(t, m.Router(), "GET", "/users"); rec.Code != 404 {
-		t.Errorf("bare /users must NOT resolve (would bypass the scope prefix): got %d, want 404", rec.Code)
 	}
 }
 
-func TestPublic_AutoMountsUnderPublicPrefix(t *testing.T) {
-	m, _ := New(Config{ID: "test", Name: "Test"})
-	m.Public(func(r chi.Router) {
-		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("ok"))
-		})
-	})
-	if rec := doRequest(t, m.Router(), "GET", "/public/me"); rec.Code != 200 {
-		t.Errorf("prefixed /public/me: got %d, want 200", rec.Code)
+// TestScopes_AutoMountUnderPrefix asserts each scope's routes resolve under
+// the conventional /<scope>/ prefix AND that the bare path 404s — so a
+// future regression that drops the wrapping doesn't pass silently.
+func TestScopes_AutoMountUnderPrefix(t *testing.T) {
+	cases := []struct {
+		scope     registry.Scope
+		method    string
+		suffix    string
+		needsAuth bool // Internal scope needs MS_INTERNAL_SECRET to reach the handler
+	}{
+		{registry.ScopePlatform, "GET", "/users", false}, // local-dev bypass injects synthetic admin
+		{registry.ScopePublic, "GET", "/me", false},
+		{registry.ScopeInternal, "POST", "/sessions", true},
 	}
-	if rec := doRequest(t, m.Router(), "GET", "/me"); rec.Code != 404 {
-		t.Errorf("bare /me must NOT resolve: got %d, want 404", rec.Code)
-	}
-}
+	for _, tc := range cases {
+		t.Run(string(tc.scope), func(t *testing.T) {
+			var m *Module
+			if tc.needsAuth {
+				m = newTestModuleWithSecret(t, "test")
+			} else {
+				m, _ = New(Config{ID: "test", Name: "Test"})
+			}
+			mount := map[registry.Scope]func(func(chi.Router)){
+				registry.ScopePlatform: m.Platform,
+				registry.ScopePublic:   m.Public,
+				registry.ScopeInternal: m.Internal,
+			}[tc.scope]
+			mount(func(r chi.Router) {
+				r.Method(tc.method, tc.suffix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte("ok"))
+				}))
+			})
 
-func TestInternal_AutoMountsUnderInternalPrefix(t *testing.T) {
-	m := newTestModuleWithSecret(t, "test")
-	m.Internal(func(r chi.Router) {
-		r.Post("/sessions", func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("ok"))
+			prefixed := "/" + string(tc.scope) + tc.suffix
+			req := func(path string) int {
+				if tc.needsAuth {
+					return doRequestWithSecret(t, m.Router(), tc.method, path, "secret").Code
+				}
+				return doRequest(t, m.Router(), tc.method, path).Code
+			}
+			if got := req(prefixed); got != 200 {
+				t.Errorf("prefixed %s: got %d, want 200", prefixed, got)
+			}
+			if got := req(tc.suffix); got != 404 {
+				t.Errorf("bare %s must NOT resolve: got %d, want 404", tc.suffix, got)
+			}
 		})
-	})
-	if rec := doRequestWithSecret(t, m.Router(), "POST", "/internal/sessions", "secret"); rec.Code != 200 {
-		t.Errorf("prefixed /internal/sessions: got %d, want 200", rec.Code)
-	}
-	if rec := doRequestWithSecret(t, m.Router(), "POST", "/sessions", "secret"); rec.Code != 404 {
-		t.Errorf("bare /sessions must NOT resolve: got %d, want 404", rec.Code)
 	}
 }
 

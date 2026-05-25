@@ -89,9 +89,7 @@ func (m *Module) OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 	}
 
 	// Mount a dev/debug HTTP endpoint on the Internal scope so developers
-	// can test task handlers via curl without SQS infrastructure. SDK
-	// system path — bypass Module.Internal()'s /internal/ auto-prefix so
-	// the URL stays at taskPathPrefix.
+	// can test task handlers via curl without SQS infrastructure.
 	path := taskPathPrefix + name
 	m.mountSystemInternalRoute("POST", path, m.taskHTTPHandler(name))
 }

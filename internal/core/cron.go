@@ -34,8 +34,6 @@ func (m *Module) Cron(name, schedule string, handler http.HandlerFunc) {
 	if !m.registry.AddSchedule(name, schedule, path) {
 		panic("mirrorstack: Cron(" + name + ") registered twice")
 	}
-	// SDK system path — bypass Module.Internal()'s /internal/ auto-prefix
-	// so the manifest URL matches cronPathPrefix.
 	m.mountSystemInternalRoute("POST", path, handler)
 }
 

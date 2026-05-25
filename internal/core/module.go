@@ -232,8 +232,9 @@ const internalRouteBodyCap = 1 << 20 // 1 MB
 // mountSystemInternalRoute mounts an absolute-path route gated by
 // internalAuth + the internal body cap, and records it in the registry
 // under ScopeInternal. SDK system surfaces (events, crons, tasks) call
-// here so their paths (e.g. /__mirrorstack/events/{name}) bypass the
-// auto-/internal/ prefix that user-facing Module.Internal() now applies.
+// here so their paths (e.g. /__mirrorstack/events/{name}) keep their
+// fixed shape — user-facing Module.Internal() routes go through
+// scopedRoutes instead and pick up the /internal/ prefix.
 func (m *Module) mountSystemInternalRoute(method, path string, handler http.HandlerFunc) {
 	m.registry.AddRoute(registry.ScopeInternal, method, path)
 	m.router.With(httputil.MaxBytes(internalRouteBodyCap), m.internalAuth).Method(method, path, handler)
@@ -274,9 +275,6 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 	if scopeMiddleware != nil {
 		sub.Use(scopeMiddleware)
 	}
-	// Mount the developer's routes under "/<scope>". chi.Walk below will
-	// see paths with the prefix already baked in, so both registry rows
-	// and live router entries reflect the final URL.
 	sub.Route("/"+string(scope), fn)
 
 	if err := chi.Walk(sub, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
@@ -312,13 +310,9 @@ func (m *Module) RequirePermission(name string, allowed ...roles.Role) func(http
 	return auth.RequireRoles(keys...)
 }
 
-// qualifyPermissionName prepends "<slug>." to name unless it's already
-// prefixed. Slug-less modules (Config.Slug == "") get no prefix —
-// they're typically internal/test fixtures, and prepending "." would
-// produce gibberish manifest entries. Exported via
-// Module.RequirePermission only — direct registry callers (none in v1)
-// would bypass this, which is the point: the namespacing is a
-// registration-time concern, not a storage concern.
+// qualifyPermissionName prepends "<slug>." to name. No-op if name is
+// already slug-prefixed, or if the module has no slug (avoids a
+// leading "." for test fixtures and internal-only modules).
 func qualifyPermissionName(slug, name string) string {
 	if slug == "" {
 		return name
