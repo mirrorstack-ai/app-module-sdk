@@ -4,7 +4,9 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -24,6 +26,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
@@ -86,6 +89,8 @@ type Module struct {
 	router         *chi.Mux
 	logger         *log.Logger
 	registry       *registry.Registry
+	contribReg     *contributions.Registry // declared contribution slots
+	contribStorage *contributions.Storage  // contributions table CRUD
 	internalAuth   func(http.Handler) http.Handler
 	poolCache      *db.PoolCache // production: per-app DB pools
 	devDBOnce      sync.Once     // dev mode: lazy DB init
@@ -129,15 +134,32 @@ func New(cfg Config) (*Module, error) {
 		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must match %s (lowercase, starts with letter, hyphens allowed, max 16 chars)", cfg.Slug, moduleSlugPattern)
 	}
 	m := &Module{
-		config:       cfg,
-		router:       chi.NewRouter(),
-		logger:       log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
-		registry:     registry.New(),
-		internalAuth: auth.InternalAuth(),
-		poolCache:    db.NewPoolCache(),
-		cacheCache:   cache.NewClientCache(),
-		taskHandlers: make(map[string]taskEntry),
-		signingKey:   []byte(os.Getenv("MS_TASK_SIGNING_KEY")),
+		config:         cfg,
+		router:         chi.NewRouter(),
+		logger:         log.New(os.Stderr, "mirrorstack: ", log.LstdFlags),
+		registry:       registry.New(),
+		contribReg:     contributions.NewRegistry(),
+		contribStorage: contributions.NewStorage(cfg.ID),
+		internalAuth:   auth.InternalAuth(),
+		poolCache:      db.NewPoolCache(),
+		cacheCache:     cache.NewClientCache(),
+		taskHandlers:   make(map[string]taskEntry),
+		signingKey:     []byte(os.Getenv("MS_TASK_SIGNING_KEY")),
+	}
+
+	// Local-dev CORS: when MS_INTERNAL_SECRET is unset (i.e. the
+	// auth/PlatformAuth + InternalAuth bypass branch is active), echo
+	// the request Origin so a module's React bundle running on the
+	// platform's domain (e.g. localhost:3001) can fetch the module's
+	// own /platform/* and /me endpoints cross-origin. Wildcard "*"
+	// won't do — the bundle's api.ts uses credentials: 'include' for
+	// the /me cookie flow, and browsers reject "*" with credentials.
+	//
+	// Tunnel/prod (secret set) leaves CORS off entirely — bundles in
+	// those modes go through the platform proxy at same-origin, so
+	// cross-origin requests from random origins shouldn't be allowed.
+	if os.Getenv("MS_INTERNAL_SECRET") == "" {
+		m.router.Use(localDevCORS)
 	}
 
 	// Eagerly initialize SQS client when queue URL is configured.
@@ -299,6 +321,23 @@ func (m *Module) Start() error {
 		}
 	}
 
+	// Auto-create the contributions table when any slot is declared.
+	// CREATE TABLE IF NOT EXISTS is safe to call on every Start; the
+	// guard keeps modules that never use DefineContribute from
+	// touching their DB for an empty feature. Production schema
+	// management lands via the lifecycle install hook in a follow-up.
+	if m.contribReg.Len() > 0 {
+		q, release, err := m.DB(context.Background())
+		if err != nil {
+			return fmt.Errorf("mirrorstack: contributions: open DB: %w", err)
+		}
+		if err := m.contribStorage.EnsureTable(context.Background(), q); err != nil {
+			release()
+			return fmt.Errorf("mirrorstack: contributions: ensure table: %w", err)
+		}
+		release()
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -443,12 +482,30 @@ func (m *Module) mountSystemRoutes() {
 		r.Head("/web/*", system.WebHandler(m.config.WebDir))
 		r.Options("/web/*", system.WebHandler(m.config.WebDir))
 
+		// Contribution slots — host modules declare with
+		// ms.DefineContribute and the SDK auto-mounts register /
+		// unregister / list endpoints here. Internal scope because
+		// writes move trusted module-to-module; the read path is
+		// inside the same group for symmetry — host modules that want
+		// a Platform-scoped read with permission gating add their own
+		// wrapper that calls into storage directly.
+		r.Route("/contrib", func(r chi.Router) {
+			r.Use(httputil.MaxBytes(contributions.MaxPayloadBytes + 1024))
+			r.Use(m.internalAuth)
+			handlers := contributions.NewHandlers(
+				m.contribReg,
+				m.contribStorage,
+				func(req *http.Request) (db.Querier, func(), error) { return m.DB(req.Context()) },
+			)
+			r.Mount("/", handlers.Routes())
+		})
+
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon,
-				m.config.SQL, m.config.Versions, m.registry,
+				m.config.SQL, m.config.Versions, m.registry, m.contribReg,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
 				// App and module migrations are separate tracks on disjoint
@@ -524,3 +581,71 @@ func Internal(fn func(r chi.Router)) { mustDefault("Internal").Internal(fn) }
 
 // DefaultModule returns the default module for advanced use cases.
 func DefaultModule() *Module { return defaultModule }
+
+// DefineContributeSlot is the non-generic core. The exported
+// generic wrapper lives in mirrorstack.go where T is in scope —
+// methods can't be generic in Go, so the type-aware closure is
+// built once at the call site and the Module just stores the
+// resulting Slot.
+func (m *Module) DefineContributeSlot(slot contributions.Slot) {
+	if err := m.contribReg.Define(slot); err != nil {
+		panic("mirrorstack: DefineContribute: " + err.Error())
+	}
+}
+
+// NewContributionSlot builds a Slot whose validator unmarshals into
+// T with DisallowUnknownFields so contributors can't sneak in extra
+// fields the host doesn't expect (silent jsonb pollution). Schema
+// tag is the Go type name, surfaced on the manifest.
+func NewContributionSlot[T any](key string) contributions.Slot {
+	var zero T
+	schemaTag := fmt.Sprintf("%T", zero)
+	return contributions.NewSlot(key, schemaTag, func(data json.RawMessage) error {
+		var v T
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		return dec.Decode(&v)
+	})
+}
+
+// DefineContribute is the top-level entry point modules call from
+// main.go:
+//
+//	ms.DefineContribute[ProviderContribution]("providers")
+//
+// Builds the type-aware Slot and stores it on the default module.
+// Panics on duplicate key or before ms.Init — matches the existing
+// RegisterUI / RequirePermission startup-error conventions.
+func DefineContribute[T any](key string) {
+	mustDefault("DefineContribute").DefineContributeSlot(NewContributionSlot[T](key))
+}
+
+// Contributions returns every contribution slot the default module
+// has declared. Surfaced for the manifest builder + tests.
+func Contributions() []contributions.SlotInfo {
+	if defaultModule == nil {
+		return nil
+	}
+	return defaultModule.contribReg.List()
+}
+
+// localDevCORS echoes the request Origin (with credentials) and answers
+// OPTIONS preflights. Installed on the module router only when
+// MS_INTERNAL_SECRET is unset — gated parallel to the auth bypasses.
+func localDevCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Add("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-MS-Internal-Secret")
+			w.Header().Set("Access-Control-Max-Age", "600")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

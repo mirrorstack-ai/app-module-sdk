@@ -15,6 +15,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/core"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/roles"
@@ -191,3 +192,42 @@ func OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 func RunTask(ctx context.Context, name string, payload json.RawMessage) (string, error) {
 	return core.RunTask(ctx, name, payload)
 }
+
+// --- Contribution slots ---
+
+// ContributionSlot is the manifest projection of a declared slot.
+type ContributionSlot = contributions.SlotInfo
+
+// DefineContribute declares a contribution slot on the default
+// module. The type parameter T fixes the payload shape — incoming
+// register requests must unmarshal cleanly into T. The SDK
+// auto-mounts:
+//
+//	POST   /__mirrorstack/contrib/<key>/<id>   register/upsert
+//	DELETE /__mirrorstack/contrib/<key>/<id>   unregister
+//	GET    /__mirrorstack/contrib/<key>        list all registered
+//
+// Each is Internal-scoped (HMAC-gated by the SDK). Host modules that
+// want to expose a Platform-scoped read with permission gating wrap
+// these endpoints in their own handler — see oauth-core's
+// /platform/providers for the pattern.
+//
+// Panics on duplicate key or before Init — matches RegisterUI /
+// RequirePermission startup-error conventions.
+//
+//	type ProviderContribution struct {
+//	    Name         string `json:"name"`
+//	    Icon         string `json:"icon"`
+//	    LoginPath    string `json:"login_path"`
+//	    CallbackPath string `json:"callback_path"`
+//	}
+//
+//	ms.DefineContribute[ProviderContribution]("providers")
+func DefineContribute[T any](key string) {
+	core.DefineContribute[T](key)
+}
+
+// Contributions returns every contribution slot declared on the
+// default module. Useful for tests and for hosts that want to expose
+// a /platform/* read endpoint listing what they accept.
+func Contributions() []ContributionSlot { return core.Contributions() }

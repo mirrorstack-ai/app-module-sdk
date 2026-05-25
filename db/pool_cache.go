@@ -103,7 +103,7 @@ func createPool(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
 // might skip resetScope (caller panic, missing defer, future bug). If the
 // reset fails, the connection is destroyed instead of being reused.
 //
-// set_config(_, '', false) is used instead of RESET ms.app_id because RESET
+// set_config(_, ”, false) is used instead of RESET ms.app_id because RESET
 // errors out if the custom GUC was never set on this connection (fresh conn
 // returning to the pool for the first time).
 func afterReleaseReset(conn *pgx.Conn) bool {
