@@ -60,15 +60,44 @@ type UIProp struct {
 // platform fetches the module's web bundle and renders the matching
 // named export for the requested route.
 //
+// Surface picks which platform-rendered shell the page mounts into:
+//
+//   - "" (default, UISurfaceMain) — the primary module surface at
+//     /apps/<app>/<module-slug>/<route>. Used for the module's
+//     day-to-day pages.
+//   - "settings" (UISurfaceSettings) — the per-module configuration
+//     surface at /apps/<app>/settings/module/<module-slug>/<route>.
+//     Used for install settings, secret entry, provider registries,
+//     and other configuration UIs that belong next to "manage this
+//     module" instead of next to "use this module".
+//
+// More surfaces ("admin", "dev", …) can be added without changing the
+// shape; the string value doubles as the URL segment the platform
+// mounts under, so a single field describes both the JSON manifest
+// and the routing convention.
+//
 // The page's nav-rail icon is the module's icon (Config.Icon). Pages
 // don't carry their own icon today — when distinct icons per page are
 // needed, an Icon field will be added back as optional.
 type UIPage struct {
 	Route       string `json:"route"`
+	Surface     string `json:"surface,omitempty"`
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 	Export      string `json:"export"`
 }
+
+// Known UIPage.Surface values. Empty string defaults to the main
+// surface so existing module manifests keep working unchanged.
+const (
+	UISurfaceMain     = ""
+	UISurfaceSettings = "settings"
+)
+
+// validSurfaces is the closed set of surfaces the SDK accepts at
+// registration time. New surfaces must land here AND on the
+// platform-side router; an unknown surface is a programmer error.
+var validSurfaces = []string{UISurfaceMain, UISurfaceSettings}
 
 // pageSegmentRe is the route-segment rule: lowercase letters, digits,
 // and hyphens, 1–32 chars, must start and end with a letter or digit
@@ -122,7 +151,10 @@ func validateUI(ui ModuleUI) {
 		validateProps(c.Name, c.Props)
 	}
 
-	seenRoute := make(map[string]struct{}, len(ui.DefaultPages))
+	// Dedup is keyed on (surface, route) because the same route ("/")
+	// is legitimate on every surface — each surface has its own root.
+	type surfaceRoute struct{ surface, route string }
+	seenRoute := make(map[surfaceRoute]struct{}, len(ui.DefaultPages))
 	for i, p := range ui.DefaultPages {
 		if p.Title == "" {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] Title is empty", i))
@@ -130,11 +162,15 @@ func validateUI(ui ModuleUI) {
 		if p.Export == "" {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] (%q) Export is empty", i, p.Title))
 		}
-		validatePageRoute(p.Route, i)
-		if _, dup := seenRoute[p.Route]; dup {
-			panic(fmt.Sprintf("mirrorstack: RegisterUI: duplicate DefaultPages route %q", p.Route))
+		if !slices.Contains(validSurfaces, p.Surface) {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: DefaultPages[%d] (%q) invalid Surface %q (allowed: %q)", i, p.Title, p.Surface, validSurfaces))
 		}
-		seenRoute[p.Route] = struct{}{}
+		validatePageRoute(p.Route, i)
+		key := surfaceRoute{p.Surface, p.Route}
+		if _, dup := seenRoute[key]; dup {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: duplicate DefaultPages route %q on surface %q", p.Route, p.Surface))
+		}
+		seenRoute[key] = struct{}{}
 	}
 }
 

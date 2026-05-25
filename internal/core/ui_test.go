@@ -174,6 +174,85 @@ func TestRegisterUI_DuplicatePageRoutePanics(t *testing.T) {
 	})
 }
 
+// ---- RegisterUI: Surface field ----
+
+func TestRegisterUI_DefaultSurfaceIsMain(t *testing.T) {
+	t.Parallel()
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{
+			{Route: "/", Title: "Home", Export: "mount"},
+		},
+	})
+	ui := m.registry.UI()
+	if ui.DefaultPages[0].Surface != UISurfaceMain {
+		t.Errorf("expected empty/main Surface by default, got %q", ui.DefaultPages[0].Surface)
+	}
+}
+
+func TestRegisterUI_AcceptsSettingsSurface(t *testing.T) {
+	t.Parallel()
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{
+			{Route: "/", Title: "Home", Export: "mount"},
+			{Route: "/", Surface: UISurfaceSettings, Title: "Settings", Export: "mountSettings"},
+		},
+	})
+	got := m.registry.UI().DefaultPages
+	if len(got) != 2 {
+		t.Fatalf("expected 2 pages, got %d", len(got))
+	}
+	if got[0].Surface != UISurfaceMain || got[1].Surface != UISurfaceSettings {
+		t.Errorf("expected [main, settings], got [%q, %q]", got[0].Surface, got[1].Surface)
+	}
+}
+
+func TestRegisterUI_UnknownSurfacePanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic on unknown Surface")
+		}
+	}()
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{
+			{Route: "/", Surface: "bogus", Title: "X", Export: "X"},
+		},
+	})
+}
+
+func TestRegisterUI_DuplicateRouteAllowedAcrossSurfaces(t *testing.T) {
+	// Same route ("/") on different surfaces is fine — each surface
+	// has its own root and they mount under different platform shells.
+	t.Parallel()
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{
+			{Route: "/", Title: "Main Home", Export: "mount"},
+			{Route: "/", Surface: UISurfaceSettings, Title: "Settings Home", Export: "mountSettings"},
+		},
+	})
+	// no panic => pass
+}
+
+func TestRegisterUI_DuplicateRouteSameSurfacePanics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic on duplicate (surface, route)")
+		}
+	}()
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{
+			{Route: "/cfg", Surface: UISurfaceSettings, Title: "A", Export: "A"},
+			{Route: "/cfg", Surface: UISurfaceSettings, Title: "B", Export: "B"},
+		},
+	})
+}
+
 // ---- RegisterUI: component validation ----
 
 func TestRegisterUI_DuplicateComponentNamePanics(t *testing.T) {

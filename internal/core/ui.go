@@ -12,6 +12,13 @@ type (
 	UIPage      = registry.UIPage
 )
 
+// Known UIPage.Surface values, re-exported from registry so module
+// authors set ms.UISurfaceSettings rather than typing the literal.
+const (
+	UISurfaceMain     = registry.UISurfaceMain
+	UISurfaceSettings = registry.UISurfaceSettings
+)
+
 // RegisterUI declares the module's UI surface — agent-visible Components
 // plus DefaultPages mounted under /apps/<app-slug>/<module-slug>. See the
 // ModuleUI doc comment for the shape. Validates the input and panics on
