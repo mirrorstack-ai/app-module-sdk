@@ -231,7 +231,7 @@ func TestPlatform_LocalDevBypass_InjectsSyntheticAdmin(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/admin")
+	rec := doRequest(t, m.Router(), "GET", "/platform/admin")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 (synthetic admin injected), got %d", rec.Code)
 	}
@@ -249,7 +249,7 @@ func TestPlatform_SecretSet_RejectsNoHeader(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/admin")
+	rec := doRequest(t, m.Router(), "GET", "/platform/admin")
 	if rec.Code != 401 {
 		t.Errorf("expected 401 without trusted-forwarder header, got %d", rec.Code)
 	}
@@ -266,7 +266,7 @@ func TestPlatform_AcceptsAnyRole(t *testing.T) {
 	// PlatformAuth checks authentication only — any role passes
 	// Use RequirePermission for authorization (which roles)
 	for _, role := range []string{auth.RoleAdmin, auth.RoleMember, auth.RoleViewer} {
-		rec := doRequestWithRole(t, m.Router(), "GET", "/dashboard", role)
+		rec := doRequestWithRole(t, m.Router(), "GET", "/platform/dashboard", role)
 		if rec.Code != 200 {
 			t.Errorf("role %q: expected 200, got %d", role, rec.Code)
 		}
@@ -281,7 +281,7 @@ func TestPublic_AcceptsAnonymous(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/items")
+	rec := doRequest(t, m.Router(), "GET", "/public/items")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 for anonymous, got %d", rec.Code)
 	}
@@ -295,7 +295,7 @@ func TestInternal_RejectsNoSecret(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "POST", "/event")
+	rec := doRequest(t, m.Router(), "POST", "/internal/event")
 	if rec.Code != 401 {
 		t.Errorf("expected 401 without secret, got %d", rec.Code)
 	}
@@ -309,7 +309,7 @@ func TestInternal_AcceptsValidSecret(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/event", "secret")
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/internal/event", "secret")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 with valid secret, got %d", rec.Code)
 	}
@@ -327,7 +327,7 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithRole(t, m.Router(), "GET", "/items", auth.RoleMember)
+	rec := doRequestWithRole(t, m.Router(), "GET", "/platform/items", auth.RoleMember)
 	if rec.Code != 200 {
 		t.Errorf("expected 200 for member with media.view, got %d", rec.Code)
 	}
@@ -343,7 +343,7 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithRole(t, m.Router(), "DELETE", "/items/123", auth.RoleViewer)
+	rec := doRequestWithRole(t, m.Router(), "DELETE", "/platform/items/123", auth.RoleViewer)
 	if rec.Code != 403 {
 		t.Errorf("expected 403 for viewer on admin-only permission, got %d", rec.Code)
 	}
@@ -379,6 +379,110 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 		if p.Name == "video.transcode" {
 			t.Errorf("m1 manifest leaked permission from m2: %+v", p)
 		}
+	}
+}
+
+// --- Auto-prefix behavior ---
+
+func TestRequirePermission_AutoPrefixesWithSlug(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "oauth", Slug: "oauth-core", Name: "OAuth"})
+	m.Platform(func(r chi.Router) {
+		r.With(m.RequirePermission("users.view", p.Admin())).Get("/users", func(w http.ResponseWriter, r *http.Request) {})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Permissions) != 1 || got.Permissions[0].Name != "oauth-core.users.view" {
+		t.Errorf("expected one permission 'oauth-core.users.view', got %+v", got.Permissions)
+	}
+}
+
+func TestRequirePermission_PreservesAlreadyQualifiedName(t *testing.T) {
+	// If the developer passes the slug-prefixed name (e.g. importing a
+	// shared constant), don't double-prefix.
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "oauth", Slug: "oauth-core", Name: "OAuth"})
+	m.Platform(func(r chi.Router) {
+		r.With(m.RequirePermission("oauth-core.users.view", p.Admin())).Get("/users", func(w http.ResponseWriter, r *http.Request) {})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Permissions) != 1 || got.Permissions[0].Name != "oauth-core.users.view" {
+		t.Errorf("expected 'oauth-core.users.view' (no double-prefix), got %+v", got.Permissions)
+	}
+}
+
+func TestRequirePermission_SlugLessLeavesNameUnchanged(t *testing.T) {
+	// Modules with no slug (test fixtures, internal-only) skip the prefix.
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	m, _ := New(Config{ID: "raw", Name: "Raw"})
+	m.Platform(func(r chi.Router) {
+		r.With(m.RequirePermission("media.view", p.Admin())).Get("/media", func(w http.ResponseWriter, r *http.Request) {})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Permissions) != 1 || got.Permissions[0].Name != "media.view" {
+		t.Errorf("expected 'media.view' (unprefixed), got %+v", got.Permissions)
+	}
+}
+
+func TestPlatform_AutoMountsUnderPlatformPrefix(t *testing.T) {
+	// r.Get("/users", ...) inside Platform() → resolves at /platform/users
+	// AND the route is NOT reachable at the bare path.
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Platform(func(r chi.Router) {
+		r.Get("/users", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+	// Local-dev bypass injects synthetic admin; both 200 prefixed AND 404 bare are required.
+	if rec := doRequest(t, m.Router(), "GET", "/platform/users"); rec.Code != 200 {
+		t.Errorf("prefixed /platform/users: got %d, want 200", rec.Code)
+	}
+	if rec := doRequest(t, m.Router(), "GET", "/users"); rec.Code != 404 {
+		t.Errorf("bare /users must NOT resolve (would bypass the scope prefix): got %d, want 404", rec.Code)
+	}
+}
+
+func TestPublic_AutoMountsUnderPublicPrefix(t *testing.T) {
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Public(func(r chi.Router) {
+		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+	if rec := doRequest(t, m.Router(), "GET", "/public/me"); rec.Code != 200 {
+		t.Errorf("prefixed /public/me: got %d, want 200", rec.Code)
+	}
+	if rec := doRequest(t, m.Router(), "GET", "/me"); rec.Code != 404 {
+		t.Errorf("bare /me must NOT resolve: got %d, want 404", rec.Code)
+	}
+}
+
+func TestInternal_AutoMountsUnderInternalPrefix(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+	m.Internal(func(r chi.Router) {
+		r.Post("/sessions", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		})
+	})
+	if rec := doRequestWithSecret(t, m.Router(), "POST", "/internal/sessions", "secret"); rec.Code != 200 {
+		t.Errorf("prefixed /internal/sessions: got %d, want 200", rec.Code)
+	}
+	if rec := doRequestWithSecret(t, m.Router(), "POST", "/sessions", "secret"); rec.Code != 404 {
+		t.Errorf("bare /sessions must NOT resolve: got %d, want 404", rec.Code)
 	}
 }
 
@@ -621,7 +725,7 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 		})
 	})
 	m.Public(func(r chi.Router) {
-		r.Get("/public/feed", func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/feed", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("public"))
 		})
 	})
@@ -631,11 +735,11 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 		t.Errorf("public route: code = %d, want 200", rec.Code)
 	}
 	// Platform route without auth → 401
-	if rec := doRequest(t, m.Router(), "GET", "/admin/items"); rec.Code != 401 {
+	if rec := doRequest(t, m.Router(), "GET", "/platform/admin/items"); rec.Code != 401 {
 		t.Errorf("platform route without auth: code = %d, want 401", rec.Code)
 	}
 	// Platform route with auth → 200
-	if rec := doRequestWithRole(t, m.Router(), "GET", "/admin/items", auth.RoleAdmin); rec.Code != 200 {
+	if rec := doRequestWithRole(t, m.Router(), "GET", "/platform/admin/items", auth.RoleAdmin); rec.Code != 200 {
 		t.Errorf("platform route with admin: code = %d, want 200", rec.Code)
 	}
 }

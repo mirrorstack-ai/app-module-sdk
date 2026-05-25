@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
@@ -90,11 +89,11 @@ func (m *Module) OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 	}
 
 	// Mount a dev/debug HTTP endpoint on the Internal scope so developers
-	// can test task handlers via curl without SQS infrastructure.
+	// can test task handlers via curl without SQS infrastructure. SDK
+	// system path — bypass Module.Internal()'s /internal/ auto-prefix so
+	// the URL stays at taskPathPrefix.
 	path := taskPathPrefix + name
-	m.Internal(func(r chi.Router) {
-		r.Post(path, m.taskHTTPHandler(name))
-	})
+	m.mountSystemInternalRoute("POST", path, m.taskHTTPHandler(name))
 }
 
 // taskHTTPHandler returns an http.HandlerFunc that dispatches to the named
