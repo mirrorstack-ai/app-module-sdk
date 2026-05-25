@@ -10,17 +10,111 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
+// Trusted-forwarder identity-injection headers. A caller proves it's a
+// trusted forwarder (the platform or its dispatch) by sending a valid
+// X-MS-Internal-Secret; if proven, PlatformAuth trusts the user identity
+// those callers assert via these headers.
+const (
+	HeaderInternalSecret = "X-MS-Internal-Secret"
+	HeaderUserID         = "X-MS-User-ID"
+	HeaderAppID          = "X-MS-App-ID"
+	HeaderAppRole        = "X-MS-App-Role"
+)
+
 // PlatformAuth returns middleware that requires an authenticated user.
 // Use RequirePermission per-route for authorization (which roles can access).
+//
+// Identity sources (first match wins):
+//
+//  1. An Identity already set in ctx (the Lambda runtime's authorizer
+//     path puts one here before this middleware runs).
+//  2. Trusted-forwarder injection: a request that presents a valid
+//     X-MS-Internal-Secret may also assert user identity via
+//     X-MS-User-ID / X-MS-App-ID / X-MS-App-Role. PlatformAuth promotes
+//     those to ctx.Identity. Same trust signal InternalAuth uses.
+//  3. Local-dev bypass: when MS_INTERNAL_SECRET is unset AND we are NOT
+//     in Lambda, a synthetic admin identity is injected so
+//     `mirrorstack dev` (no tunnel) can render platform-scope routes
+//     without the developer wiring auth manually.
+//
+// In Lambda with no secret configured, this returns 503 (operator
+// misconfiguration) to match InternalAuth's behavior.
 func PlatformAuth() func(http.Handler) http.Handler {
+	return platformAuth(lambdaenv.IsSet())
+}
+
+// platformAuth is the test seam; inLambda is injected so tests don't
+// mutate process env captured at package init.
+//
+// Behavior matrix (secret = MS_INTERNAL_SECRET):
+//
+//	inLambda + secret unset → 503 (operator misconfig; platform alerting)
+//	inLambda + secret set   → enforce: validate secret + identity headers
+//	                          (Lambda authorizer path also still works —
+//	                          if Identity is preset in ctx, that wins)
+//	local    + secret unset → BYPASS: inject synthetic admin identity
+//	                          (parallel to InternalAuth's local bypass)
+//	local    + secret set   → enforce (e.g. `mirrorstack dev --tunnel`
+//	                          where the CLI sets the secret)
+func platformAuth(inLambda bool) func(http.Handler) http.Handler {
+	expected := os.Getenv("MS_INTERNAL_SECRET")
+	if expected == "" && !inLambda {
+		log.Printf("mirrorstack: MS_INTERNAL_SECRET not set; platform routes bypass auth with synthetic admin identity (local dev)")
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a := Get(r.Context())
-			if a == nil || a.AppRole == "" {
+			// Step 1: honor identity already attached upstream.
+			if existing := Get(r.Context()); existing != nil && existing.AppRole != "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Step 2: local-dev bypass — inject synthetic admin.
+			if expected == "" && !inLambda {
+				ctx := Set(r.Context(), Identity{
+					UserID:  "local-dev-user",
+					AppID:   "local-dev-app",
+					AppRole: RoleAdmin,
+				})
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Step 3: Lambda + no secret is a misconfig.
+			if expected == "" {
+				log.Printf("mirrorstack: platform auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
+				// SECURITY: generic body — same rationale as InternalAuth's 503.
+				httputil.JSON(w, http.StatusServiceUnavailable, httputil.ErrorResponse{
+					Error: "service unavailable",
+				})
+				return
+			}
+
+			// Step 4: trusted-forwarder path. Validate secret, then read
+			// identity headers.
+			secret := r.Header.Get(HeaderInternalSecret)
+			if !constantTimeEqual(secret, expected) {
+				// SECURITY: never log the header value; only presence.
+				log.Printf("mirrorstack: platform auth rejected (secret mismatch, header_present=%v) from %s %s", secret != "", r.RemoteAddr, r.URL.Path)
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
 			}
-			next.ServeHTTP(w, r)
+
+			userID := r.Header.Get(HeaderUserID)
+			appID := r.Header.Get(HeaderAppID)
+			appRole := r.Header.Get(HeaderAppRole)
+			if userID == "" || appID == "" || appRole == "" {
+				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "platform identity headers required"})
+				return
+			}
+
+			ctx := Set(r.Context(), Identity{
+				UserID:  userID,
+				AppID:   appID,
+				AppRole: appRole,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
