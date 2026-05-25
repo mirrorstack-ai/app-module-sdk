@@ -23,21 +23,15 @@ func requestWithRole(method, path, role string) *http.Request {
 	return req
 }
 
-func TestPlatformAuth_NoRole(t *testing.T) {
-	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-	req := httptest.NewRequest("GET", "/items", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+func TestPlatformAuth_AnyRoleInContextAllowed(t *testing.T) {
+	// Identity preset upstream (Lambda authorizer path) wins regardless of
+	// env state, so this test pins down "ctx wins" without caring about
+	// MS_INTERNAL_SECRET. Forces in-lambda + no secret to prove we honor
+	// preset Identity even when other branches would 503.
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := platformAuth(true)(http.HandlerFunc(okHandler))
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rec.Code)
-	}
-}
-
-func TestPlatformAuth_AnyRoleAllowed(t *testing.T) {
-	handler := PlatformAuth()(http.HandlerFunc(okHandler))
-
-	for _, role := range []string{RoleAdmin, RoleMember, RoleViewer} {
+	for _, role := range []string{RoleAdmin, RoleMember, RoleViewer, "VideoManager"} {
 		req := requestWithRole("GET", "/items", role)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -48,16 +42,116 @@ func TestPlatformAuth_AnyRoleAllowed(t *testing.T) {
 	}
 }
 
-func TestPlatformAuth_CustomRole(t *testing.T) {
-	handler := PlatformAuth()(http.HandlerFunc(okHandler))
+func TestPlatformAuth_LocalBypass_InjectsAdminIdentity(t *testing.T) {
+	// Local dev with no secret: synthetic admin identity is injected so
+	// /platform/* routes work in `mirrorstack dev` without tunnel.
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	var seen *Identity
+	handler := platformAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
 
-	// Custom role passes PlatformAuth (authentication gate — any non-empty role)
-	req := requestWithRole("GET", "/items", "VideoManager")
+	req := httptest.NewRequest("GET", "/platform/users", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for custom role, got %d", rec.Code)
+	if rec.Code != http.StatusOK && rec.Code != 0 {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil {
+		t.Fatal("expected synthetic Identity to be injected; got nil")
+	}
+	if seen.AppRole != RoleAdmin {
+		t.Errorf("synthetic identity must be admin so RequirePermission passes; got %q", seen.AppRole)
+	}
+}
+
+func TestPlatformAuth_NoSecret_InLambda_503(t *testing.T) {
+	// Lambda + no secret = operator misconfig. Match InternalAuth's 503.
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := platformAuth(true)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestPlatformAuth_SecretSet_NoHeader_401(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	handler := platformAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestPlatformAuth_SecretSet_WrongSecret_401(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	handler := platformAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderInternalSecret, "wrong")
+	req.Header.Set(HeaderUserID, "u-1")
+	req.Header.Set(HeaderAppID, "a-1")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestPlatformAuth_SecretSet_MissingIdentityHeaders_401(t *testing.T) {
+	// Valid secret but no identity → 401. The trusted-forwarder must
+	// assert who the user is; we don't fabricate one for them.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	handler := platformAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderInternalSecret, "real-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "identity headers required") {
+		t.Errorf("expected explanatory body, got %q", rec.Body.String())
+	}
+}
+
+func TestPlatformAuth_SecretSet_ValidHeaders_InjectsIdentity(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	var seen *Identity
+	handler := platformAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderInternalSecret, "real-secret")
+	req.Header.Set(HeaderUserID, "u-123")
+	req.Header.Set(HeaderAppID, "a-456")
+	req.Header.Set(HeaderAppRole, RoleViewer)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != 0 {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil {
+		t.Fatal("expected Identity to be injected from headers; got nil")
+	}
+	if seen.UserID != "u-123" || seen.AppID != "a-456" || seen.AppRole != RoleViewer {
+		t.Errorf("identity mismatch: got %+v", seen)
 	}
 }
 
