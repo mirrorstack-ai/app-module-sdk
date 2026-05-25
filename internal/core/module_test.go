@@ -217,7 +217,31 @@ func TestRouter(t *testing.T) {
 
 // --- Scope auth enforcement ---
 
-func TestPlatform_RejectsNoAuth(t *testing.T) {
+func TestPlatform_LocalDevBypass_InjectsSyntheticAdmin(t *testing.T) {
+	// Local dev + no MS_INTERNAL_SECRET: PlatformAuth injects a synthetic
+	// admin identity so `mirrorstack dev` (no tunnel) can render
+	// platform-scope routes without the developer wiring auth. Tunnel
+	// mode flips this branch off by setting the secret (see
+	// auth.platformAuth doc-matrix + mirrorstack-cli #33).
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Platform(func(r chi.Router) {
+		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("admin"))
+		})
+	})
+
+	rec := doRequest(t, m.Router(), "GET", "/admin")
+	if rec.Code != 200 {
+		t.Errorf("expected 200 (synthetic admin injected), got %d", rec.Code)
+	}
+}
+
+func TestPlatform_SecretSet_RejectsNoHeader(t *testing.T) {
+	// When MS_INTERNAL_SECRET is set (tunnel mode or prod), local bypass
+	// is off — a Platform-scope route 401s without a valid trusted-
+	// forwarder header.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
 		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +251,7 @@ func TestPlatform_RejectsNoAuth(t *testing.T) {
 
 	rec := doRequest(t, m.Router(), "GET", "/admin")
 	if rec.Code != 401 {
-		t.Errorf("expected 401 without auth, got %d", rec.Code)
+		t.Errorf("expected 401 without trusted-forwarder header, got %d", rec.Code)
 	}
 }
 
