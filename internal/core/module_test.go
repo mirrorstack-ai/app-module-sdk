@@ -231,7 +231,7 @@ func TestPlatform_LocalDevBypass_InjectsSyntheticAdmin(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/admin")
+	rec := doRequest(t, m.Router(), "GET", "/platform/admin")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 (synthetic admin injected), got %d", rec.Code)
 	}
@@ -249,7 +249,7 @@ func TestPlatform_SecretSet_RejectsNoHeader(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/admin")
+	rec := doRequest(t, m.Router(), "GET", "/platform/admin")
 	if rec.Code != 401 {
 		t.Errorf("expected 401 without trusted-forwarder header, got %d", rec.Code)
 	}
@@ -266,7 +266,7 @@ func TestPlatform_AcceptsAnyRole(t *testing.T) {
 	// PlatformAuth checks authentication only — any role passes
 	// Use RequirePermission for authorization (which roles)
 	for _, role := range []string{auth.RoleAdmin, auth.RoleMember, auth.RoleViewer} {
-		rec := doRequestWithRole(t, m.Router(), "GET", "/dashboard", role)
+		rec := doRequestWithRole(t, m.Router(), "GET", "/platform/dashboard", role)
 		if rec.Code != 200 {
 			t.Errorf("role %q: expected 200, got %d", role, rec.Code)
 		}
@@ -281,7 +281,7 @@ func TestPublic_AcceptsAnonymous(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "GET", "/items")
+	rec := doRequest(t, m.Router(), "GET", "/public/items")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 for anonymous, got %d", rec.Code)
 	}
@@ -295,7 +295,7 @@ func TestInternal_RejectsNoSecret(t *testing.T) {
 		})
 	})
 
-	rec := doRequest(t, m.Router(), "POST", "/event")
+	rec := doRequest(t, m.Router(), "POST", "/internal/event")
 	if rec.Code != 401 {
 		t.Errorf("expected 401 without secret, got %d", rec.Code)
 	}
@@ -309,7 +309,7 @@ func TestInternal_AcceptsValidSecret(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithSecret(t, m.Router(), "POST", "/event", "secret")
+	rec := doRequestWithSecret(t, m.Router(), "POST", "/internal/event", "secret")
 	if rec.Code != 200 {
 		t.Errorf("expected 200 with valid secret, got %d", rec.Code)
 	}
@@ -327,7 +327,7 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithRole(t, m.Router(), "GET", "/items", auth.RoleMember)
+	rec := doRequestWithRole(t, m.Router(), "GET", "/platform/items", auth.RoleMember)
 	if rec.Code != 200 {
 		t.Errorf("expected 200 for member with media.view, got %d", rec.Code)
 	}
@@ -343,7 +343,7 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 		})
 	})
 
-	rec := doRequestWithRole(t, m.Router(), "DELETE", "/items/123", auth.RoleViewer)
+	rec := doRequestWithRole(t, m.Router(), "DELETE", "/platform/items/123", auth.RoleViewer)
 	if rec.Code != 403 {
 		t.Errorf("expected 403 for viewer on admin-only permission, got %d", rec.Code)
 	}
@@ -379,6 +379,98 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 		if p.Name == "video.transcode" {
 			t.Errorf("m1 manifest leaked permission from m2: %+v", p)
 		}
+	}
+}
+
+// --- Auto-prefix behavior ---
+
+// fetchManifest hits the system /__mirrorstack/platform/manifest endpoint
+// with the test secret and decodes the response. Shared by the permission
+// auto-prefix tests so each test asserts on the manifest shape directly.
+func fetchManifest(t *testing.T, m *Module) system.ManifestPayload {
+	t.Helper()
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	return got
+}
+
+func TestRequirePermission_AutoPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		slug       string
+		permission string
+		want       string
+	}{
+		{"adds slug prefix", "oauth-core", "users.view", "oauth-core.users.view"},
+		{"preserves already-qualified name", "oauth-core", "oauth-core.users.view", "oauth-core.users.view"},
+		{"slug-less module skips prefix", "", "media.view", "media.view"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MS_INTERNAL_SECRET", "secret")
+			m, _ := New(Config{ID: "test", Slug: tc.slug, Name: "Test"})
+			m.Platform(func(r chi.Router) {
+				r.With(m.RequirePermission(tc.permission, p.Admin())).Get("/x", func(w http.ResponseWriter, r *http.Request) {})
+			})
+
+			got := fetchManifest(t, m)
+			if len(got.Permissions) != 1 || got.Permissions[0].Name != tc.want {
+				t.Errorf("permissions = %+v, want one entry %q", got.Permissions, tc.want)
+			}
+		})
+	}
+}
+
+// TestScopes_AutoMountUnderPrefix asserts each scope's routes resolve under
+// the conventional /<scope>/ prefix AND that the bare path 404s — so a
+// future regression that drops the wrapping doesn't pass silently.
+func TestScopes_AutoMountUnderPrefix(t *testing.T) {
+	cases := []struct {
+		scope     registry.Scope
+		method    string
+		suffix    string
+		needsAuth bool // Internal scope needs MS_INTERNAL_SECRET to reach the handler
+	}{
+		{registry.ScopePlatform, "GET", "/users", false}, // local-dev bypass injects synthetic admin
+		{registry.ScopePublic, "GET", "/me", false},
+		{registry.ScopeInternal, "POST", "/sessions", true},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.scope), func(t *testing.T) {
+			var m *Module
+			if tc.needsAuth {
+				m = newTestModuleWithSecret(t, "test")
+			} else {
+				m, _ = New(Config{ID: "test", Name: "Test"})
+			}
+			mount := map[registry.Scope]func(func(chi.Router)){
+				registry.ScopePlatform: m.Platform,
+				registry.ScopePublic:   m.Public,
+				registry.ScopeInternal: m.Internal,
+			}[tc.scope]
+			mount(func(r chi.Router) {
+				r.Method(tc.method, tc.suffix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte("ok"))
+				}))
+			})
+
+			prefixed := "/" + string(tc.scope) + tc.suffix
+			req := func(path string) int {
+				if tc.needsAuth {
+					return doRequestWithSecret(t, m.Router(), tc.method, path, "secret").Code
+				}
+				return doRequest(t, m.Router(), tc.method, path).Code
+			}
+			if got := req(prefixed); got != 200 {
+				t.Errorf("prefixed %s: got %d, want 200", prefixed, got)
+			}
+			if got := req(tc.suffix); got != 404 {
+				t.Errorf("bare %s must NOT resolve: got %d, want 404", tc.suffix, got)
+			}
+		})
 	}
 }
 
@@ -621,7 +713,7 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 		})
 	})
 	m.Public(func(r chi.Router) {
-		r.Get("/public/feed", func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/feed", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("public"))
 		})
 	})
@@ -631,11 +723,11 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 		t.Errorf("public route: code = %d, want 200", rec.Code)
 	}
 	// Platform route without auth → 401
-	if rec := doRequest(t, m.Router(), "GET", "/admin/items"); rec.Code != 401 {
+	if rec := doRequest(t, m.Router(), "GET", "/platform/admin/items"); rec.Code != 401 {
 		t.Errorf("platform route without auth: code = %d, want 401", rec.Code)
 	}
 	// Platform route with auth → 200
-	if rec := doRequestWithRole(t, m.Router(), "GET", "/admin/items", auth.RoleAdmin); rec.Code != 200 {
+	if rec := doRequestWithRole(t, m.Router(), "GET", "/platform/admin/items", auth.RoleAdmin); rec.Code != 200 {
 		t.Errorf("platform route with admin: code = %d, want 200", rec.Code)
 	}
 }

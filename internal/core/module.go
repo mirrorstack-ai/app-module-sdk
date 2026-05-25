@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -196,19 +197,26 @@ func (m *Module) Router() *chi.Mux { return m.router }
 // DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/OptionalDependOn,
 // MCPTool/MCPResource: see db.go, resources.go, describe.go, and mcp.go.
 
-// Platform registers routes with platform auth scope.
-// Default: admin only. Use Module.RequirePermission for member/viewer access.
+// Platform registers routes with platform auth scope. All routes
+// declared inside fn are auto-mounted under /platform/ — write
+// `r.Get("/users", ...)` and the route lands at /platform/users.
+// Default role gate: admin only. Use Module.RequirePermission to
+// open routes to member/viewer.
 func (m *Module) Platform(fn func(r chi.Router)) {
 	m.scopedRoutes(registry.ScopePlatform, auth.PlatformAuth(), fn)
 }
 
-// Public registers routes with public auth scope (anyone, including anonymous).
+// Public registers routes with public auth scope (anyone, including
+// anonymous). Auto-mounted under /public/ — write `r.Get("/me", ...)`
+// and the route lands at /public/me.
 func (m *Module) Public(fn func(r chi.Router)) {
 	m.scopedRoutes(registry.ScopePublic, nil, fn)
 }
 
-// Internal registers routes with internal auth scope (platform-to-module only).
-// Validates X-MS-Internal-Secret via constant-time comparison. The middleware
+// Internal registers routes with internal auth scope (platform-to-module
+// only). Auto-mounted under /internal/ — write `r.Post("/sessions", ...)`
+// and the route lands at /internal/sessions. Validates
+// X-MS-Internal-Secret via constant-time comparison. The middleware
 // is cached on the Module at New() so OnEvent / Cron registrations reuse a
 // single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
@@ -221,8 +229,25 @@ func (m *Module) Internal(fn func(r chi.Router)) {
 // unbounded without this.
 const internalRouteBodyCap = 1 << 20 // 1 MB
 
+// mountSystemInternalRoute mounts an absolute-path route gated by
+// internalAuth + the internal body cap, and records it in the registry
+// under ScopeInternal. SDK system surfaces (events, crons, tasks) call
+// here so their paths (e.g. /__mirrorstack/events/{name}) keep their
+// fixed shape — user-facing Module.Internal() routes go through
+// scopedRoutes instead and pick up the /internal/ prefix.
+func (m *Module) mountSystemInternalRoute(method, path string, handler http.HandlerFunc) {
+	m.registry.AddRoute(registry.ScopeInternal, method, path)
+	m.router.With(httputil.MaxBytes(internalRouteBodyCap), m.internalAuth).Method(method, path, handler)
+}
+
 // scopedRoutes records every route fn registers under the given scope, then
 // re-attaches them to the main router with the scope's auth middleware.
+//
+// Routes are auto-mounted under "/<scope>/..." (e.g. /platform/users for
+// Platform-scope, /internal/sessions for Internal-scope). Developers write
+// just the suffix in fn — the prefix is added by sub.Route here so the
+// URL contract stays in lockstep with the auth scope (no way to declare a
+// Platform-scoped route at a non-/platform path).
 //
 // We use a sub-router + chi.Walk so the manifest endpoint can list every
 // declared route per scope. Walking after fn() returns gives us the full
@@ -250,7 +275,7 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 	if scopeMiddleware != nil {
 		sub.Use(scopeMiddleware)
 	}
-	fn(sub)
+	sub.Route("/"+string(scope), fn)
 
 	if err := chi.Walk(sub, func(method, route string, handler http.Handler, middlewares ...func(http.Handler) http.Handler) error {
 		m.registry.AddRoute(scope, method, route)
@@ -268,15 +293,35 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 // — registry append is O(N), so dynamic per-request names would leak memory
 // and slow down every subsequent registration.
 //
-// Roles are typed values from the roles package (Admin, Viewer, Custom) to
-// prevent typos and enable IDE autocomplete:
+// Permission names are auto-namespaced with the module slug so two modules
+// can each declare a "users.read" permission without colliding in the
+// platform's catalog. Developers write the short name; the manifest stores
+// "<slug>.<name>":
 //
 //	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
-//	r.With(mod.RequirePermission("media.view", p.Admin(), p.Viewer())).Get("/items", listItems)
+//	// Module slug "oauth-core" → manifest records "oauth-core.users.view".
+//	r.With(mod.RequirePermission("users.view", p.Admin(), p.Viewer())).Get("/items", listItems)
+//
+// If the caller already prefixed the name with the slug (manual or
+// imported from a constant), the prefix is left alone — no double-prefix.
 func (m *Module) RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
 	keys := roles.Keys(allowed)
-	m.registry.AddPermission(name, keys)
+	m.registry.AddPermission(qualifyPermissionName(m.config.Slug, name), keys)
 	return auth.RequireRoles(keys...)
+}
+
+// qualifyPermissionName prepends "<slug>." to name. No-op if name is
+// already slug-prefixed, or if the module has no slug (avoids a
+// leading "." for test fixtures and internal-only modules).
+func qualifyPermissionName(slug, name string) string {
+	if slug == "" {
+		return name
+	}
+	prefix := slug + "."
+	if strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
 }
 
 // RequirePermission is the convenience wrapper that dispatches to the default

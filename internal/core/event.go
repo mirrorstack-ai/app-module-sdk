@@ -3,7 +3,6 @@ package core
 import (
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
@@ -63,9 +62,7 @@ func (m *Module) OnEvent(name string, handler http.HandlerFunc, opts ...OnEventO
 	if !m.registry.AddSubscribe(name, path) {
 		panic("mirrorstack: OnEvent(" + name + ") registered twice")
 	}
-	m.Internal(func(r chi.Router) {
-		r.Post(path, handler)
-	})
+	m.mountSystemInternalRoute("POST", path, handler)
 }
 
 // Emits declares that this module emits an event of the given name. The
