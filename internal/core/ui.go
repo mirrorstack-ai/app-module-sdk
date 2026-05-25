@@ -15,7 +15,7 @@ type (
 // RegisterUI declares the module's UI surface — agent-visible Components
 // plus DefaultPages mounted under /apps/<app-slug>/<module-slug>. See the
 // ModuleUI doc comment for the shape. Validates the input and panics on
-// programmer errors (duplicate names, invalid slug, unknown prop type).
+// programmer errors (duplicate names, invalid route, unknown prop type).
 // Last-write-wins; a second call replaces the prior manifest.
 //
 //	ms.RegisterUI(ms.ModuleUI{
@@ -25,7 +25,7 @@ type (
 //	        }},
 //	    },
 //	    DefaultPages: []ms.UIPage{
-//	        {Slug: "", Title: "OAuth Settings", Export: "SettingsPage"},
+//	        {Route: "/", Title: "OAuth Settings", Export: "SettingsPage"},
 //	    },
 //	})
 func (m *Module) RegisterUI(ui ModuleUI) {

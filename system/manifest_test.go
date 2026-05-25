@@ -327,8 +327,8 @@ func TestManifest_UIPopulatedWhenRegistered(t *testing.T) {
 			}},
 		},
 		DefaultPages: []registry.UIPage{
-			{Slug: "", Title: "Settings", Export: "SettingsPage"},
-			{Slug: "audit", Title: "Audit", Export: "AuditPage"},
+			{Route: "/", Title: "Settings", Export: "SettingsPage"},
+			{Route: "/audit", Title: "Audit", Export: "AuditPage"},
 		},
 	})
 

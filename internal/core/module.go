@@ -66,6 +66,13 @@ type Config struct {
 	// map at lifecycle time — /lifecycle/{upgrade,downgrade} take migration
 	// numbers only.
 	Versions map[string]system.MigrationVersions
+
+	// WebDir is the on-disk path to the module's React bundle output
+	// (typically "web/dist"). When set, the SDK serves it publicly under
+	// /__mirrorstack/web/* with permissive CORS so the platform's catch-all
+	// route can dynamically import the named exports declared in
+	// RegisterUI.DefaultPages. Optional — when empty, the /web route 404s.
+	WebDir string
 }
 
 // Module is the core SDK instance.
@@ -426,6 +433,16 @@ func (m *Module) Close() {
 func (m *Module) mountSystemRoutes() {
 	m.router.Route("/__mirrorstack", func(r chi.Router) {
 		r.Get("/health", system.Health) // intentionally public — no auth
+
+		// Public-scope static handler for the module's React bundle (the
+		// directory the author named in Config.WebDir). Browser-fetched
+		// from the platform's catch-all module page; CORS-permissive
+		// because bundles carry no credentials. When WebDir is empty,
+		// every request 404s.
+		r.Get("/web/*", system.WebHandler(m.config.WebDir))
+		r.Head("/web/*", system.WebHandler(m.config.WebDir))
+		r.Options("/web/*", system.WebHandler(m.config.WebDir))
+
 		r.Route("/platform", func(r chi.Router) {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)

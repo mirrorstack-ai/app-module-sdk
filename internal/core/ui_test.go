@@ -18,7 +18,7 @@ func TestRegisterUI_PopulatesRegistry(t *testing.T) {
 			}},
 		},
 		DefaultPages: []UIPage{
-			{Slug: "", Title: "OAuth Settings", Export: "SettingsPage"},
+			{Route: "/", Title: "OAuth Settings", Export: "SettingsPage"},
 		},
 	})
 
@@ -48,10 +48,10 @@ func TestRegisterUI_LastWriteWins(t *testing.T) {
 
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
-		DefaultPages: []UIPage{{Slug: "", Title: "First", Export: "First"}},
+		DefaultPages: []UIPage{{Route: "/", Title: "First", Export: "First"}},
 	})
 	m.RegisterUI(ModuleUI{
-		DefaultPages: []UIPage{{Slug: "", Title: "Second", Export: "Second"}},
+		DefaultPages: []UIPage{{Route: "/", Title: "Second", Export: "Second"}},
 	})
 
 	got := m.registry.UI()
@@ -64,7 +64,7 @@ func TestRegisterUI_StoresDeepCopy(t *testing.T) {
 	t.Parallel()
 
 	m, _ := New(Config{ID: "demo"})
-	pages := []UIPage{{Slug: "", Title: "Original", Export: "P"}}
+	pages := []UIPage{{Route: "/", Title: "Original", Export: "P"}}
 	m.RegisterUI(ModuleUI{DefaultPages: pages})
 
 	pages[0].Title = "Mutated"
@@ -80,7 +80,7 @@ func TestRegisterUI_UIReturnsDeepCopy(t *testing.T) {
 
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
-		DefaultPages: []UIPage{{Slug: "", Title: "Original", Export: "P"}},
+		DefaultPages: []UIPage{{Route: "/", Title: "Original", Export: "P"}},
 	})
 
 	first := m.registry.UI()
@@ -92,75 +92,84 @@ func TestRegisterUI_UIReturnsDeepCopy(t *testing.T) {
 	}
 }
 
-// ---- RegisterUI: page slug validation ----
+// ---- RegisterUI: page route validation ----
 
-func TestRegisterUI_EmptySlugIsIndex(t *testing.T) {
+func TestRegisterUI_RootRouteIsIndex(t *testing.T) {
 	t.Parallel()
 
-	// Empty slug is the index page — not subject to the regex.
+	// "/" is the index route — not subject to the segment regex.
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
-		DefaultPages: []UIPage{{Slug: "", Title: "Index", Export: "P"}},
+		DefaultPages: []UIPage{{Route: "/", Title: "Index", Export: "P"}},
 	})
 }
 
-func TestRegisterUI_ValidSlugVariations(t *testing.T) {
+func TestRegisterUI_ValidRouteVariations(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{"a", "1", "settings", "audit-log", "v2-api", "abc123", "1-2-3",
-		"thirty-two-chars-exactly-1234567"}
-	for _, s := range valid {
-		t.Run("ok/"+s, func(t *testing.T) {
+	valid := []string{
+		"/",
+		"/a", "/1", "/settings", "/audit-log", "/v2-api", "/abc123", "/1-2-3",
+		"/thirty-two-chars-exactly-1234567",
+		"/settings/api-keys",
+		"/users/active/recent",
+	}
+	for _, r := range valid {
+		t.Run("ok"+r, func(t *testing.T) {
 			m, _ := New(Config{ID: "demo"})
 			m.RegisterUI(ModuleUI{
-				DefaultPages: []UIPage{{Slug: s, Title: "T", Export: "P"}},
+				DefaultPages: []UIPage{{Route: r, Title: "T", Export: "P"}},
 			})
 		})
 	}
 }
 
-func TestRegisterUI_InvalidSlugPanics(t *testing.T) {
+func TestRegisterUI_InvalidRoutePanics(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
-		"uppercase":           "Settings",
-		"underscore":          "settings_page",
-		"trailing-hyphen":     "settings-",
-		"leading-hyphen":      "-settings",
-		"space":               "settings page",
-		"too-long":            "thirty-three-chars-just-over-limit",
-		"reserved-underscore": "_internal",
-		"reserved-ms":         "__ms",
-		"reserved-ms-sub":     "__ms-something",
+		"empty":               "",
+		"no-leading-slash":    "settings",
+		"trailing-slash":      "/settings/",
+		"uppercase":           "/Settings",
+		"underscore":          "/settings_page",
+		"trailing-hyphen":     "/settings-",
+		"leading-hyphen":      "/-settings",
+		"space":               "/settings page",
+		"too-long-segment":    "/thirty-three-chars-just-over-limit",
+		"reserved-underscore": "/_internal",
+		"reserved-ms":         "/__ms",
+		"reserved-ms-sub":     "/__ms-something",
+		"double-slash":        "/settings//api-keys",
 	}
-	for name, slug := range cases {
+	for name, route := range cases {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
 				if recover() == nil {
-					t.Errorf("expected panic for slug %q", slug)
+					t.Errorf("expected panic for route %q", route)
 				}
 			}()
 			m, _ := New(Config{ID: "demo"})
 			m.RegisterUI(ModuleUI{
-				DefaultPages: []UIPage{{Slug: slug, Title: "T", Export: "P"}},
+				DefaultPages: []UIPage{{Route: route, Title: "T", Export: "P"}},
 			})
 		})
 	}
 }
 
-func TestRegisterUI_DuplicatePageSlugPanics(t *testing.T) {
+func TestRegisterUI_DuplicatePageRoutePanics(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
 		if recover() == nil {
-			t.Error("expected panic on duplicate page slug")
+			t.Error("expected panic on duplicate page route")
 		}
 	}()
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
 		DefaultPages: []UIPage{
-			{Slug: "audit", Title: "A", Export: "A"},
-			{Slug: "audit", Title: "B", Export: "B"},
+			{Route: "/audit", Title: "A", Export: "A"},
+			{Route: "/audit", Title: "B", Export: "B"},
 		},
 	})
 }
@@ -208,8 +217,8 @@ func TestRegisterUI_EmptyPageFieldsPanic(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]UIPage{
-		"empty-title":  {Slug: "", Title: "", Export: "P"},
-		"empty-export": {Slug: "", Title: "T", Export: ""},
+		"empty-title":  {Route: "/", Title: "", Export: "P"},
+		"empty-export": {Route: "/", Title: "T", Export: ""},
 	}
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -303,19 +312,19 @@ func TestRegisterUI_MultiPage(t *testing.T) {
 	m, _ := New(Config{ID: "demo"})
 	m.RegisterUI(ModuleUI{
 		DefaultPages: []UIPage{
-			{Slug: "", Icon: "settings", Title: "Settings", Export: "SettingsPage"},
-			{Slug: "connections", Icon: "link", Title: "Connections", Export: "ConnectionsPage"},
-			{Slug: "audit", Icon: "history", Title: "Audit log", Export: "AuditPage"},
+			{Route: "/", Title: "Settings", Export: "SettingsPage"},
+			{Route: "/connections", Title: "Connections", Export: "ConnectionsPage"},
+			{Route: "/audit", Title: "Audit log", Export: "AuditPage"},
 		},
 	})
 
 	got := m.registry.UI().DefaultPages
-	wantSlugs := []string{"", "connections", "audit"}
-	gotSlugs := make([]string, len(got))
+	wantRoutes := []string{"/", "/connections", "/audit"}
+	gotRoutes := make([]string, len(got))
 	for i, p := range got {
-		gotSlugs[i] = p.Slug
+		gotRoutes[i] = p.Route
 	}
-	if !slices.Equal(gotSlugs, wantSlugs) {
-		t.Errorf("slugs = %+v, want %+v", gotSlugs, wantSlugs)
+	if !slices.Equal(gotRoutes, wantRoutes) {
+		t.Errorf("routes = %+v, want %+v", gotRoutes, wantRoutes)
 	}
 }
