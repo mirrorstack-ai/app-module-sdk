@@ -141,8 +141,19 @@ type UIComponent = core.UIComponent
 type UIProp = core.UIProp
 
 // UIPage is one entry in DefaultPages — a module-shipped React page
-// mounted by the platform under /apps/<app-slug>/<module-slug>/<Slug>.
+// mounted by the platform under /apps/<app-slug>/<module-slug>/<route>
+// (or /apps/<app-slug>/settings/module/<module-slug>/<route> when
+// Surface is UISurfaceSettings).
 type UIPage = core.UIPage
+
+// Known UIPage.Surface values. Empty (UISurfaceMain) is the default —
+// pages mount at /apps/<app>/<module-slug>/<route>. UISurfaceSettings
+// mounts pages at /apps/<app>/settings/module/<module-slug>/<route>
+// instead, for per-module configuration UIs.
+const (
+	UISurfaceMain     = core.UISurfaceMain
+	UISurfaceSettings = core.UISurfaceSettings
+)
 
 // RegisterUI declares the module's UI surface (agent-visible Components
 // plus DefaultPages). Panics on programmer errors (duplicate names,
