@@ -27,6 +27,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
@@ -49,6 +50,10 @@ type Config struct {
 	// Optional in dev; the publish pipeline is where slugs become required.
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
+
+	// Tags are module-level category badges (e.g. "Auth", "Payments") shown in
+	// the platform's module catalog / settings. Surfaced via manifest defaults.
+	Tags []string
 
 	// SQL is an optional filesystem containing the module's sql/ directory
 	// (typically an embed.FS from `//go:embed sql/*`). The manifest endpoint
@@ -286,28 +291,110 @@ func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Ha
 	}
 }
 
-// RequirePermission returns chi middleware that checks AppRole against the
-// allowed roles AND records the permission on this Module's registry so it
-// appears in the manifest payload. Call this at route registration time
-// (alongside m.Platform/Public/Internal), NOT from inside a request handler
-// — registry append is O(N), so dynamic per-request names would leak memory
-// and slow down every subsequent registration.
+// Label is a deferred-resolution display string built from Text (literal) or
+// T (i18n catalog key). It is an alias of i18n.Label so module code constructs
+// it through the ms facade (ms.Text / ms.T) without importing the i18n package
+// directly.
+type Label = i18n.Label
+
+// Text returns a literal Label resolving to {i18n.DefaultLocale: s}.
+func Text(s string) Label { return i18n.Text(s) }
+
+// T returns a catalog-key Label resolved per loaded locale at manifest-build
+// time. See i18n.T.
+func T(key string) Label { return i18n.T(key) }
+
+// RegisterMessages loads the module's i18n catalogs (one <locale>.json per
+// file under dir) into the SDK's message registry. See i18n.RegisterMessages.
+func RegisterMessages(fsys fs.FS, dir string) error { return i18n.RegisterMessages(fsys, dir) }
+
+// PermissionOpts configures a permission declared via RegisterPermission.
 //
-// Permission names are auto-namespaced with the module slug so two modules
-// can each declare a "users.read" permission without colliding in the
-// platform's catalog. Developers write the short name; the manifest stores
-// "<slug>.<name>":
+// DefaultRole is the role the permission lands on (commonly roles.Viewer();
+// roles.Admin() keeps it admin-only). Admin is ALWAYS implicit — it is never
+// stored in the role set. CustomRoles are extra role keys beyond the default.
 //
-//	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
-//	// Module slug "oauth-core" → manifest records "oauth-core.users.view".
-//	r.With(mod.RequirePermission("users.view", p.Admin(), p.Viewer())).Get("/items", listItems)
+// Label and Description are optional display strings, built from ms.Text /
+// ms.T. They are resolved against the module's i18n catalogs at registration
+// and folded into the manifest (per-locale), so the platform's roles UI can
+// show a localized human label instead of the raw permission key. A zero
+// Label is omitted entirely.
+type PermissionOpts struct {
+	DefaultRole roles.Role
+	CustomRoles []string
+	Label       Label
+	Description Label
+}
+
+// RegisterPermission declares a module permission ONCE, recording its default
+// role, custom roles, and resolved i18n Labels/Descriptions into this Module's
+// registry so they appear in the manifest. Call it at startup (typically in a
+// declare/ package) BEFORE the routes that gate on it. First-wins by name:
+// re-declaring the same permission is a no-op.
 //
-// If the caller already prefixed the name with the slug (manual or
-// imported from a constant), the prefix is left alone — no double-prefix.
-func (m *Module) RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
-	keys := roles.Keys(allowed)
-	m.registry.AddPermission(qualifyPermissionName(m.config.Slug, name), keys)
-	return auth.RequireRoles(keys...)
+// Permission names are auto-namespaced with the module slug so two modules can
+// each declare a "users.read" without colliding in the platform's catalog.
+// Developers pass the SHORT name; the manifest stores "<slug>.<name>". If the
+// caller already prefixed the name with the slug, the prefix is left alone.
+//
+//	import "github.com/mirrorstack-ai/app-module-sdk/roles"
+//	ms.RegisterPermission("users.read", ms.PermissionOpts{
+//	    DefaultRole: roles.Viewer(),
+//	    Label:       ms.T("permissions.users.read"),
+//	})
+func (m *Module) RegisterPermission(name string, opts PermissionOpts) {
+	// Manifest records the default role + any custom roles; admin is implicit.
+	declared := append([]string{opts.DefaultRole.Key}, opts.CustomRoles...)
+	perm := registry.Permission{
+		Name:        qualifyPermissionName(m.config.Slug, name),
+		Roles:       declared,
+		DefaultRole: opts.DefaultRole.Key,
+	}
+	if !opts.Label.IsZero() {
+		perm.Labels = opts.Label.Resolve()
+	}
+	if !opts.Description.IsZero() {
+		perm.Descriptions = opts.Description.Resolve()
+	}
+	m.registry.AddPermissionWithMeta(perm)
+}
+
+// RequirePermission returns chi middleware that gates a route on a permission
+// declared via RegisterPermission, looked up BY NAME. It reads the registered
+// permission's role set and enforces it (admin always passes). Call this at
+// route registration time (alongside m.Platform/Public/Internal), NOT from
+// inside a request handler.
+//
+//	import "github.com/mirrorstack-ai/app-module-sdk/roles"
+//	// in declare/: ms.RegisterPermission("users.view", ms.PermissionOpts{DefaultRole: roles.Viewer()})
+//	// in routes:
+//	r.With(mod.RequirePermission("users.view")).Get("/items", listItems)
+//
+// The name is slug-qualified the same way RegisterPermission qualifies it, so
+// the short name used here matches the short name used there.
+//
+// Safe-by-default: if the name was never RegisterPermission'd, it is registered
+// lazily as ADMIN-ONLY (an isDev warning is logged) so a forgotten declaration
+// locks the route down rather than opening it.
+func (m *Module) RequirePermission(name string) func(http.Handler) http.Handler {
+	qualified := qualifyPermissionName(m.config.Slug, name)
+	declared, ok := m.registry.PermissionRoles(qualified)
+	if !ok {
+		// Lazy admin-only registration: a route gated on an undeclared
+		// permission must NOT silently open. Warn in dev so the author
+		// notices the missing RegisterPermission.
+		if !runtime.IsLambda() {
+			m.logger.Printf("RequirePermission(%q): no RegisterPermission found — defaulting to admin-only. Declare it via ms.RegisterPermission.", name)
+		}
+		m.registry.AddPermissionWithMeta(registry.Permission{
+			Name:        qualified,
+			Roles:       []string{roles.Admin().Key},
+			DefaultRole: roles.Admin().Key,
+		})
+		declared = []string{roles.Admin().Key}
+	}
+	// Runtime: admin always passes, plus the declared roles.
+	return auth.RequireRoles(append([]string{roles.Admin().Key}, declared...)...)
 }
 
 // qualifyPermissionName prepends "<slug>." to name. No-op if name is
@@ -324,18 +411,23 @@ func qualifyPermissionName(slug, name string) string {
 	return prefix + name
 }
 
+// RegisterPermission declares a permission on the default Module created by
+// Init(). Calling this before Init() panics — match Platform/Public/Internal.
+func RegisterPermission(name string, opts PermissionOpts) {
+	mustDefault("RegisterPermission").RegisterPermission(name, opts)
+}
+
 // RequirePermission is the convenience wrapper that dispatches to the default
 // Module created by Init(). Calling this before Init() panics — match the
 // behavior of Platform/Public/Internal.
 //
-//	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
-//
 //	ms.Init(...)
+//	ms.RegisterPermission("media.view", ms.PermissionOpts{DefaultRole: roles.Viewer()})
 //	ms.Platform(func(r chi.Router) {
-//	    r.With(ms.RequirePermission("media.view", p.Admin(), p.Viewer())).Get(...)
+//	    r.With(ms.RequirePermission("media.view")).Get(...)
 //	})
-func RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
-	return mustDefault("RequirePermission").RequirePermission(name, allowed...)
+func RequirePermission(name string) func(http.Handler) http.Handler {
+	return mustDefault("RequirePermission").RequirePermission(name)
 }
 
 // Start auto-detects the runtime mode and starts serving:
@@ -549,7 +641,7 @@ func (m *Module) mountSystemRoutes() {
 			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)
 			r.Get("/manifest", system.ManifestHandler(
-				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon,
+				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon, m.config.Tags,
 				m.config.SQL, m.config.Versions, m.registry, m.contribReg,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
@@ -672,6 +764,28 @@ func Contributions() []contributions.SlotInfo {
 		return nil
 	}
 	return defaultModule.contribReg.List()
+}
+
+// StoredContributions returns the contributions OTHER modules have registered
+// into one of THIS module's slots (slot key as declared via DefineContribute),
+// newest first. It reads the SDK-managed <moduleID>_contributions store — the
+// canonical registry the platform's install-time auto-register writes to. Each
+// entry's ID is the contributing module's id (the registration key), which a
+// host can use to address that module. Use this on the HOST side to consume
+// contributions (e.g. oauth-core listing its registered auth providers).
+func (m *Module) StoredContributions(ctx context.Context, slot string) ([]contributions.Contribution, error) {
+	q, release, err := DB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return m.contribStorage.List(ctx, q, slot)
+}
+
+// StoredContributions reads stored contributions for a slot on the default
+// module. Panics if Init has not been called. See Module.StoredContributions.
+func StoredContributions(ctx context.Context, slot string) ([]contributions.Contribution, error) {
+	return mustDefault("StoredContributions").StoredContributions(ctx, slot)
 }
 
 // localDevCORS echoes the request Origin (with credentials) and answers

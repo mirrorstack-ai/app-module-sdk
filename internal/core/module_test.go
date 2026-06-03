@@ -321,8 +321,9 @@ func TestRequirePermission_AllowsMember(t *testing.T) {
 	t.Parallel() // safe now that permission state lives on the Module instance, not auth package globals
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.RegisterPermission("media.view", PermissionOpts{DefaultRole: p.Viewer(), CustomRoles: []string{"member"}})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.view")).Get("/items", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("ok"))
 		})
 	})
@@ -337,8 +338,9 @@ func TestRequirePermission_RejectsViewer(t *testing.T) {
 	t.Parallel()
 
 	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.RegisterPermission("media.delete", PermissionOpts{DefaultRole: p.Admin()})
 	m.Platform(func(r chi.Router) {
-		r.With(m.RequirePermission("media.delete", p.Admin())).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		r.With(m.RequirePermission("media.delete")).Delete("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("deleted"))
 		})
 	})
@@ -358,12 +360,15 @@ func TestRequirePermission_AppearsInManifest(t *testing.T) {
 	m1, _ := New(Config{ID: "media", Name: "Media"})
 	m2, _ := New(Config{ID: "video", Name: "Video"})
 
+	m1.RegisterPermission("media.upload", PermissionOpts{DefaultRole: p.Admin(), CustomRoles: []string{"member"}})
+	m1.RegisterPermission("media.view", PermissionOpts{DefaultRole: p.Viewer(), CustomRoles: []string{"member"}})
 	m1.Platform(func(r chi.Router) {
-		r.With(m1.RequirePermission("media.upload", p.Admin(), p.Custom("member"))).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
-		r.With(m1.RequirePermission("media.view", p.Admin(), p.Custom("member"), p.Viewer())).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.upload")).Post("/upload", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m1.RequirePermission("media.view")).Get("/items", func(w http.ResponseWriter, r *http.Request) {})
 	})
+	m2.RegisterPermission("video.transcode", PermissionOpts{DefaultRole: p.Admin()})
 	m2.Platform(func(r chi.Router) {
-		r.With(m2.RequirePermission("video.transcode", p.Admin())).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
+		r.With(m2.RequirePermission("video.transcode")).Post("/transcode", func(w http.ResponseWriter, r *http.Request) {})
 	})
 
 	rec := doRequestWithSecret(t, m1.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
@@ -412,8 +417,9 @@ func TestRequirePermission_AutoPrefix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("MS_INTERNAL_SECRET", "secret")
 			m, _ := New(Config{ID: "test", Slug: tc.slug, Name: "Test"})
+			m.RegisterPermission(tc.permission, PermissionOpts{DefaultRole: p.Admin()})
 			m.Platform(func(r chi.Router) {
-				r.With(m.RequirePermission(tc.permission, p.Admin())).Get("/x", func(w http.ResponseWriter, r *http.Request) {})
+				r.With(m.RequirePermission(tc.permission)).Get("/x", func(w http.ResponseWriter, r *http.Request) {})
 			})
 
 			got := fetchManifest(t, m)
@@ -828,7 +834,8 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Platform":          func() { Platform(func(r chi.Router) {}) },
 		"Public":            func() { Public(func(r chi.Router) {}) },
 		"Internal":          func() { Internal(func(r chi.Router) {}) },
-		"RequirePermission": func() { RequirePermission("media.view", p.Admin()) },
+		"RegisterPermission": func() { RegisterPermission("media.view", PermissionOpts{DefaultRole: p.Admin()}) },
+		"RequirePermission":  func() { RequirePermission("media.view") },
 		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
 		"Emits":             func() { Emits("created") },
 		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },

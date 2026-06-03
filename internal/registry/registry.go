@@ -66,9 +66,21 @@ type Task struct {
 
 // Permission is a declared module permission. Exposed in the manifest so the
 // platform can surface "what does this module need" on its install screen.
+//
+// DefaultRole is the role key the permission lands on by default (e.g.
+// "viewer"); admin is always implicit and never stored. It is informational
+// metadata for the platform UI — the enforced role set is Roles.
+//
+// Labels and Descriptions are per-locale display strings (locale → text),
+// resolved at registration from the module's i18n catalogs. Both are
+// omitempty: a module that declares no Label/Description ships neither key,
+// and the platform falls back to the raw permission name.
 type Permission struct {
-	Name  string   `json:"name"`
-	Roles []string `json:"roles"`
+	Name         string            `json:"name"`
+	Roles        []string          `json:"roles"`
+	DefaultRole  string            `json:"defaultRole,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Descriptions map[string]string `json:"descriptions,omitempty"`
 }
 
 // Dependency is a declared dependency on another module. Optional=true
@@ -93,6 +105,20 @@ type Dependency struct {
 	Optional bool     `json:"optional,omitempty"`
 	Tables   []string `json:"tables,omitempty"`
 	Events   []string `json:"events,omitempty"`
+}
+
+// OutboundContribution declares that this module pushes a payload INTO another
+// module's contribution slot — the contributor side of DefineContribute. Like
+// Dependency it is pure manifest metadata: the module's binary never makes the
+// call. The platform catalog (or the CLI dev runner) reads it at install /
+// tunnel-up, validates Host+Slot against the host's definedContributions, and —
+// after app-owner approval — performs the registration on the contributor's
+// behalf. The contributor declares WHAT and WHERE; it never holds the host's
+// address or credentials.
+type OutboundContribution struct {
+	Host    string          `json:"host"`    // host module spec/id, e.g. "oauth-core"
+	Slot    string          `json:"slot"`    // slot key on the host, e.g. "auth-provider"
+	Payload json.RawMessage `json:"payload"` // typed payload, validated by the host's slot at registration
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -124,18 +150,19 @@ type MCPResourceDecl struct {
 // Registry is the per-module registry of routes/events/schedules/tasks/permissions.
 // All operations are safe for concurrent use.
 type Registry struct {
-	mu           sync.RWMutex
-	routes       map[Scope][]Route
-	emits        []string
-	subscribes   map[string]string // event name → internal path
-	schedules    []Schedule
-	tasks        []Task
-	permissions  []Permission
-	description  string
-	dependencies []Dependency
-	mcpTools     []MCPToolDecl
-	mcpResources []MCPResourceDecl
-	ui           *ModuleUI
+	mu                    sync.RWMutex
+	routes                map[Scope][]Route
+	emits                 []string
+	subscribes            map[string]string // event name → internal path
+	schedules             []Schedule
+	tasks                 []Task
+	permissions           []Permission
+	description           string
+	dependencies          []Dependency
+	outboundContributions []OutboundContribution
+	mcpTools              []MCPToolDecl
+	mcpResources          []MCPResourceDecl
+	ui                    *ModuleUI
 }
 
 func New() *Registry {
@@ -197,6 +224,39 @@ func (r *Registry) AddDependency(dep Dependency) bool {
 	dep.Events = slices.Clone(dep.Events)
 	r.dependencies = append(r.dependencies, dep)
 	return true
+}
+
+// AddOutboundContribution records (or replaces) an outbound contribution keyed
+// by (Host, Slot). Re-declaring the same Host+Slot overwrites the payload —
+// last declaration wins — so a module contributes at most once per host slot.
+func (r *Registry) AddOutboundContribution(c OutboundContribution) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, existing := range r.outboundContributions {
+		if existing.Host == c.Host && existing.Slot == c.Slot {
+			r.outboundContributions[i].Payload = slices.Clone(c.Payload)
+			return
+		}
+	}
+	c.Payload = slices.Clone(c.Payload)
+	r.outboundContributions = append(r.outboundContributions, c)
+}
+
+// OutboundContributions returns a non-nil deep copy of all declared outbound
+// contributions in registration order. Payloads are cloned so callers can't
+// mutate the registry through the returned slice.
+func (r *Registry) OutboundContributions() []OutboundContribution {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]OutboundContribution, len(r.outboundContributions))
+	for i, c := range r.outboundContributions {
+		out[i] = OutboundContribution{
+			Host:    c.Host,
+			Slot:    c.Slot,
+			Payload: slices.Clone(c.Payload),
+		}
+	}
+	return out
 }
 
 // mergeStrings returns the set union of two string slices, preserving the
@@ -389,18 +449,47 @@ func (r *Registry) Tasks() []Task {
 // downstream consumers (DB columns, log parsers) from receiving malformed
 // strings via the manifest.
 func (r *Registry) AddPermission(name string, roles []string) {
-	ValidateName("RequirePermission", name)
+	r.AddPermissionWithMeta(Permission{Name: name, Roles: roles})
+}
+
+// AddPermissionWithMeta records a declared permission carrying optional
+// metadata (DefaultRole, Labels, Descriptions). Same first-wins-by-name dedup,
+// validation, and clone-on-store semantics as AddPermission — the simple
+// AddPermission is just this with empty metadata. The Roles, Labels, and
+// Descriptions are cloned so caller mutations after the call cannot leak into
+// the stored copy.
+func (r *Registry) AddPermissionWithMeta(p Permission) {
+	ValidateName("RequirePermission", p.Name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.permissions {
-		if existing.Name == name {
+		if existing.Name == p.Name {
 			return
 		}
 	}
 	r.permissions = append(r.permissions, Permission{
-		Name:  name,
-		Roles: slices.Clone(roles),
+		Name:         p.Name,
+		Roles:        slices.Clone(p.Roles),
+		DefaultRole:  p.DefaultRole,
+		Labels:       maps.Clone(p.Labels),
+		Descriptions: maps.Clone(p.Descriptions),
 	})
+}
+
+// PermissionRoles returns the enforced role set for a registered permission by
+// its (already-qualified) name, and whether such a permission was registered.
+// The returned slice is a clone so callers can't mutate the stored copy. Used
+// by Module.RequirePermission to look up the roles declared via
+// RegisterPermission.
+func (r *Registry) PermissionRoles(name string) ([]string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.permissions {
+		if p.Name == name {
+			return slices.Clone(p.Roles), true
+		}
+	}
+	return nil, false
 }
 
 // Permissions returns a non-nil deep copy of all declared permissions. The
@@ -417,7 +506,13 @@ func (r *Registry) Permissions() []Permission {
 	}
 	out := make([]Permission, len(r.permissions))
 	for i, p := range r.permissions {
-		out[i] = Permission{Name: p.Name, Roles: slices.Clone(p.Roles)}
+		out[i] = Permission{
+			Name:         p.Name,
+			Roles:        slices.Clone(p.Roles),
+			DefaultRole:  p.DefaultRole,
+			Labels:       maps.Clone(p.Labels),
+			Descriptions: maps.Clone(p.Descriptions),
+		}
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
@@ -40,6 +41,12 @@ type ManifestPayload struct {
 	// what other modules can plug into. Always present; empty array
 	// when no slots are declared.
 	DefinedContributions []contributions.SlotInfo `json:"definedContributions"`
+	// ContributesTo lists the host slots this module pushes INTO
+	// (ms.ContributesTo) — the contributor side. The catalog (CLI in dev)
+	// validates each against the host's definedContributions and performs
+	// the registration after app-owner approval. Always present; empty
+	// array when the module contributes nothing.
+	ContributesTo []registry.OutboundContribution `json:"contributesTo"`
 }
 
 // ManifestMCP declares the MCP tool and resource surface of the module. The
@@ -63,11 +70,17 @@ type MigrationVersions struct {
 	Module string `json:"module,omitempty"`
 }
 
-// ManifestDefaults is the default display name and icon. The platform may
-// override these per-app installation.
+// ManifestDefaults is the default display name, icon, and tags. The platform
+// may override name/icon per-app installation; tags are module-level badges.
+//
+// NameLabels carries per-locale display names (resolved from the module's
+// i18n catalog key "module.name"); empty when the module declared none, in
+// which case the platform falls back to Name.
 type ManifestDefaults struct {
-	Name string `json:"name"`
-	Icon string `json:"icon"`
+	Name       string            `json:"name"`
+	Icon       string            `json:"icon"`
+	Tags       []string          `json:"tags,omitempty"`
+	NameLabels map[string]string `json:"nameLabels,omitempty"`
 }
 
 // ManifestEvents declares which events the module emits and which it subscribes to.
@@ -99,7 +112,7 @@ func buildManifestMCP(reg *registry.Registry) ManifestMCP {
 //
 // contribReg is the module's contribution-slot registry. Pass nil to omit
 // declared contributions from the manifest entirely (e.g. tests).
-func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry) http.HandlerFunc {
+func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry) http.HandlerFunc {
 	if versions == nil {
 		versions = map[string]MigrationVersions{}
 	}
@@ -129,7 +142,7 @@ func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[stri
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
 			ID:                   id,
 			Slug:                 slug,
-			Defaults:             ManifestDefaults{Name: name, Icon: icon},
+			Defaults:             ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
 			Description:          reg.Description(),
 			Dependencies:         reg.Dependencies(),
 			Migration:            MigrationVersions{App: appVersion, Module: moduleVersion},
@@ -142,6 +155,7 @@ func ManifestHandler(id, slug, name, icon string, sqlFS fs.FS, versions map[stri
 			MCP:                  buildManifestMCP(reg),
 			UI:                   reg.UI(),
 			DefinedContributions: contribSlots,
+			ContributesTo:        reg.OutboundContributions(),
 		})
 	}
 }

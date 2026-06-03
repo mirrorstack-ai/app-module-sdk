@@ -351,3 +351,144 @@ func TestInternalAuth_LogsHeaderAbsent(t *testing.T) {
 		t.Errorf("expected header_present=false in log, got: %q", got)
 	}
 }
+
+// --- MS_PLATFORM_TOKEN tests ---
+
+func TestInternalAuth_PlatformToken_ValidToken(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-456")
+	t.Setenv("MS_INTERNAL_SECRET", "old-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	req.Header.Set(HeaderPlatformToken, "pt-secret-456")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 with valid platform token, got %d", rec.Code)
+	}
+}
+
+func TestInternalAuth_PlatformToken_WrongToken_401(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-456")
+	t.Setenv("MS_INTERNAL_SECRET", "old-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	req.Header.Set(HeaderPlatformToken, "wrong")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with wrong platform token, got %d", rec.Code)
+	}
+}
+
+func TestInternalAuth_PlatformToken_OldHeaderIgnored(t *testing.T) {
+	// When MS_PLATFORM_TOKEN is set, X-MS-Internal-Secret is not checked.
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-456")
+	t.Setenv("MS_INTERNAL_SECRET", "old-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	req.Header.Set(HeaderInternalSecret, "old-secret") // correct old secret, wrong header
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when sending old header while platform token is configured, got %d", rec.Code)
+	}
+}
+
+func TestInternalAuth_PlatformToken_FallbackToInternalSecret(t *testing.T) {
+	// When MS_PLATFORM_TOKEN is empty, falls back to MS_INTERNAL_SECRET.
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "old-secret")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	req.Header.Set(HeaderInternalSecret, "old-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 with fallback to internal secret, got %d", rec.Code)
+	}
+}
+
+func TestInternalAuth_PlatformToken_NeitherSet_Bypass(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := internalAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/event", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 bypass when neither secret set, got %d", rec.Code)
+	}
+}
+
+func TestPlatformAuth_PlatformToken_ValidToken_InjectsIdentity(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	var seen *Identity
+	handler := platformAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderPlatformToken, "pt-secret-789")
+	req.Header.Set(HeaderUserID, "u-pt-1")
+	req.Header.Set(HeaderAppID, "a-pt-2")
+	req.Header.Set(HeaderAppRole, RoleMember)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != 0 {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil {
+		t.Fatal("expected Identity from platform token path; got nil")
+	}
+	if seen.UserID != "u-pt-1" || seen.AppID != "a-pt-2" || seen.AppRole != RoleMember {
+		t.Errorf("identity mismatch: got %+v", seen)
+	}
+}
+
+func TestPlatformAuth_PlatformToken_WrongToken_401(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := platformAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderPlatformToken, "wrong")
+	req.Header.Set(HeaderUserID, "u-1")
+	req.Header.Set(HeaderAppID, "a-1")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with wrong platform token, got %d", rec.Code)
+	}
+}
+
+func TestPlatformAuth_PlatformToken_OldHeaderIgnored(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
+	t.Setenv("MS_INTERNAL_SECRET", "old-secret")
+	handler := platformAuth(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/platform/users", nil)
+	req.Header.Set(HeaderInternalSecret, "old-secret") // old header, should be ignored
+	req.Header.Set(HeaderUserID, "u-1")
+	req.Header.Set(HeaderAppID, "a-1")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when sending old header while platform token is configured, got %d", rec.Code)
+	}
+}

@@ -84,6 +84,7 @@ type UIPage struct {
 	Surface     string `json:"surface,omitempty"`
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
+	Icon        string `json:"icon,omitempty"`
 	Export      string `json:"export"`
 }
 
