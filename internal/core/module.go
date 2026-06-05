@@ -460,7 +460,7 @@ func (m *Module) Start() error {
 
 	// Auto-create the contributions table when any slot is declared.
 	// CREATE TABLE IF NOT EXISTS is safe to call on every Start; the
-	// guard keeps modules that never use DefineContribute from
+	// guard keeps modules that never use Provide from
 	// touching their DB for an empty feature. Production schema
 	// management lands via the lifecycle install hook in a follow-up.
 	if m.contribReg.Len() > 0 {
@@ -620,7 +620,7 @@ func (m *Module) mountSystemRoutes() {
 		r.Options("/web/*", system.WebHandler(m.config.WebDir))
 
 		// Contribution slots — host modules declare with
-		// ms.DefineContribute and the SDK auto-mounts register /
+		// ms.Provide and the SDK auto-mounts register /
 		// unregister / list endpoints here. Internal scope because
 		// writes move trusted module-to-module; the read path is
 		// inside the same group for symmetry — host modules that want
@@ -719,14 +719,14 @@ func Internal(fn func(r chi.Router)) { mustDefault("Internal").Internal(fn) }
 // DefaultModule returns the default module for advanced use cases.
 func DefaultModule() *Module { return defaultModule }
 
-// DefineContributeSlot is the non-generic core. The exported
+// ProvideSlot is the non-generic core. The exported
 // generic wrapper lives in mirrorstack.go where T is in scope —
 // methods can't be generic in Go, so the type-aware closure is
 // built once at the call site and the Module just stores the
 // resulting Slot.
-func (m *Module) DefineContributeSlot(slot contributions.Slot) {
+func (m *Module) ProvideSlot(slot contributions.Slot) {
 	if err := m.contribReg.Define(slot); err != nil {
-		panic("mirrorstack: DefineContribute: " + err.Error())
+		panic("mirrorstack: Provide: " + err.Error())
 	}
 }
 
@@ -745,16 +745,16 @@ func NewContributionSlot[T any](key string) contributions.Slot {
 	})
 }
 
-// DefineContribute is the top-level entry point modules call from
-// main.go:
+// Provide is the top-level entry point modules call from
+// main.go to declare an extension slot others contribute to:
 //
-//	ms.DefineContribute[ProviderContribution]("providers")
+//	ms.Provide[ProviderContribution]("providers")
 //
 // Builds the type-aware Slot and stores it on the default module.
 // Panics on duplicate key or before ms.Init — matches the existing
 // RegisterUI / RequirePermission startup-error conventions.
-func DefineContribute[T any](key string) {
-	mustDefault("DefineContribute").DefineContributeSlot(NewContributionSlot[T](key))
+func Provide[T any](key string) {
+	mustDefault("Provide").ProvideSlot(NewContributionSlot[T](key))
 }
 
 // Contributions returns every contribution slot the default module
@@ -767,7 +767,7 @@ func Contributions() []contributions.SlotInfo {
 }
 
 // StoredContributions returns the contributions OTHER modules have registered
-// into one of THIS module's slots (slot key as declared via DefineContribute),
+// into one of THIS module's slots (slot key as declared via Provide),
 // newest first. It reads the SDK-managed <moduleID>_contributions store — the
 // canonical registry the platform's install-time auto-register writes to. Each
 // entry's ID is the contributing module's id (the registration key), which a

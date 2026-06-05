@@ -108,10 +108,10 @@ type Dependency struct {
 }
 
 // OutboundContribution declares that this module pushes a payload INTO another
-// module's contribution slot — the contributor side of DefineContribute. Like
+// module's contribution slot — the contributor side of Provide. Like
 // Dependency it is pure manifest metadata: the module's binary never makes the
 // call. The platform catalog (or the CLI dev runner) reads it at install /
-// tunnel-up, validates Host+Slot against the host's definedContributions, and —
+// tunnel-up, validates Host+Slot against the host's provides, and —
 // after app-owner approval — performs the registration on the contributor's
 // behalf. The contributor declares WHAT and WHERE; it never holds the host's
 // address or credentials.

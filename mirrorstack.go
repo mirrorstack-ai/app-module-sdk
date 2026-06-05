@@ -172,7 +172,7 @@ func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
 func Resolve[T any](id string) (T, bool) { return core.Resolve[T](id) }
 
 // ContributesTo declares that this module pushes payload into host module's
-// slot — the contributor side of DefineContribute. Zero-runtime: it becomes
+// slot — the contributor side of Provide. Zero-runtime: it becomes
 // manifest metadata and the platform (CLI in dev) performs the registration
 // after app-owner approval. Pair with ms.DependsOn(host). See core.ContributesTo.
 func ContributesTo(host, slot string, payload any) { core.ContributesTo(host, slot, payload) }
@@ -259,8 +259,8 @@ func RunTask(ctx context.Context, name string, payload json.RawMessage) (string,
 // ContributionSlot is the manifest projection of a declared slot.
 type ContributionSlot = contributions.SlotInfo
 
-// DefineContribute declares a contribution slot on the default
-// module. The type parameter T fixes the payload shape — incoming
+// Provide declares an extension slot others contribute to on the
+// default module. The type parameter T fixes the payload shape — incoming
 // register requests must unmarshal cleanly into T. The SDK
 // auto-mounts:
 //
@@ -283,9 +283,9 @@ type ContributionSlot = contributions.SlotInfo
 //	    CallbackPath string `json:"callback_path"`
 //	}
 //
-//	ms.DefineContribute[ProviderContribution]("providers")
-func DefineContribute[T any](key string) {
-	core.DefineContribute[T](key)
+//	ms.Provide[ProviderContribution]("providers")
+func Provide[T any](key string) {
+	core.Provide[T](key)
 }
 
 // Contributions returns every contribution slot declared on the
@@ -298,7 +298,7 @@ func Contributions() []ContributionSlot { return core.Contributions() }
 type Contribution = contributions.Contribution
 
 // StoredContributions returns the contributions other modules have registered
-// into this module's slot (the host-read side of DefineContribute), newest
+// into this module's slot (the host-read side of Provide), newest
 // first. The platform's install-time auto-register writes here; a host consumes
 // them at runtime (e.g. oauth-core listing registered auth providers). See
 // core.StoredContributions.

@@ -8,14 +8,14 @@ import (
 )
 
 // ContributesTo declares that this module pushes payload INTO another module's
-// contribution slot — the contributor side of DefineContribute. It is a
+// contribution slot — the contributor side of Provide. It is a
 // ZERO-RUNTIME declaration that mirrors DependsOn: the payload becomes manifest
 // metadata (contributesTo), and the platform catalog — or the CLI dev runner in
 // local dev — performs the actual registration into the host after app-owner
 // approval. The module's binary never calls the host directly.
 //
 // Pair it with ms.DependsOn(host) so the platform installs the host first and
-// can validate the slot exists against the host's definedContributions.
+// can validate the slot exists against the host's provides.
 //
 // payload must be a JSON-serializable value matching the host slot's declared
 // type (e.g. oauth-core's AuthProvider). Re-declaring the same (host, slot)

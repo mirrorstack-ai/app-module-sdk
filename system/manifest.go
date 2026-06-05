@@ -36,14 +36,14 @@ type ManifestPayload struct {
 	// UI is the module's declared UI surface (RegisterUI). Nil/absent when
 	// the module ships no UI — callers must nil-check before reading.
 	UI *registry.ModuleUI `json:"ui,omitempty"`
-	// DefinedContributions lists the contribution slots this module
-	// accepts (ms.DefineContribute). The catalog reads this to know
+	// Provides lists the extension slots this module declares for
+	// others to contribute to (ms.Provide). The catalog reads this to know
 	// what other modules can plug into. Always present; empty array
 	// when no slots are declared.
-	DefinedContributions []contributions.SlotInfo `json:"definedContributions"`
+	Provides []contributions.SlotInfo `json:"provides"`
 	// ContributesTo lists the host slots this module pushes INTO
 	// (ms.ContributesTo) — the contributor side. The catalog (CLI in dev)
-	// validates each against the host's definedContributions and performs
+	// validates each against the host's provides and performs
 	// the registration after app-owner approval. Always present; empty
 	// array when the module contributes nothing.
 	ContributesTo []registry.OutboundContribution `json:"contributesTo"`
@@ -140,22 +140,22 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 		}
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
-			ID:                   id,
-			Slug:                 slug,
-			Defaults:             ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
-			Description:          reg.Description(),
-			Dependencies:         reg.Dependencies(),
-			Migration:            MigrationVersions{App: appVersion, Module: moduleVersion},
-			Versions:             versions,
-			Routes:               reg.Routes(),
-			Events:               ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Schedules:            reg.Schedules(),
-			Tasks:                reg.Tasks(),
-			Permissions:          reg.Permissions(),
-			MCP:                  buildManifestMCP(reg),
-			UI:                   reg.UI(),
-			DefinedContributions: contribSlots,
-			ContributesTo:        reg.OutboundContributions(),
+			ID:            id,
+			Slug:          slug,
+			Defaults:      ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
+			Description:   reg.Description(),
+			Dependencies:  reg.Dependencies(),
+			Migration:     MigrationVersions{App: appVersion, Module: moduleVersion},
+			Versions:      versions,
+			Routes:        reg.Routes(),
+			Events:        ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Schedules:     reg.Schedules(),
+			Tasks:         reg.Tasks(),
+			Permissions:   reg.Permissions(),
+			MCP:           buildManifestMCP(reg),
+			UI:            reg.UI(),
+			Provides:      contribSlots,
+			ContributesTo: reg.OutboundContributions(),
 		})
 	}
 }
