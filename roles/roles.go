@@ -5,10 +5,16 @@
 // the call-site API. The canonical roles are Admin and Viewer; Custom
 // accepts any string for module-specific roles.
 //
+// ms.RegisterPermission takes a DEFAULT role (Admin is always implicit, so it's
+// only passed to mean "admin-only") plus optional custom role keys; routes then
+// gate on the declared permission by name via ms.RequirePermission:
+//
 //	import p "github.com/mirrorstack-ai/app-module-sdk/roles"
 //
-//	ms.RequirePermission("media.view", p.Admin(), p.Viewer())
-//	ms.RequirePermission("media.moderate", p.Custom("moderator"))
+//	ms.RegisterPermission("media.view", ms.PermissionOpts{DefaultRole: p.Viewer()})              // admin implicit; viewer default
+//	ms.RegisterPermission("media.delete", ms.PermissionOpts{DefaultRole: p.Admin()})             // admin-only
+//	ms.RegisterPermission("media.moderate", ms.PermissionOpts{DefaultRole: p.Viewer(), CustomRoles: []string{"moderator"}})
+//	r.With(ms.RequirePermission("media.view")).Get(...)
 package roles
 
 // Role is a typed wrapper around a role key. Equality comparisons use Key.

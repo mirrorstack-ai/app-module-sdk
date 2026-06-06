@@ -9,6 +9,7 @@ package mirrorstack
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -18,7 +19,6 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/core"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
-	"github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
@@ -64,10 +64,54 @@ func Public(fn func(r chi.Router)) { core.Public(fn) }
 // Internal registers internal-scoped routes on the default module.
 func Internal(fn func(r chi.Router)) { core.Internal(fn) }
 
-// RequirePermission returns Chi middleware that enforces the given roles and
-// registers the permission on the manifest.
-func RequirePermission(name string, allowed ...roles.Role) func(http.Handler) http.Handler {
-	return core.RequirePermission(name, allowed...)
+// PermissionOpts configures a permission declared via RegisterPermission:
+// its default role, extra custom roles, and optional i18n Label/Description.
+type PermissionOpts = core.PermissionOpts
+
+// Label is a deferred-resolution display string built from Text (literal) or
+// T (i18n catalog key). Pass it as PermissionOpts.Label / .Description.
+type Label = core.Label
+
+// Text returns a literal Label resolving to the default locale.
+func Text(s string) Label { return core.Text(s) }
+
+// T returns a catalog-key Label, resolved per loaded locale at manifest build
+// from catalogs loaded via RegisterMessages.
+func T(key string) Label { return core.T(key) }
+
+// RegisterMessages loads the module's i18n catalogs from fsys/dir (one
+// <locale>.json per file, nested JSON flattened to dotted keys). Call once at
+// startup, typically with a //go:embed of i18n/*.json. These catalogs back the
+// Labels resolved by RegisterPermission and surfaced in the manifest.
+//
+//	//go:embed i18n/*.json
+//	var i18nFS embed.FS
+//	ms.RegisterMessages(i18nFS, "i18n")
+func RegisterMessages(fsys fs.FS, dir string) error { return core.RegisterMessages(fsys, dir) }
+
+// RegisterPermission declares a module permission ONCE — its default role,
+// custom roles, and resolved i18n Labels/Descriptions — recording it in the
+// manifest. Call at startup (typically a declare/ package) BEFORE the routes
+// that gate on it. First-wins by name. Names are slug-qualified automatically.
+//
+//	import "github.com/mirrorstack-ai/app-module-sdk/roles"
+//	ms.RegisterPermission("users.read", ms.PermissionOpts{
+//	    DefaultRole: roles.Viewer(),
+//	    Label:       ms.T("permissions.users.read"),
+//	})
+func RegisterPermission(name string, opts PermissionOpts) {
+	core.RegisterPermission(name, opts)
+}
+
+// RequirePermission returns Chi middleware gating a route on a permission
+// previously declared via RegisterPermission, looked up by NAME:
+//
+//	ms.RequirePermission("users.read")
+//
+// Admin always passes. If the name was never RegisterPermission'd it is
+// registered lazily as admin-only (safe-by-default) with a dev warning.
+func RequirePermission(name string) func(http.Handler) http.Handler {
+	return core.RequirePermission(name)
 }
 
 // --- Data ---
@@ -126,6 +170,12 @@ func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
 // Resolve looks up a typed client registered by another module. v1 stub
 // always returns (zero, false).
 func Resolve[T any](id string) (T, bool) { return core.Resolve[T](id) }
+
+// ContributesTo declares that this module pushes payload into host module's
+// slot — the contributor side of Provide. Zero-runtime: it becomes
+// manifest metadata and the platform (CLI in dev) performs the registration
+// after app-owner approval. Pair with ms.DependsOn(host). See core.ContributesTo.
+func ContributesTo(host, slot string, payload any) { core.ContributesTo(host, slot, payload) }
 
 // --- UI surface ---
 
@@ -209,8 +259,8 @@ func RunTask(ctx context.Context, name string, payload json.RawMessage) (string,
 // ContributionSlot is the manifest projection of a declared slot.
 type ContributionSlot = contributions.SlotInfo
 
-// DefineContribute declares a contribution slot on the default
-// module. The type parameter T fixes the payload shape — incoming
+// Provide declares an extension slot others contribute to on the
+// default module. The type parameter T fixes the payload shape — incoming
 // register requests must unmarshal cleanly into T. The SDK
 // auto-mounts:
 //
@@ -233,12 +283,25 @@ type ContributionSlot = contributions.SlotInfo
 //	    CallbackPath string `json:"callback_path"`
 //	}
 //
-//	ms.DefineContribute[ProviderContribution]("providers")
-func DefineContribute[T any](key string) {
-	core.DefineContribute[T](key)
+//	ms.Provide[ProviderContribution]("providers")
+func Provide[T any](key string) {
+	core.Provide[T](key)
 }
 
 // Contributions returns every contribution slot declared on the
 // default module. Useful for tests and for hosts that want to expose
 // a /platform/* read endpoint listing what they accept.
 func Contributions() []ContributionSlot { return core.Contributions() }
+
+// Contribution is a stored contribution row: ID is the contributing module's
+// id (the registration key), Payload is its JSON contribution.
+type Contribution = contributions.Contribution
+
+// StoredContributions returns the contributions other modules have registered
+// into this module's slot (the host-read side of Provide), newest
+// first. The platform's install-time auto-register writes here; a host consumes
+// them at runtime (e.g. oauth-core listing registered auth providers). See
+// core.StoredContributions.
+func StoredContributions(ctx context.Context, slot string) ([]Contribution, error) {
+	return core.StoredContributions(ctx, slot)
+}

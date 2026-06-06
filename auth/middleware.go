@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
@@ -16,6 +17,7 @@ import (
 // those callers assert via these headers.
 const (
 	HeaderInternalSecret = "X-MS-Internal-Secret"
+	HeaderPlatformToken  = "X-MS-Platform-Token"
 	HeaderUserID         = "X-MS-User-ID"
 	HeaderAppID          = "X-MS-App-ID"
 	HeaderAppRole        = "X-MS-App-Role"
@@ -46,7 +48,11 @@ func PlatformAuth() func(http.Handler) http.Handler {
 // platformAuth is the test seam; inLambda is injected so tests don't
 // mutate process env captured at package init.
 //
-// Behavior matrix (secret = MS_INTERNAL_SECRET):
+// Auth signal priority: MS_PLATFORM_TOKEN > MS_INTERNAL_SECRET.
+// When MS_PLATFORM_TOKEN is set, the caller must present
+// X-MS-Platform-Token. Otherwise, falls back to X-MS-Internal-Secret.
+//
+// Behavior matrix (secret = first non-empty of MS_PLATFORM_TOKEN, MS_INTERNAL_SECRET):
 //
 //	inLambda + secret unset → 503 (operator misconfig; platform alerting)
 //	inLambda + secret set   → enforce: validate secret + identity headers
@@ -57,9 +63,9 @@ func PlatformAuth() func(http.Handler) http.Handler {
 //	local    + secret set   → enforce (e.g. `mirrorstack dev --tunnel`
 //	                          where the CLI sets the secret)
 func platformAuth(inLambda bool) func(http.Handler) http.Handler {
-	expected := os.Getenv("MS_INTERNAL_SECRET")
-	if expected == "" && !inLambda {
-		log.Printf("mirrorstack: MS_INTERNAL_SECRET not set; platform routes bypass auth with synthetic admin identity (local dev)")
+	readSecret := platformSecretReader()
+	if expected, _ := readSecret(); expected == "" && !inLambda {
+		log.Printf("mirrorstack: no platform secret set; platform routes bypass auth with synthetic admin identity (local dev)")
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -69,6 +75,8 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			expected, header := readSecret()
 
 			// Step 2: local-dev bypass — inject synthetic admin.
 			if expected == "" && !inLambda {
@@ -84,7 +92,6 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 			// Step 3: Lambda + no secret is a misconfig.
 			if expected == "" {
 				log.Printf("mirrorstack: platform auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
-				// SECURITY: generic body — same rationale as InternalAuth's 503.
 				httputil.JSON(w, http.StatusServiceUnavailable, httputil.ErrorResponse{
 					Error: "service unavailable",
 				})
@@ -93,9 +100,8 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 
 			// Step 4: trusted-forwarder path. Validate secret, then read
 			// identity headers.
-			secret := r.Header.Get(HeaderInternalSecret)
+			secret := r.Header.Get(header)
 			if !constantTimeEqual(secret, expected) {
-				// SECURITY: never log the header value; only presence.
 				log.Printf("mirrorstack: platform auth rejected (secret mismatch, header_present=%v) from %s %s", secret != "", r.RemoteAddr, r.URL.Path)
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "authentication required"})
 				return
@@ -142,10 +148,14 @@ func InternalAuth() func(http.Handler) http.Handler {
 // internalAuth is the test seam; inLambda is injected so tests don't mutate
 // process env captured at package init.
 //
-// Behavior matrix (secret = MS_INTERNAL_SECRET env var):
+// Auth signal priority: MS_PLATFORM_TOKEN > MS_INTERNAL_SECRET.
+// When MS_PLATFORM_TOKEN is set, the caller must present
+// X-MS-Platform-Token. Otherwise, falls back to X-MS-Internal-Secret.
+//
+// Behavior matrix (secret = first non-empty of MS_PLATFORM_TOKEN, MS_INTERNAL_SECRET):
 //
 //	inLambda + secret unset → 503 (operator misconfig; platform alerting)
-//	inLambda + secret set   → enforce X-MS-Internal-Secret header
+//	inLambda + secret set   → enforce matching header
 //	local    + secret unset → BYPASS (local-only; `mirrorstack dev` ergonomics)
 //	local    + secret set   → enforce (e.g. `mirrorstack dev --tunnel` exposes
 //	                          localhost to the platform, so the secret must
@@ -157,41 +167,33 @@ func InternalAuth() func(http.Handler) http.Handler {
 // unauthenticated traffic forwarded by dispatch (the CLI sets the secret
 // when tunneling).
 func internalAuth(inLambda bool) func(http.Handler) http.Handler {
-	expected := os.Getenv("MS_INTERNAL_SECRET")
-	if expected == "" {
+	readSecret := platformSecretReader()
+	if expected, _ := readSecret(); expected == "" {
 		if inLambda {
-			// SECURITY: never echo the `expected` value (or any prefix/suffix of it)
-			// in this log line — Lambda log output goes to CloudWatch which is
-			// commonly accessible to many roles in the org.
-			log.Printf("mirrorstack: WARNING — MS_INTERNAL_SECRET not set, all internal routes will be rejected")
+			log.Printf("mirrorstack: WARNING — no platform secret set, all internal routes will be rejected")
 		} else {
-			log.Printf("mirrorstack: MS_INTERNAL_SECRET not set; internal routes bypass auth (local dev)")
+			log.Printf("mirrorstack: no platform secret set; internal routes bypass auth (local dev)")
 		}
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			expected, header := readSecret()
+
 			if expected == "" {
 				if inLambda {
 					log.Printf("mirrorstack: internal auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
-					// SECURITY: generic body. The detailed reason is in the
-					// construction-time log line above; the 503 status itself
-					// is the platform's alerting signal. We don't want to
-					// confirm "this endpoint exists and the module is broken"
-					// to anonymous callers reaching us pre-WAF.
 					httputil.JSON(w, http.StatusServiceUnavailable, httputil.ErrorResponse{
 						Error: "service unavailable",
 					})
 					return
 				}
-				// Local dev bypass — see the doc-comment matrix above.
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			secret := r.Header.Get("X-MS-Internal-Secret")
+			secret := r.Header.Get(header)
 			if !constantTimeEqual(secret, expected) {
-				// SECURITY: never log the header value; only whether it was present
 				log.Printf("mirrorstack: internal auth rejected (secret mismatch, header_present=%v) from %s %s", secret != "", r.RemoteAddr, r.URL.Path)
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "internal authentication required"})
 				return
@@ -199,6 +201,32 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// secretReader returns the current secret and which header carries it.
+// The file-backed variant re-reads on every call so a refreshed token
+// (CLI reconnect) is picked up without restarting the module process.
+type secretReader func() (expected, header string)
+
+// platformSecretReader builds the reader once at middleware construction.
+//   - MS_PLATFORM_TOKEN_FILE set → read from file per call (dev)
+//   - MS_PLATFORM_TOKEN set      → static, captured once (prod / tunnel)
+//   - MS_INTERNAL_SECRET set     → static, captured once (legacy)
+func platformSecretReader() secretReader {
+	if file := os.Getenv("MS_PLATFORM_TOKEN_FILE"); file != "" {
+		return func() (string, string) {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return "", HeaderPlatformToken
+			}
+			return strings.TrimSpace(string(data)), HeaderPlatformToken
+		}
+	}
+	if v := os.Getenv("MS_PLATFORM_TOKEN"); v != "" {
+		return func() (string, string) { return v, HeaderPlatformToken }
+	}
+	v := os.Getenv("MS_INTERNAL_SECRET")
+	return func() (string, string) { return v, HeaderInternalSecret }
 }
 
 func constantTimeEqual(a, b string) bool {

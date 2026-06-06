@@ -1,6 +1,6 @@
 // Package contributions implements the SDK's host-side contribution
 // slots: a host module declares an extension point with
-// ms.DefineContribute, the SDK auto-mounts HTTP endpoints for
+// ms.Provide, the SDK auto-mounts HTTP endpoints for
 // register/unregister/list, and other modules register payloads
 // against the slot via the Contribute call (or direct HTTP).
 //
@@ -35,7 +35,7 @@ var (
 )
 
 // Slot is one declared contribution point. The validator closure is
-// produced by DefineContribute generic so the SDK can typecheck
+// produced by Provide generic so the SDK can typecheck
 // incoming payloads against the host's declared T at register time —
 // without the storage layer needing to know what T is.
 type Slot struct {
@@ -68,7 +68,7 @@ type Contribution struct {
 }
 
 // Registry holds all declared slots for one module. Populated at
-// DefineContribute time; consulted by the HTTP handlers + auto-mount
+// Provide time; consulted by the HTTP handlers + auto-mount
 // path to figure out which routes to expose.
 type Registry struct {
 	mu    sync.RWMutex
@@ -144,7 +144,7 @@ func (r *Registry) List() []SlotInfo {
 }
 
 // NewSlot constructs a Slot with a validator closure. Generic
-// DefineContribute[T] in the parent package builds the closure
+// Provide[T] in the parent package builds the closure
 // where T is in scope.
 func NewSlot(key string, schemaTag string, validate func(json.RawMessage) error) Slot {
 	return Slot{Key: key, schemaTag: schemaTag, validate: validate}
