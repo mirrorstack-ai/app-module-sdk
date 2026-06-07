@@ -51,6 +51,9 @@ type Config struct {
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
 
+	// Description is a short, plain-language summary shown in the catalog/agent discovery. Optional.
+	Description string
+
 	// Tags are module-level category badges (e.g. "Auth", "Payments") shown in
 	// the platform's module catalog / settings. Surfaced via manifest defaults.
 	Tags []string
@@ -190,6 +193,13 @@ func New(cfg Config) (*Module, error) {
 		m.meterClient = meterClient
 	} else {
 		m.meterClient = meter.NewDev(m.logger)
+	}
+
+	// A Config-provided description flows to the same registry slot that
+	// ms.Describe() writes, so it reaches the manifest like Name/Tags. Skip
+	// when empty so a later ms.Describe() call isn't clobbered by a blank.
+	if cfg.Description != "" {
+		m.registry.SetDescription(cfg.Description)
 	}
 
 	m.mountSystemRoutes()

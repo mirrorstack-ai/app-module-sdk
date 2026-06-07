@@ -14,6 +14,8 @@ import (
 // sentences is typical. Last call wins.
 //
 //	ms.Describe("Google OAuth provider: authorize, callback, session issue.")
+//
+// Deprecated: set Description on ms.Config passed to ms.Init() instead.
 func (m *Module) Describe(s string) {
 	m.registry.SetDescription(s)
 }
@@ -120,6 +122,8 @@ func parseDepSpec(spec string) (id, constraint string) {
 // Package-level convenience wrappers — dispatch to defaultModule.
 
 // Describe sets the default module's description. Panics if Init has not been called.
+//
+// Deprecated: set Description on ms.Config passed to ms.Init() instead.
 func Describe(s string) { mustDefault("Describe").Describe(s) }
 
 // DependsOn declares a required dependency on the default module. Panics
