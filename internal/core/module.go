@@ -195,9 +195,8 @@ func New(cfg Config) (*Module, error) {
 		m.meterClient = meter.NewDev(m.logger)
 	}
 
-	// A Config-provided description flows to the same registry slot that
-	// ms.Describe() writes, so it reaches the manifest like Name/Tags. Skip
-	// when empty so a later ms.Describe() call isn't clobbered by a blank.
+	// A Config-provided description flows to the registry so it reaches the
+	// manifest like Name/Tags. Skip when empty to avoid a blank override.
 	if cfg.Description != "" {
 		m.registry.SetDescription(cfg.Description)
 	}
@@ -209,7 +208,7 @@ func New(cfg Config) (*Module, error) {
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
 
-// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/OptionalDependOn,
+// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, DependsOn/OptionalDependOn,
 // MCPTool/MCPResource: see db.go, resources.go, describe.go, and mcp.go.
 
 // Platform registers routes with platform auth scope. All routes

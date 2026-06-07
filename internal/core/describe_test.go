@@ -6,13 +6,12 @@ import (
 	"testing"
 )
 
-// ---- Describe / DependsOn / OptionalDependOn / Resolve ----
+// ---- Config.Description / DependsOn / OptionalDependOn / Resolve ----
 
-func TestDescribe_PopulatesRegistry(t *testing.T) {
+func TestConfigDescription_PopulatesRegistry(t *testing.T) {
 	t.Parallel()
 
-	m, _ := New(Config{ID: "demo"})
-	m.Describe("A demo module")
+	m, _ := New(Config{ID: "demo", Description: "A demo module"})
 	if got := m.registry.Description(); got != "A demo module" {
 		t.Errorf("Description = %q, want %q", got, "A demo module")
 	}

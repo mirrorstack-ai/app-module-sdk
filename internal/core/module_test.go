@@ -831,21 +831,20 @@ func TestInternalRoutes_MaxBytesLimit(t *testing.T) {
 
 func TestScopesPanic_BeforeInit(t *testing.T) {
 	fns := map[string]func(){
-		"Platform":          func() { Platform(func(r chi.Router) {}) },
-		"Public":            func() { Public(func(r chi.Router) {}) },
-		"Internal":          func() { Internal(func(r chi.Router) {}) },
+		"Platform":           func() { Platform(func(r chi.Router) {}) },
+		"Public":             func() { Public(func(r chi.Router) {}) },
+		"Internal":           func() { Internal(func(r chi.Router) {}) },
 		"RegisterPermission": func() { RegisterPermission("media.view", PermissionOpts{DefaultRole: p.Admin()}) },
 		"RequirePermission":  func() { RequirePermission("media.view") },
-		"OnEvent":           func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
-		"Emits":             func() { Emits("created") },
-		"Cron":              func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
-		"OnTask":            func() { OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil }) },
-		"RunTask":           func() { _, _ = RunTask(context.Background(), "work", nil) },
-		"Meter":             func() { _ = Meter(context.Background()).Record("m", 1) },
-		"ModuleDB":          func() { _, _, _ = ModuleDB(context.Background()) },
-		"ModuleTx":          func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
-		"Describe":          func() { Describe("a module") },
-		"DependsOn":         func() { DependsOn("other") },
+		"OnEvent":            func() { OnEvent("user.created", func(w http.ResponseWriter, r *http.Request) {}) },
+		"Emits":              func() { Emits("created") },
+		"Cron":               func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
+		"OnTask":             func() { OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil }) },
+		"RunTask":            func() { _, _ = RunTask(context.Background(), "work", nil) },
+		"Meter":              func() { _ = Meter(context.Background()).Record("m", 1) },
+		"ModuleDB":           func() { _, _, _ = ModuleDB(context.Background()) },
+		"ModuleTx":           func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
+		"DependsOn":          func() { DependsOn("other") },
 	}
 	for name, fn := range fns {
 		t.Run(name, func(t *testing.T) {
