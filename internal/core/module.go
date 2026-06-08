@@ -116,6 +116,71 @@ type Module struct {
 	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
 	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
 	meterClient    *meter.Client        // prod (MS_METER_LAMBDA_ARN set) or dev-mode stderr
+
+	// devMode is true under `mirrorstack dev` (HTTP serving + dev DB), false in
+	// Lambda/task-worker. It gates the dev-only per-app schema machinery:
+	// production injects the app schema via the Lambda shim, dev derives it from
+	// X-MS-App-ID here. Captured once at New().
+	devMode bool
+	// devProvision caches per-app schema provisioning (schema string ->
+	// *devProvisionEntry) so only the first dev request for an app runs its
+	// app-scope migrations. See Module.ensureDevAppSchema.
+	devProvision sync.Map
+}
+
+// devProvisionEntry guards one app schema's lazy provisioning. The sync.Once
+// serializes concurrent first-touch requests; err caches the outcome.
+type devProvisionEntry struct {
+	once sync.Once
+	err  error
+}
+
+// devAppSchemaPattern validates a derived dev app schema name. It matches the
+// runtime's production AppSchema pattern so dev and prod agree on the shape,
+// and guards the identifier before it reaches SQL (pgx.Identifier.Sanitize is
+// the second line of defense).
+var devAppSchemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
+
+// devAppSchemaName derives the per-app Postgres schema from an app id, matching
+// the platform's ids.AppSchemaName convention (app_<uuid-with-underscores>).
+// Returns ok=false if the result is not a valid schema identifier.
+func devAppSchemaName(appID string) (string, bool) {
+	schema := "app_" + strings.ReplaceAll(strings.ToLower(appID), "-", "_")
+	if !devAppSchemaPattern.MatchString(schema) {
+		return "", false
+	}
+	return schema, true
+}
+
+// devAppSchemaMiddleware is the dev analog of the Lambda shim's per-request
+// AppSchema injection (see runtime.InjectResources). For requests carrying an
+// app identity (X-MS-App-ID, forwarded by dispatch) it derives app_<id>,
+// provisions it lazily on first touch, and injects it via db.WithSchema so
+// Module.DB/Module.Tx scope to that app's schema. Attached only in devMode; in
+// production the schema is already in context and the X-MS-* headers are
+// stripped, so this never runs there.
+func (m *Module) devAppSchemaMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		appID := r.Header.Get(auth.HeaderAppID)
+		if appID == "" || db.SchemaFrom(r.Context()) != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		schema, ok := devAppSchemaName(appID)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Provision off the request context: migrations must not be cancelled by
+		// a client disconnect, and the cached result must not memoize a
+		// cancellation error for every later request.
+		if err := m.ensureDevAppSchema(context.Background(), schema); err != nil {
+			m.logger.Printf("dev: provision app schema %s: %v", schema, err)
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "app schema provisioning failed"})
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(db.WithSchema(r.Context(), schema)))
+	})
 }
 
 // moduleIDPattern matches valid module IDs: lowercase letter, then lowercase alphanumerics/underscores, max 36 chars.
@@ -169,6 +234,16 @@ func New(cfg Config) (*Module, error) {
 	// cross-origin requests from random origins shouldn't be allowed.
 	if os.Getenv("MS_INTERNAL_SECRET") == "" {
 		m.router.Use(localDevCORS)
+	}
+
+	// Dev per-app schema injection: under `mirrorstack dev` the platform's
+	// Lambda shim is absent, so the SDK derives app_<id> from X-MS-App-ID and
+	// provisions it lazily (see devAppSchemaMiddleware). Attached before routes
+	// are mounted so it wraps every scope, including the system /__mirrorstack/*
+	// surfaces (e.g. /contrib) that also operate on per-app data.
+	m.devMode = m.devMigrateEnabled()
+	if m.devMode {
+		m.router.Use(m.devAppSchemaMiddleware)
 	}
 
 	// Eagerly initialize SQS client when queue URL is configured.
@@ -472,7 +547,12 @@ func (m *Module) Start() error {
 	// guard keeps modules that never use Provide from
 	// touching their DB for an empty feature. Production schema
 	// management lands via the lifecycle install hook in a follow-up.
-	if m.contribReg.Len() > 0 {
+	//
+	// Skipped in devMode: the store is per-app, so it is created per app schema
+	// during lazy provisioning (provisionDevAppSchema) rather than once in the
+	// connection's default schema here — otherwise it would land in the wrong
+	// (shared) place and every app's contributions would collide.
+	if !m.devMode && m.contribReg.Len() > 0 {
 		q, release, err := m.DB(context.Background())
 		if err != nil {
 			return fmt.Errorf("mirrorstack: contributions: open DB: %w", err)
