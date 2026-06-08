@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,6 +51,13 @@ func (m *Module) applyDevMigrations(ctx context.Context) error {
 	return m.ensureSchemaMigrated(ctx, migration.ScopeModule, "mod_"+m.config.ID)
 }
 
+// devProvisionEntry guards one app schema's lazy provisioning. The sync.Once
+// serializes concurrent first-touch requests; err caches the outcome.
+type devProvisionEntry struct {
+	once sync.Once
+	err  error
+}
+
 // ensureDevAppSchema lazily creates + migrates the per-app schema app_<id> the
 // first time a request for that app arrives in dev. Idempotent and cached per
 // process: only the first request for a given schema pays the migration cost;
@@ -57,6 +65,9 @@ func (m *Module) applyDevMigrations(ctx context.Context) error {
 // per-schema sync.Once also serializes concurrent first-touch requests so the
 // migrations run exactly once.
 func (m *Module) ensureDevAppSchema(ctx context.Context, schema string) error {
+	// The loaded bool is intentionally discarded: LoadOrStore returns the
+	// canonical entry whether we created it or won the race for an existing
+	// one, and sync.Once makes provisioning run exactly once regardless.
 	v, _ := m.devProvision.LoadOrStore(schema, &devProvisionEntry{})
 	entry := v.(*devProvisionEntry)
 	entry.once.Do(func() { entry.err = m.provisionDevAppSchema(ctx, schema) })

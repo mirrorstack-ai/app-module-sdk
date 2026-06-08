@@ -128,25 +128,15 @@ type Module struct {
 	devProvision sync.Map
 }
 
-// devProvisionEntry guards one app schema's lazy provisioning. The sync.Once
-// serializes concurrent first-touch requests; err caches the outcome.
-type devProvisionEntry struct {
-	once sync.Once
-	err  error
-}
-
-// devAppSchemaPattern validates a derived dev app schema name. It matches the
-// runtime's production AppSchema pattern so dev and prod agree on the shape,
-// and guards the identifier before it reaches SQL (pgx.Identifier.Sanitize is
-// the second line of defense).
-var devAppSchemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
-
 // devAppSchemaName derives the per-app Postgres schema from an app id, matching
 // the platform's ids.AppSchemaName convention (app_<uuid-with-underscores>).
-// Returns ok=false if the result is not a valid schema identifier.
+// It validates against the same pattern the production Lambda shim uses
+// (runtime.AppSchemaPattern) so dev and prod agree on the shape;
+// pgx.Identifier.Sanitize is the second line of defense before SQL. Returns
+// ok=false if the result is not a valid schema identifier.
 func devAppSchemaName(appID string) (string, bool) {
 	schema := "app_" + strings.ReplaceAll(strings.ToLower(appID), "-", "_")
-	if !devAppSchemaPattern.MatchString(schema) {
+	if !runtime.AppSchemaPattern.MatchString(schema) {
 		return "", false
 	}
 	return schema, true
@@ -536,7 +526,7 @@ func (m *Module) Start() error {
 		return m.startTaskWorker()
 	}
 
-	if m.devMigrateEnabled() {
+	if m.devMode {
 		if err := m.applyDevMigrations(context.Background()); err != nil {
 			return err
 		}

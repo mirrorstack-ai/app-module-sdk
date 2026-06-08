@@ -37,7 +37,7 @@ var validRoles = map[string]bool{
 // Returns an error if AppSchema is non-empty and does not match the expected
 // pattern, or if AppRole is not a recognized platform role.
 func InjectResources(ctx context.Context, p InjectParams) (context.Context, error) {
-	if p.AppSchema != "" && !schemaPattern.MatchString(p.AppSchema) {
+	if p.AppSchema != "" && !AppSchemaPattern.MatchString(p.AppSchema) {
 		return ctx, fmt.Errorf("mirrorstack: invalid app schema format %q", p.AppSchema)
 	}
 	if !validRoles[p.AppRole] {
