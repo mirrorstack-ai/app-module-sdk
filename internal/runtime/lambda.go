@@ -15,7 +15,11 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
-var schemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
+// AppSchemaPattern validates a per-app Postgres schema name (app_<uuid> with
+// hyphens replaced by underscores). Exported so the dev runtime, which derives
+// the schema from X-MS-App-ID instead of receiving it in the Lambda payload,
+// validates it identically — keeping dev and prod from drifting on the shape.
+var AppSchemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
 
 // Resources holds per-invocation credentials for all platform services.
 type Resources struct {
