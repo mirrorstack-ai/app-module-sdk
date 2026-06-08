@@ -19,6 +19,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/core"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
@@ -189,6 +190,37 @@ func WithAppID(ctx context.Context, appID string) context.Context {
 	}
 	id.AppID = appID
 	return auth.Set(ctx, id)
+}
+
+// --- HTTP responses ---
+
+// ErrorResponse is the SDK's JSON error envelope: {"error": "<message>"}. It is
+// the shape WriteError emits and the same shape the SDK's own auth/permission
+// middleware returns, so module errors and platform errors are indistinguishable
+// on the wire. Exported so callers can decode an error body into a typed value.
+type ErrorResponse = httputil.ErrorResponse
+
+// WriteJSON writes v to w as JSON with the given status code and a
+// Content-Type: application/json header. A nil v writes only the status and
+// header with no body (for 204-style empty responses). An encode error is
+// logged, not returned — the status line is already committed by then.
+//
+// This is the response writer every module otherwise hand-rolls; it backs the
+// same internal helper the SDK uses for its own endpoints.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
+	if v == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		return
+	}
+	httputil.JSON(w, status, v)
+}
+
+// WriteError writes the JSON error envelope {"error": msg} with the given
+// status code, via WriteJSON. Use the canonical ErrorResponse shape rather than
+// an ad-hoc map so module errors match the SDK's own error wire format.
+func WriteError(w http.ResponseWriter, status int, msg string) {
+	WriteJSON(w, status, ErrorResponse{Error: msg})
 }
 
 // --- Dependency declarations ---
