@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
@@ -167,6 +168,27 @@ func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
 // CallPost is Call specialized to POST with a JSON body on the default module.
 func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return core.CallPost(ctx, targetModuleID, path, body, out)
+}
+
+// WithAppID returns a context whose inter-module Call scope is the given app,
+// overriding the ambient identity's app. ms.Call reads the app id from the
+// context (auth.Get) — for a handler that is the request's authenticated app,
+// so authenticated callers need nothing extra. PUBLIC/proxy flows have no
+// ambient identity (e.g. a sign-in proxy on ms.Public routes, where the target
+// app arrives as request data, not as the caller's identity), so they set it
+// explicitly:
+//
+//	ctx = ms.WithAppID(ctx, appID)
+//	ms.CallGet(ctx, providerModuleID, "/internal/authorize-url?"+q, &out)
+//
+// Any existing UserID/AppRole on the context is preserved; only AppID changes.
+func WithAppID(ctx context.Context, appID string) context.Context {
+	var id auth.Identity
+	if cur := auth.Get(ctx); cur != nil {
+		id = *cur
+	}
+	id.AppID = appID
+	return auth.Set(ctx, id)
 }
 
 // --- Dependency declarations ---
