@@ -139,6 +139,36 @@ func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(
 // Meter returns a scoped meter for recording usage events on the default module.
 func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
 
+// --- Inter-module calls ---
+
+// Call makes one server-mediated module-to-module hop through the platform
+// dispatch, scoped to the current app (app id read from ctx via the SDK's
+// auth identity — callers don't pass it). It JSON-marshals body, sends
+// method to the target module's path, and decodes the JSON response into
+// out (pass nil body for GET, nil out to ignore the response). path must
+// include its leading slash and any raw query, e.g. "/internal/users?limit=10".
+//
+// The caller never holds the callee's credentials: dispatch injects the
+// TARGET module's per-session token + identity before forwarding. Declare the
+// target as a dependency (ms.DependsOn) — inter-module calls without a declared
+// dep are a wiring bug the platform enforces.
+//
+// Dev/dispatch transport today; prod catalog/Lambda endpoint resolution is the
+// documented #146 seam (see core.resolveCallURL).
+func Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
+	return core.Call(ctx, targetModuleID, method, path, body, out)
+}
+
+// CallGet is Call specialized to GET (no request body) on the default module.
+func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
+	return core.CallGet(ctx, targetModuleID, path, out)
+}
+
+// CallPost is Call specialized to POST with a JSON body on the default module.
+func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
+	return core.CallPost(ctx, targetModuleID, path, body, out)
+}
+
 // --- Dependency declarations ---
 
 // Describe sets the default module's human-readable description.
