@@ -171,6 +171,23 @@ func CallPost(ctx context.Context, targetModuleID, path string, body, out any) e
 	return core.CallPost(ctx, targetModuleID, path, body, out)
 }
 
+// Emit publishes an event to every LIVE module that subscribes to name within
+// the current app, scoped to the current app (app id read from ctx via the
+// SDK's auth identity — callers don't pass it). The SDK wraps payload in the
+// event envelope ({id, name, sourceModuleID, sentAt, payload}) and POSTs it to
+// the platform dispatch event bus, which fans the SAME envelope out to each
+// subscriber session. An empty app-scope context is an error (no panic).
+//
+// Delivery is AT-LEAST-ONCE and best-effort per subscriber — subscriber
+// handlers (ms.OnEvent) must be idempotent. Declare the event vocabulary with
+// ms.Emits so subscribers can discover it.
+//
+// Dev/dispatch transport today; prod event-bus endpoint resolution is the
+// documented #146 seam (see core.resolveEventBusURL, mirroring core.resolveCallURL).
+func Emit(ctx context.Context, name string, payload any) error {
+	return core.Emit(ctx, name, payload)
+}
+
 // WithAppID returns a context whose inter-module Call scope is the given app,
 // overriding the ambient identity's app. ms.Call reads the app id from the
 // context (auth.Get) — for a handler that is the request's authenticated app,
