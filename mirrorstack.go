@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
@@ -138,6 +139,57 @@ func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(
 
 // Meter returns a scoped meter for recording usage events on the default module.
 func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
+
+// --- Inter-module calls ---
+
+// Call makes one server-mediated module-to-module hop through the platform
+// dispatch, scoped to the current app (app id read from ctx via the SDK's
+// auth identity — callers don't pass it). It JSON-marshals body, sends
+// method to the target module's path, and decodes the JSON response into
+// out (pass nil body for GET, nil out to ignore the response). path must
+// include its leading slash and any raw query, e.g. "/internal/users?limit=10".
+//
+// The caller never holds the callee's credentials: dispatch injects the
+// TARGET module's per-session token + identity before forwarding. Declare the
+// target as a dependency (ms.DependsOn) — inter-module calls without a declared
+// dep are a wiring bug the platform enforces.
+//
+// Dev/dispatch transport today; prod catalog/Lambda endpoint resolution is the
+// documented #146 seam (see core.resolveCallURL).
+func Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
+	return core.Call(ctx, targetModuleID, method, path, body, out)
+}
+
+// CallGet is Call specialized to GET (no request body) on the default module.
+func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
+	return core.CallGet(ctx, targetModuleID, path, out)
+}
+
+// CallPost is Call specialized to POST with a JSON body on the default module.
+func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
+	return core.CallPost(ctx, targetModuleID, path, body, out)
+}
+
+// WithAppID returns a context whose inter-module Call scope is the given app,
+// overriding the ambient identity's app. ms.Call reads the app id from the
+// context (auth.Get) — for a handler that is the request's authenticated app,
+// so authenticated callers need nothing extra. PUBLIC/proxy flows have no
+// ambient identity (e.g. a sign-in proxy on ms.Public routes, where the target
+// app arrives as request data, not as the caller's identity), so they set it
+// explicitly:
+//
+//	ctx = ms.WithAppID(ctx, appID)
+//	ms.CallGet(ctx, providerModuleID, "/internal/authorize-url?"+q, &out)
+//
+// Any existing UserID/AppRole on the context is preserved; only AppID changes.
+func WithAppID(ctx context.Context, appID string) context.Context {
+	var id auth.Identity
+	if cur := auth.Get(ctx); cur != nil {
+		id = *cur
+	}
+	id.AppID = appID
+	return auth.Set(ctx, id)
+}
 
 // --- Dependency declarations ---
 
