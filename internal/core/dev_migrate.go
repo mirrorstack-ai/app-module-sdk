@@ -13,12 +13,6 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
-// devAppSchema is the schema app-scope migrations target in dev. There is no
-// per-app tenant locally, so every app migration shares one schema — public,
-// which is also on the default search_path m.DB/m.Tx fall back to at runtime
-// when no app schema is set, so handlers read the tables migrations create.
-const devAppSchema = "public"
-
 // devMigrateEnvVar is the local-dev signal set by `mirrorstack dev`. When
 // non-empty, the module is running under the CLI's dev lifecycle and applies
 // its embedded migrations on every start so the developer's local Postgres
@@ -40,37 +34,77 @@ func (m *Module) devMigrateEnabled() bool {
 	return os.Getenv(devMigrateEnvVar) != ""
 }
 
-// applyDevMigrations runs every embedded migration that has not yet been
-// applied to the dev Postgres. Idempotent across module restarts — the
-// per-module tracking table mod_<id>.schema_migrations records what ran, keyed
-// by (scope, version). Per-module (not a shared table) so two modules sharing
-// one dev Postgres don't collide on the same version number.
+// applyDevMigrations applies MODULE-scope migrations into mod_<id> at startup.
 //
-// Pre-creates the mod_<id> schema so module-scope migrations have a home;
-// app-scope migrations land in whatever schema the connection sees by
-// default (public in dev — there is no real per-app tenant). Production
-// install lifecycle handles both with proper schemas; this is the dev
-// shortcut.
+// App-scope migrations are deliberately NOT run here: there is no app at boot
+// time. They are provisioned lazily, once per app, on the first request that
+// carries an app identity — see Module.ensureDevAppSchema. This mirrors
+// production, where each app gets its own app_<id> schema (the platform's
+// install lifecycle creates and migrates it), instead of every app sharing one
+// schema locally. Sharing one schema is exactly what broke per-app isolation in
+// dev: two apps installing the same module read and wrote the same tables.
+//
+// Module scope is shared across apps by design, so mod_<id> has a home the
+// moment the module boots and is migrated here.
 func (m *Module) applyDevMigrations(ctx context.Context) error {
+	return m.ensureSchemaMigrated(ctx, migration.ScopeModule, "mod_"+m.config.ID)
+}
+
+// ensureDevAppSchema lazily creates + migrates the per-app schema app_<id> the
+// first time a request for that app arrives in dev. Idempotent and cached per
+// process: only the first request for a given schema pays the migration cost;
+// later requests return the recorded result without touching Postgres. A
+// per-schema sync.Once also serializes concurrent first-touch requests so the
+// migrations run exactly once.
+func (m *Module) ensureDevAppSchema(ctx context.Context, schema string) error {
+	v, _ := m.devProvision.LoadOrStore(schema, &devProvisionEntry{})
+	entry := v.(*devProvisionEntry)
+	entry.once.Do(func() { entry.err = m.provisionDevAppSchema(ctx, schema) })
+	return entry.err
+}
+
+// provisionDevAppSchema runs the per-app setup: app-scope migrations into
+// app_<id>, then the contributions table (when the module declares any slots),
+// since that store is per-app — handlers read it via Module.DB, which resolves
+// to the app schema. Without it, a host module's slot reads/writes would hit a
+// missing relation the moment dev moved off the single shared schema.
+func (m *Module) provisionDevAppSchema(ctx context.Context, schema string) error {
+	if err := m.ensureSchemaMigrated(ctx, migration.ScopeApp, schema); err != nil {
+		return err
+	}
+	if m.contribReg.Len() > 0 {
+		sctx := db.WithSchema(ctx, schema)
+		q, release, err := m.DB(sctx)
+		if err != nil {
+			return fmt.Errorf("dev provision %s: open db: %w", schema, err)
+		}
+		defer release()
+		if err := m.contribStorage.EnsureTable(sctx, q); err != nil {
+			return fmt.Errorf("dev provision %s: ensure contributions table: %w", schema, err)
+		}
+	}
+	return nil
+}
+
+// ensureSchemaMigrated creates the target schema and its per-schema migration
+// tracking table, then applies any not-yet-recorded migrations for the given
+// scope. Each schema owns its own schema_migrations table (keyed by
+// scope+version) so every app's app-scope history is independent and a second
+// app installing the same module re-runs the migrations into its own schema
+// instead of being skipped as "already applied".
+func (m *Module) ensureSchemaMigrated(ctx context.Context, scope migration.Scope, schema string) error {
 	pool, release, err := m.resolvePool(ctx)
 	if err != nil {
 		return fmt.Errorf("dev migrate: open pool: %w", err)
 	}
 	defer release()
 
-	modSchema := pgx.Identifier{"mod_" + m.config.ID}.Sanitize()
-	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+modSchema); err != nil {
-		return fmt.Errorf("dev migrate: create mod schema: %w", err)
+	schemaIdent := pgx.Identifier{schema}.Sanitize()
+	if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+schemaIdent); err != nil {
+		return fmt.Errorf("dev migrate: create schema %s: %w", schema, err)
 	}
 
-	// The tracking table lives in the module's OWN schema and MUST be
-	// per-module. Every module on a developer's machine shares one dev
-	// Postgres, so the old shared __ms_local.schema_migrations (keyed only by
-	// scope+version) collided across modules: module B's "app/0001" was
-	// skipped because module A had already recorded "app/0001", so B's tables
-	// were never created. Keyed per mod_<id> schema, each module's version
-	// space is independent.
-	trackingTable := pgx.Identifier{"mod_" + m.config.ID, "schema_migrations"}.Sanitize()
+	trackingTable := pgx.Identifier{schema, "schema_migrations"}.Sanitize()
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			scope      text NOT NULL,
@@ -78,21 +112,17 @@ func (m *Module) applyDevMigrations(ctx context.Context) error {
 			applied_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (scope, version)
 		)`, trackingTable)); err != nil {
-		return fmt.Errorf("dev migrate: create tracking table: %w", err)
+		return fmt.Errorf("dev migrate: create tracking table in %s: %w", schema, err)
 	}
 
-	for _, scope := range migration.AllScopes() {
-		if err := m.applyDevScope(ctx, pool, trackingTable, scope); err != nil {
-			return err
-		}
-	}
-	return nil
+	return m.applyDevScope(ctx, pool, trackingTable, schema, scope)
 }
 
-// applyDevScope filters the embedded sql/<scope>/ migrations down to those
-// not already recorded in the tracking table, then applies the remainder
-// via the same TxRunner the production install handler uses.
-func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) error {
+// applyDevScope filters the embedded sql/<scope>/ migrations down to those not
+// already recorded in the schema's tracking table, then applies the remainder
+// via the same TxRunner the production install handler uses, pinned to the
+// target schema.
+func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, trackingTable, schema string, scope migration.Scope) error {
 	all, err := migration.List(m.config.SQL, scope)
 	if err != nil {
 		return fmt.Errorf("dev migrate %s: list: %w", scope, err)
@@ -116,18 +146,11 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 		return nil
 	}
 
-	// App-scope migrations carry no per-app tenant in dev, so m.Tx would run
-	// each with an empty schema and fall back to the connection's default
-	// search_path. That default is not guaranteed identical across the pooled
-	// connections used for consecutive migrations, so a migration referencing
-	// an earlier one's table can fail with "relation does not exist". Pin the
-	// whole app sequence to one schema (public) so every migration lands in the
-	// same place. Module scope uses m.ModuleTx, which sets mod_<id> itself.
-	migrateCtx := ctx
-	if scope == migration.ScopeApp {
-		migrateCtx = db.WithSchema(ctx, devAppSchema)
-	}
-
+	// Pin the whole sequence to the target schema so every migration lands in
+	// the same place. App scope runs via Module.Tx, which reads this schema from
+	// the context; module scope runs via Module.ModuleTx, which overlays
+	// mod_<id> itself (identical to schema here) — setting it is harmless.
+	migrateCtx := db.WithSchema(ctx, schema)
 	runTx := m.lifecycleTxRunner(scope)
 	ran, err := migration.Apply(migrateCtx, runTx, m.config.SQL, pending)
 	// Record whatever ran before the failure (if any) so retries skip them.
@@ -137,7 +160,7 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 	if err != nil {
 		return fmt.Errorf("dev migrate %s: apply: %w", scope, err)
 	}
-	m.logger.Printf("dev: applied %d %s migration(s): %v", len(ran), scope, ran)
+	m.logger.Printf("dev: applied %d %s migration(s) to %s: %v", len(ran), scope, schema, ran)
 	return nil
 }
 
