@@ -141,9 +141,6 @@ func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
 
 // --- Dependency declarations ---
 
-// Describe sets the default module's human-readable description.
-func Describe(s string) { core.Describe(s) }
-
 // Need is the configuration handle passed to DependsOn /
 // OptionalDependOn callbacks. Use n.Table(name) to declare a SELECT
 // request, n.Event(name) to declare an event subscription.

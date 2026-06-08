@@ -173,7 +173,7 @@ func New() *Registry {
 }
 
 // SetDescription sets the module's human-readable description. Last-write-wins;
-// typically called once at module init via ms.Describe.
+// typically set once via Description on ms.Config passed to ms.Init.
 func (r *Registry) SetDescription(s string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

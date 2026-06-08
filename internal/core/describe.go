@@ -9,15 +9,6 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
-// Describe sets the module's human-readable description. Used by the
-// catalog for agent discovery ("find a module that does X"). One to three
-// sentences is typical. Last call wins.
-//
-//	ms.Describe("Google OAuth provider: authorize, callback, session issue.")
-func (m *Module) Describe(s string) {
-	m.registry.SetDescription(s)
-}
-
 // DependsOn declares a REQUIRED dependency on another module. Install
 // fails if no published version of the dep matches the constraint.
 //
@@ -118,9 +109,6 @@ func parseDepSpec(spec string) (id, constraint string) {
 }
 
 // Package-level convenience wrappers — dispatch to defaultModule.
-
-// Describe sets the default module's description. Panics if Init has not been called.
-func Describe(s string) { mustDefault("Describe").Describe(s) }
 
 // DependsOn declares a required dependency on the default module. Panics
 // if Init has not been called. See Module.DependsOn for spec syntax and

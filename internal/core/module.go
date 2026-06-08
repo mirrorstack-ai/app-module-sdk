@@ -51,6 +51,9 @@ type Config struct {
 	Name string // Default display name (platform can override)
 	Icon string // Default Material icon name (platform can override)
 
+	// Description is a short, plain-language summary shown in the catalog/agent discovery. Optional.
+	Description string
+
 	// Tags are module-level category badges (e.g. "Auth", "Payments") shown in
 	// the platform's module catalog / settings. Surfaced via manifest defaults.
 	Tags []string
@@ -192,6 +195,12 @@ func New(cfg Config) (*Module, error) {
 		m.meterClient = meter.NewDev(m.logger)
 	}
 
+	// A Config-provided description flows to the registry so it reaches the
+	// manifest like Name/Tags. Skip when empty to avoid a blank override.
+	if cfg.Description != "" {
+		m.registry.SetDescription(cfg.Description)
+	}
+
 	m.mountSystemRoutes()
 	return m, nil
 }
@@ -199,7 +208,7 @@ func New(cfg Config) (*Module, error) {
 func (m *Module) Config() Config   { return m.config }
 func (m *Module) Router() *chi.Mux { return m.router }
 
-// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, Describe/DependsOn/OptionalDependOn,
+// DB/Tx/ModuleDB/ModuleTx, Cache/Storage/Meter, DependsOn/OptionalDependOn,
 // MCPTool/MCPResource: see db.go, resources.go, describe.go, and mcp.go.
 
 // Platform registers routes with platform auth scope. All routes

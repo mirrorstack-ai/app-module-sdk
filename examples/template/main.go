@@ -2,7 +2,7 @@
 // files which register themselves via postInitHooks — main.go never changes
 // when the CLI adds or removes features.
 //
-// Replace the placeholders in Config + Describe and delete any sibling file
+// Replace the placeholders in Config and delete any sibling file
 // for a feature you don't need.
 package main
 
@@ -27,18 +27,17 @@ var postInitHooks []func()
 
 func main() {
 	if err := ms.Init(ms.Config{
-		ID:   "template",
-		Name: "Template",
-		Icon: "extension",
-		SQL:  sqlFS,
+		ID:          "template",
+		Name:        "Template",
+		Icon:        "extension",
+		Description: "A MirrorStack module template. Replace this description with your module's purpose.",
+		SQL:         sqlFS,
 		Versions: map[string]system.MigrationVersions{
 			"v0.1.0": {App: "0001"},
 		},
 	}); err != nil {
 		log.Fatalf("mirrorstack: init failed: %v", err)
 	}
-
-	ms.Describe("A MirrorStack module template. Replace this description with your module's purpose.")
 
 	// Required deps go here — these become install-time preconditions.
 	// Auto-detected as required because they're called literally inside main().
