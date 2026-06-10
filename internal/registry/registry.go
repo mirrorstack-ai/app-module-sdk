@@ -136,7 +136,11 @@ type MCPToolDecl struct {
 	Description  string          `json:"description"`
 	InputSchema  json.RawMessage `json:"inputSchema"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
-	Handler      MCPToolHandler  `json:"-"`
+	// Permission is the slug-qualified module permission gating the tool
+	// (ms.ToolPermission). Empty means none declared — the platform falls
+	// back to its membership floor.
+	Permission string         `json:"permission,omitempty"`
+	Handler    MCPToolHandler `json:"-"`
 }
 
 // MCPResourceDecl is a registered MCP resource.

@@ -310,10 +310,23 @@ func RegisterUI(ui ModuleUI) { core.RegisterUI(ui) }
 
 // --- Agent surface (MCP) ---
 
+// MCPToolOption configures an MCPTool declaration (e.g. ToolPermission).
+type MCPToolOption = core.MCPToolOption
+
+// ToolPermission gates an MCP tool on a module permission (SHORT name,
+// slug-qualified exactly like RegisterPermission). The platform lists and
+// invokes the tool only for callers whose effective permissions include it.
+// An undeclared name registers lazily as admin-only (fail closed).
+//
+//	ms.RegisterPermission("users.read", ms.PermissionOpts{DefaultRole: roles.Viewer()})
+//	ms.MCPTool("list-users", "List users", listUsers, ms.ToolPermission("users.read"))
+func ToolPermission(name string) MCPToolOption { return core.ToolPermission(name) }
+
 // MCPTool registers an agent-callable tool on the default module with JSON
-// Schema derived from the type parameters via reflection.
-func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error)) {
-	core.MCPTool[In, Out](name, description, handler)
+// Schema derived from the type parameters via reflection. Optional
+// MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").
+func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error), opts ...MCPToolOption) {
+	core.MCPTool[In, Out](name, description, handler, opts...)
 }
 
 // MCPResource registers an agent-readable resource on the default module.
