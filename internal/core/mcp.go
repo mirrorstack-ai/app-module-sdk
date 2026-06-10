@@ -11,13 +11,34 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
+// MCPToolOption configures an MCPTool declaration. The variadic seam carries
+// future per-tool knobs (e.g. risk tier) without breaking existing callers.
+type MCPToolOption func(*mcpToolConfig)
+
+type mcpToolConfig struct {
+	permission string // SHORT permission name; slug-qualified at registration
+}
+
+// ToolPermission gates the tool on a module permission, looked up by SHORT
+// name and slug-qualified exactly like RegisterPermission. The platform lists
+// and invokes the tool only for callers whose effective permissions include
+// it.
+//
+// Safe-by-default: if the name was never RegisterPermission'd, it is
+// registered lazily as ADMIN-ONLY (a dev warning is logged) so a typo locks
+// the tool down rather than opening it — same rule as RequirePermission.
+func ToolPermission(name string) MCPToolOption {
+	return func(c *mcpToolConfig) { c.permission = name }
+}
+
 // MCPTool registers an agent-callable tool on the default module. Input and
 // output JSON Schemas are derived from the In and Out type parameters via
 // reflection; struct fields use their `json:"..."` tags. The handler receives
 // parsed typed args and returns a typed result.
 //
 // Name must satisfy registry.ValidateName (no path separators, whitespace, or
-// null bytes). First-wins: a duplicate registration is a no-op.
+// null bytes). First-wins: a duplicate registration is a no-op (including its
+// options).
 //
 // The tool is served at POST /__mirrorstack/mcp/tools/call under Internal
 // scope. The platform aggregates tools from all installed modules into a
@@ -34,8 +55,10 @@ import (
 // derived at registration via reflection and validated against incoming JSON
 // at call time (NOT statically against the wire format).
 //
+// Optional MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").
+//
 // Panics before Init or on schema derivation failure.
-func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error)) {
+func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error), opts ...MCPToolOption) {
 	m := mustDefault("MCPTool")
 	inputSchema, err := deriveSchema[In]()
 	if err != nil {
@@ -45,13 +68,21 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 	if err != nil {
 		panic("mirrorstack: MCPTool(" + name + ") output schema derivation failed: " + err.Error())
 	}
-	m.registry.AddMCPTool(registry.MCPToolDecl{
+	var cfg mcpToolConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	decl := registry.MCPToolDecl{
 		Name:         name,
 		Description:  description,
 		InputSchema:  inputSchema,
 		OutputSchema: outputSchema,
 		Handler:      wrapMCPToolHandler(handler),
-	})
+	}
+	if cfg.permission != "" {
+		decl.Permission, _ = m.ensurePermissionDeclared("MCPTool", cfg.permission)
+	}
+	m.registry.AddMCPTool(decl)
 }
 
 // MCPResource registers an agent-readable resource on the default module. The

@@ -451,14 +451,23 @@ func (m *Module) RegisterPermission(name string, opts PermissionOpts) {
 // lazily as ADMIN-ONLY (an isDev warning is logged) so a forgotten declaration
 // locks the route down rather than opening it.
 func (m *Module) RequirePermission(name string) func(http.Handler) http.Handler {
+	_, declared := m.ensurePermissionDeclared("RequirePermission", name)
+	// Runtime: admin always passes, plus the declared roles.
+	return auth.RequireRoles(append([]string{roles.Admin().Key}, declared...)...)
+}
+
+// ensurePermissionDeclared slug-qualifies name and returns the qualified name
+// plus the declared role set. Lazy admin-only registration: a surface gated on
+// an undeclared permission must NOT silently open, so a missing
+// RegisterPermission registers the name admin-only (a dev warning names the
+// calling surface so the author notices). Shared by RequirePermission and
+// MCPTool's ToolPermission option.
+func (m *Module) ensurePermissionDeclared(caller, name string) (string, []string) {
 	qualified := qualifyPermissionName(m.config.Slug, name)
 	declared, ok := m.registry.PermissionRoles(qualified)
 	if !ok {
-		// Lazy admin-only registration: a route gated on an undeclared
-		// permission must NOT silently open. Warn in dev so the author
-		// notices the missing RegisterPermission.
 		if !runtime.IsLambda() {
-			m.logger.Printf("RequirePermission(%q): no RegisterPermission found — defaulting to admin-only. Declare it via ms.RegisterPermission.", name)
+			m.logger.Printf("%s(%q): no RegisterPermission found — defaulting to admin-only. Declare it via ms.RegisterPermission.", caller, name)
 		}
 		m.registry.AddPermissionWithMeta(registry.Permission{
 			Name:        qualified,
@@ -467,8 +476,7 @@ func (m *Module) RequirePermission(name string) func(http.Handler) http.Handler 
 		})
 		declared = []string{roles.Admin().Key}
 	}
-	// Runtime: admin always passes, plus the declared roles.
-	return auth.RequireRoles(append([]string{roles.Admin().Key}, declared...)...)
+	return qualified, declared
 }
 
 // qualifyPermissionName prepends "<slug>." to name. No-op if name is
