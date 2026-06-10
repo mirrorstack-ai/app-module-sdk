@@ -50,6 +50,42 @@ func TestMCPToolsList_EmitsRegisteredTools(t *testing.T) {
 	}
 }
 
+func TestMCPToolsList_CarriesPermission(t *testing.T) {
+	t.Parallel()
+
+	reg := newMCPReg(t)
+	reg.AddMCPTool(registry.MCPToolDecl{
+		Name: "gated", Description: "Needs a permission",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Permission:  "demo.users.read",
+	})
+	reg.AddMCPTool(registry.MCPToolDecl{
+		Name: "open", Description: "No permission",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	})
+
+	req := httptest.NewRequest("GET", "/tools/list", nil)
+	rec := httptest.NewRecorder()
+	MCPToolsListHandler(reg).ServeHTTP(rec, req)
+
+	var body struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2", len(body.Tools))
+	}
+	if got := string(body.Tools[0]["permission"]); got != `"demo.users.read"` {
+		t.Errorf("gated tool permission = %s, want \"demo.users.read\"", got)
+	}
+	// omitempty: a tool without a declared permission must not carry the key.
+	if _, present := body.Tools[1]["permission"]; present {
+		t.Errorf("open tool carries a permission key: %v", body.Tools[1])
+	}
+}
+
 func TestMCPToolsCall_InvokesHandler(t *testing.T) {
 	t.Parallel()
 
@@ -247,6 +283,7 @@ func TestManifest_IncludesMCP(t *testing.T) {
 	reg.AddMCPTool(registry.MCPToolDecl{
 		Name: "greet", Description: "Say hi",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Permission:  "demo.users.read",
 	})
 	reg.AddMCPResource(registry.MCPResourceDecl{
 		Name: "status", Description: "Status",
@@ -262,6 +299,9 @@ func TestManifest_IncludesMCP(t *testing.T) {
 	}
 	if len(got.MCP.Tools) != 1 || got.MCP.Tools[0].Name != "greet" {
 		t.Errorf("manifest.mcp.tools = %+v", got.MCP.Tools)
+	}
+	if got.MCP.Tools[0].Permission != "demo.users.read" {
+		t.Errorf("manifest.mcp.tools[0].permission = %q, want demo.users.read", got.MCP.Tools[0].Permission)
 	}
 	if len(got.MCP.Resources) != 1 || got.MCP.Resources[0].Name != "status" {
 		t.Errorf("manifest.mcp.resources = %+v", got.MCP.Resources)
@@ -312,7 +352,7 @@ func TestMCPToolsCall_200HasCorrectContentType(t *testing.T) {
 // Guard: the handler struct in mcp.go must be reachable from the wire-facing
 // MCPToolEntry shape (tests above rely on json roundtrip). Keep the _ = trick
 // to surface unused-field refactors early.
-var _ = MCPToolEntry{Name: "", Description: "", InputSchema: nil, OutputSchema: nil}
+var _ = MCPToolEntry{Name: "", Description: "", InputSchema: nil, OutputSchema: nil, Permission: ""}
 var _ = MCPResourceEntry{Name: "", Description: "", Schema: nil}
 
 // Ensure handler interface matches registry decl at build time.

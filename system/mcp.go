@@ -27,6 +27,7 @@ func toolEntries(decls []registry.MCPToolDecl) []MCPToolEntry {
 		out[i] = MCPToolEntry{
 			Name: t.Name, Description: t.Description,
 			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
+			Permission: t.Permission,
 		}
 	}
 	return out
@@ -128,6 +129,9 @@ type MCPToolEntry struct {
 	Description  string          `json:"description"`
 	InputSchema  json.RawMessage `json:"inputSchema"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
+	// Permission mirrors MCPToolDecl.Permission: the slug-qualified module
+	// permission required to see and call the tool; absent when none declared.
+	Permission string `json:"permission,omitempty"`
 }
 
 // MCPResourceEntry is the JSON wire shape for a resource.
