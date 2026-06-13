@@ -101,6 +101,10 @@ type Module struct {
 	contribReg     *contributions.Registry // declared contribution slots
 	contribStorage *contributions.Storage  // contributions table CRUD
 	internalAuth   func(http.Handler) http.Handler
+	// proxyGuard rejects non-proxied requests on the public + platform
+	// surfaces (auth.RequireProxy). Captured once at New() so every
+	// Public/Platform registration reuses one closure, matching internalAuth.
+	proxyGuard func(http.Handler) http.Handler
 	poolCache      *db.PoolCache // production: per-app DB pools
 	devDBOnce      sync.Once     // dev mode: lazy DB init
 	devDB          *db.DB
@@ -205,6 +209,7 @@ func New(cfg Config) (*Module, error) {
 		contribReg:     contributions.NewRegistry(),
 		contribStorage: contributions.NewStorage(cfg.ID),
 		internalAuth:   auth.InternalAuth(),
+		proxyGuard:     auth.RequireProxy(),
 		poolCache:      db.NewPoolCache(),
 		cacheCache:     cache.NewClientCache(),
 		taskHandlers:   make(map[string]taskEntry),
@@ -282,14 +287,23 @@ func (m *Module) Router() *chi.Mux { return m.router }
 // Default role gate: admin only. Use Module.RequirePermission to
 // open routes to member/viewer.
 func (m *Module) Platform(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopePlatform, auth.PlatformAuth(), fn)
+	// proxyGuard runs BEFORE PlatformAuth: reject non-proxied callers at the
+	// trust boundary, then let PlatformAuth read the now-trusted identity
+	// headers. (PlatformAuth already validates the platform token on its own,
+	// so the guard is belt-and-suspenders here, but keeping it makes the
+	// public + platform surfaces enforce identically and auditably.)
+	m.scopedRoutes(registry.ScopePlatform, fn, m.proxyGuard, auth.PlatformAuth())
 }
 
 // Public registers routes with public auth scope (anyone, including
 // anonymous). Auto-mounted under /public/ — write `r.Get("/me", ...)`
 // and the route lands at /public/me.
 func (m *Module) Public(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopePublic, nil, fn)
+	// proxyGuard is the ONLY thing standing between a direct caller and the
+	// public surface trusting spoofable X-MS-App-ID / X-MS-User-ID /
+	// X-MS-App-Role. Public scope has no role gate, so this is where the
+	// not_proxied check has to live.
+	m.scopedRoutes(registry.ScopePublic, fn, m.proxyGuard)
 }
 
 // Internal registers routes with internal auth scope (platform-to-module
@@ -299,7 +313,7 @@ func (m *Module) Public(fn func(r chi.Router)) {
 // is cached on the Module at New() so OnEvent / Cron registrations reuse a
 // single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
+	m.scopedRoutes(registry.ScopeInternal, fn, m.internalAuth)
 }
 
 // internalRouteBodyCap is the default body size limit for Internal-scope
@@ -346,13 +360,15 @@ func (m *Module) mountSystemInternalRoute(method, path string, handler http.Hand
 // route tree, which indicates a misconfigured module that should not start.
 // Panic instead of silently leaving the registry and router in inconsistent
 // states (some routes recorded but not re-registered, or vice versa).
-func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
+func (m *Module) scopedRoutes(scope registry.Scope, fn func(r chi.Router), scopeMiddleware ...func(http.Handler) http.Handler) {
 	sub := chi.NewRouter()
 	if scope == registry.ScopeInternal {
 		sub.Use(httputil.MaxBytes(internalRouteBodyCap))
 	}
-	if scopeMiddleware != nil {
-		sub.Use(scopeMiddleware)
+	for _, mw := range scopeMiddleware {
+		if mw != nil {
+			sub.Use(mw)
+		}
 	}
 	sub.Route("/"+string(scope), fn)
 

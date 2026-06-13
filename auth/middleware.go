@@ -203,6 +203,85 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 	}
 }
 
+// CodeNotProxied is the stable error code returned when a request reaches a
+// module's public/platform surface without the server-injected platform token
+// — i.e. it did not come through the platform proxy (dispatch). The dispatch
+// track matches on this code; do not rename it without updating that contract.
+const CodeNotProxied = "not_proxied"
+
+// RequireProxy returns middleware that rejects requests which did not arrive
+// through the platform proxy. It guards the module's PUBLIC and PLATFORM
+// request surfaces: a direct caller can spoof X-MS-App-ID / X-MS-User-ID /
+// X-MS-App-Role, but NOT the X-MS-Platform-Token (a per-session secret the
+// platform injects at the tunnel boundary; the browser never sees or sends
+// it). Validating the token here, at the SDK trust boundary, makes every
+// 3rd-party module inherit the protection for free.
+//
+// It mirrors InternalAuth's env gating exactly via platformSecretReader, so a
+// module's standalone `go test` (no token configured) is unaffected, while the
+// `mirrorstack dev` / tunnel / production HTTP paths (dispatch injects the
+// token) enforce.
+func RequireProxy() func(http.Handler) http.Handler {
+	return requireProxy(lambdaenv.IsSet())
+}
+
+// requireProxy is the test seam; inLambda is injected so tests don't mutate
+// process env captured at package init.
+//
+// Behavior matrix (secret = first non-empty of MS_PLATFORM_TOKEN[_FILE],
+// MS_INTERNAL_SECRET; header = the corresponding X-MS-* header):
+//
+//	inLambda                → PASS through. The Lambda runtime strips all
+//	                          X-MS-* headers and injects trusted identity from
+//	                          the typed invoke payload (see runtime.NewLambdaHandler
+//	                          + InjectResources), so there is no spoofable header
+//	                          to guard and no token header to match. The payload
+//	                          IS the trust boundary.
+//	local + secret unset    → PASS through (pure standalone `go test`: the guard
+//	                          must be inert so module unit tests still run).
+//	local + secret set      → ENFORCE: require the matching token header. Absent
+//	                          or mismatched → 403 not_proxied. This is the
+//	                          `mirrorstack dev` / `--tunnel` / self-hosted HTTP
+//	                          path where dispatch forwards raw headers and injects
+//	                          X-MS-Platform-Token.
+//
+// CRITICAL: an accidentally-inert guard in production is a security hole; an
+// accidentally-active guard in standalone tests bricks every module's tests.
+// The gating above is deliberately identical to internalAuth's so the two
+// trust signals stay in lockstep.
+func requireProxy(inLambda bool) func(http.Handler) http.Handler {
+	readSecret := platformSecretReader()
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Lambda: headers already stripped + identity injected from payload.
+			if inLambda {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			expected, header := readSecret()
+
+			// No token configured: inert (standalone unit tests).
+			if expected == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			token := r.Header.Get(header)
+			if !constantTimeEqual(token, expected) {
+				log.Printf("mirrorstack: proxy guard rejected (token mismatch, header_present=%v) from %s %s", token != "", r.RemoteAddr, r.URL.Path)
+				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
+					Error: "request did not come through the platform proxy",
+					Code:  CodeNotProxied,
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // secretReader returns the current secret and which header carries it.
 // The file-backed variant re-reads on every call so a refreshed token
 // (CLI reconnect) is picked up without restarting the module process.
