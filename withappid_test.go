@@ -47,3 +47,29 @@ func TestWithAppID(t *testing.T) {
 		}
 	})
 }
+
+func TestAppID(t *testing.T) {
+	t.Run("returns empty string when no identity is set", func(t *testing.T) {
+		if got := ms.AppID(context.Background()); got != "" {
+			t.Errorf("AppID = %q, want empty string", got)
+		}
+	})
+
+	t.Run("reads the app id from the context identity", func(t *testing.T) {
+		ctx := auth.Set(context.Background(), auth.Identity{
+			UserID:  "u-1",
+			AppID:   "app-7",
+			AppRole: auth.RoleAdmin,
+		})
+		if got := ms.AppID(ctx); got != "app-7" {
+			t.Errorf("AppID = %q, want app-7", got)
+		}
+	})
+
+	t.Run("is the inbound twin of WithAppID", func(t *testing.T) {
+		ctx := ms.WithAppID(context.Background(), "app-rt")
+		if got := ms.AppID(ctx); got != "app-rt" {
+			t.Errorf("AppID = %q, want app-rt", got)
+		}
+	})
+}

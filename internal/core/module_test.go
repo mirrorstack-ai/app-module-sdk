@@ -302,6 +302,37 @@ func TestPublic_ProxyGuard_AllowsProxiedCaller(t *testing.T) {
 	}
 }
 
+func TestPublic_ProxyGuard_PromotesTrustedAppID(t *testing.T) {
+	// The #236 gap closure end-to-end: a Public route mounts ONLY the proxy
+	// guard (no PlatformAuth), so before this change AppID(ctx) was always empty
+	// on Public. Now the guard's validated-token path promotes the dispatch-
+	// injected X-MS-App-ID into the identity, so the handler reads its trusted
+	// app via core.AppID — never from request data.
+	m := newTestModuleWithSecret(t, "test") // MS_INTERNAL_SECRET = "secret"
+	var gotAppID string
+	m.Public(func(r chi.Router) {
+		r.Get("/start", func(w http.ResponseWriter, r *http.Request) {
+			gotAppID = AppID(r.Context())
+			_, _ = w.Write([]byte("started"))
+		})
+	})
+
+	req := httptest.NewRequest("GET", "/public/start", nil)
+	req.Header.Set("X-MS-Internal-Secret", "secret")
+	req.Header.Set(auth.HeaderAppID, "trusted-app-42")
+	req.Header.Set(auth.HeaderUserID, "u-9")
+	req.Header.Set(auth.HeaderAppRole, auth.RoleMember)
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for proxied caller, got %d", rec.Code)
+	}
+	if gotAppID != "trusted-app-42" {
+		t.Errorf("AppID(ctx) = %q on a Public route, want trusted-app-42 (promoted by the proxy guard)", gotAppID)
+	}
+}
+
 func TestPublic_ProxyGuard_InertWithoutToken(t *testing.T) {
 	// Standalone module `go test` (no platform token configured): the guard is
 	// inert so the public surface stays open for local unit tests.

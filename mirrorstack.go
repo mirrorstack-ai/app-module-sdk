@@ -188,15 +188,36 @@ func Emit(ctx context.Context, name string, payload any) error {
 	return core.Emit(ctx, name, payload)
 }
 
+// AppID returns the current app id from the request context, or "" if no
+// identity is set. It is the inbound twin of WithAppID and the single
+// unspoofable way a handler reads its OWN app.
+//
+// On every guarded surface the SDK promotes the platform's trusted, dispatch-
+// injected app id into the context identity BEFORE the handler runs — Platform
+// via PlatformAuth, Public via the proxy guard's validated-token path, and
+// Lambda via the typed invoke payload (runtime.InjectResources). So a Public or
+// Platform handler reads its app with:
+//
+//	appID := ms.AppID(r.Context())
+//
+// Do NOT read the app id from request data (query string, body, path) — those
+// are caller-controlled and forgeable. ms.AppID is the trusted source.
+func AppID(ctx context.Context) string {
+	return core.AppID(ctx)
+}
+
 // WithAppID returns a context whose inter-module Call scope is the given app,
 // overriding the ambient identity's app. ms.Call reads the app id from the
 // context (auth.Get) — for a handler that is the request's authenticated app,
-// so authenticated callers need nothing extra. PUBLIC/proxy flows have no
-// ambient identity (e.g. a sign-in proxy on ms.Public routes, where the target
-// app arrives as request data, not as the caller's identity), so they set it
-// explicitly:
+// so authenticated callers need nothing extra.
 //
-//	ctx = ms.WithAppID(ctx, appID)
+// Use it to RETARGET an outbound ms.Call at a DIFFERENT app than the ambient
+// one (the rare cross-app proxy case). To read your OWN app id, use ms.AppID —
+// the SDK already promotes the request's trusted app into the identity, so a
+// Public/Platform handler does not need WithAppID just to call within its own
+// app:
+//
+//	ctx = ms.WithAppID(ctx, otherAppID)
 //	ms.CallGet(ctx, providerModuleID, "/internal/authorize-url?"+q, &out)
 //
 // Any existing UserID/AppRole on the context is preserved; only AppID changes.

@@ -7,6 +7,16 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-06-13
+
+A module can now read its own **trusted app id** on every guarded surface — including Public routes, which previously had no identity at all.
+
+### Added
+- **`ms.AppID(ctx) string`** — the inbound twin of `ms.WithAppID`. Returns the app id from the request context's auth identity (`""` when none is set). This is the single **unspoofable** way a handler reads its own app: the SDK promotes the platform's trusted, dispatch-injected app id into the identity before the handler runs. Read this instead of pulling an app id off request data (query/body/path), which the caller controls and can forge.
+
+### Changed
+- **The proxy guard (`auth.RequireProxy`) now promotes trusted app identity on its success path.** After the platform token validates — which proves the `X-MS-*` headers were injected by dispatch, not client-forged — the guard sets `auth.Identity` (`AppID`/`UserID`/`AppRole`) from those headers before the handler runs. This closes a gap on **Public** routes: they mount only the proxy guard (not `PlatformAuth`), so `auth.Get(ctx).AppID` was always empty there and a module could not read its own app. Promotion never happens on a path that has not validated the token (standalone/inert and rejected requests don't promote), and never clobbers an identity already set (e.g. Lambda's `InjectResources`). Mirrors the prod-Lambda asymmetry that `runtime.InjectResources` already closed.
+
 ## [v0.2.0] - 2026-05-06
 
 Phase 2 — module identity, prefix-aware schema resolution, and the cross-module data-routing contract. **Trust model: app owner is the trust root** for cross-module reads. The contributor declares nothing about who can read; the consumer declares what it wants from each dep; the catalog surfaces the pairing to the app owner at install time. Read-only by design — `GRANT SELECT` only, never write. Cross-module *writes* go through events or internal HTTP.

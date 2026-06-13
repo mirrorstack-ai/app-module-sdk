@@ -268,7 +268,10 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Lambda: headers already stripped + identity injected from payload.
+			// Lambda: headers already stripped + identity injected from payload
+			// (runtime.InjectResources). The payload is the trust boundary, so
+			// pass through WITHOUT promoting from headers — there are none to
+			// read, and the preset identity must not be touched.
 			if inLambda {
 				next.ServeHTTP(w, r)
 				return
@@ -276,7 +279,10 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 
 			expected, header, configured := readSecret()
 
-			// No token SOURCE configured: inert (standalone unit tests).
+			// No token SOURCE configured: inert (standalone unit tests). DO NOT
+			// promote identity here — nothing validated that the X-MS-* headers
+			// came from dispatch, so trusting them would let a direct caller
+			// forge an app id. The surface is simply open (local dev / tests).
 			if !configured {
 				next.ServeHTTP(w, r)
 				return
@@ -288,25 +294,52 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			// reject rather than silently pass every request through.
 			if expected == "" {
 				log.Printf("mirrorstack: proxy guard rejected (token source configured but unreadable) from %s %s", r.RemoteAddr, r.URL.Path)
-				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
-					Error: "request did not come through the platform proxy",
-					Code:  CodeNotProxied,
-				})
+				rejectNotProxied(w)
 				return
 			}
 
 			token := r.Header.Get(header)
 			if !constantTimeEqual(token, expected) {
 				log.Printf("mirrorstack: proxy guard rejected (token mismatch, header_present=%v) from %s %s", token != "", r.RemoteAddr, r.URL.Path)
-				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
-					Error: "request did not come through the platform proxy",
-					Code:  CodeNotProxied,
-				})
+				rejectNotProxied(w)
 				return
 			}
-			next.ServeHTTP(w, r)
+
+			// SUCCESS PATH ONLY. The platform token validated, which proves the
+			// X-MS-* identity headers were injected by dispatch (the browser
+			// never holds the token, so a direct caller cannot forge a request
+			// that reaches here). Promote those now-trusted headers to
+			// auth.Identity so a Public/Platform handler can read its app via
+			// auth.Get(ctx).AppID — the single unspoofable source of app id.
+			//
+			// CRITICAL ORDERING: this MUST run only after the token check above
+			// passes. Promoting before validation would trust spoofable headers.
+			//
+			// Don't clobber an identity already on the context: if something
+			// upstream (e.g. PlatformAuth on the platform surface, or a future
+			// authorizer) already set one, that wins.
+			ctx := r.Context()
+			if Get(ctx) == nil {
+				ctx = Set(ctx, Identity{
+					UserID:  r.Header.Get(HeaderUserID),
+					AppID:   r.Header.Get(HeaderAppID),
+					AppRole: r.Header.Get(HeaderAppRole),
+				})
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// rejectNotProxied writes the standard 403 not_proxied response. Both failure
+// paths in requireProxy (unreadable token source and token mismatch) produce
+// the same JSON body; the log call before each site carries the distinct
+// diagnostic. (Supersedes the dedup in PR #118.)
+func rejectNotProxied(w http.ResponseWriter) {
+	httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
+		Error: "request did not come through the platform proxy",
+		Code:  CodeNotProxied,
+	})
 }
 
 // secretReader returns the current secret, which header carries it, and
