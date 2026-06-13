@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/jackc/pgx/v5"
@@ -100,9 +101,11 @@ func (m *Module) provisionDevAppSchema(ctx context.Context, schema string) error
 // ensureSchemaMigrated creates the target schema and its per-schema migration
 // tracking table, then applies any not-yet-recorded migrations for the given
 // scope. Each schema owns its own schema_migrations table (keyed by
-// scope+version) so every app's app-scope history is independent and a second
-// app installing the same module re-runs the migrations into its own schema
-// instead of being skipped as "already applied".
+// module_id+scope+version) so every app's app-scope history is independent
+// AND two modules sharing one app schema do not collide on the (scope,version)
+// key — a second app, or a second module in the same app, re-runs its own
+// migrations into the target schema instead of being skipped as "already
+// applied".
 func (m *Module) ensureSchemaMigrated(ctx context.Context, scope migration.Scope, schema string) error {
 	pool, release, err := m.resolvePool(ctx)
 	if err != nil {
@@ -116,23 +119,75 @@ func (m *Module) ensureSchemaMigrated(ctx context.Context, scope migration.Scope
 	}
 
 	trackingTable := pgx.Identifier{schema, "schema_migrations"}.Sanitize()
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			scope      text NOT NULL,
-			version    text NOT NULL,
-			applied_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (scope, version)
-		)`, trackingTable)); err != nil {
-		return fmt.Errorf("dev migrate: create tracking table in %s: %w", schema, err)
+	if err := ensureTrackingTable(ctx, pool, trackingTable); err != nil {
+		return fmt.Errorf("dev migrate: tracking table in %s: %w", schema, err)
 	}
 
 	return m.applyDevScope(ctx, pool, trackingTable, schema, scope)
 }
 
+// ensureTrackingTable creates the per-schema schema_migrations table and, for
+// schemas created by an older SDK, upgrades the legacy (scope, version) layout
+// to the module-scoped (module_id, scope, version) layout.
+//
+// Legacy rows are backfilled with module_id set to the empty string (the
+// "unknown owner" marker): no live module ever records under the empty id, so
+// on the next dev run every module's applied-set comes up empty for those
+// versions, drift detection finds its tables missing, and the migrations
+// re-apply into the schema (cleanly, because module migrations use CREATE
+// TABLE IF NOT EXISTS). This is how the recorded-but-never-applied schemas
+// self-heal — see applyDevScope.
+func ensureTrackingTable(ctx context.Context, pool *pgxpool.Pool, trackingTable string) error {
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			module_id  text NOT NULL DEFAULT '',
+			scope      text NOT NULL,
+			version    text NOT NULL,
+			applied_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (module_id, scope, version)
+		)`, trackingTable)); err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	// Upgrade a legacy table (PK was (scope, version), no module_id column).
+	if _, err := pool.Exec(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS module_id text NOT NULL DEFAULT ''`,
+		trackingTable)); err != nil {
+		return fmt.Errorf("add module_id column: %w", err)
+	}
+	// Rebuild the PK to include module_id when the table predates it. The
+	// constraint name is schema-local and stable, so DROP-then-ADD is safe and
+	// idempotent across runs.
+	if _, err := pool.Exec(ctx, fmt.Sprintf(
+		`DO $$
+		 DECLARE pk text;
+		 BEGIN
+		   SELECT conname INTO pk FROM pg_constraint
+		   WHERE conrelid = %s::regclass AND contype = 'p';
+		   IF pk IS NOT NULL AND NOT EXISTS (
+		     SELECT 1 FROM pg_attribute a
+		     JOIN pg_constraint c ON c.conrelid = a.attrelid AND a.attnum = ANY (c.conkey)
+		     WHERE c.conname = pk AND a.attname = 'module_id'
+		   ) THEN
+		     EXECUTE 'ALTER TABLE %s DROP CONSTRAINT ' || quote_ident(pk);
+		     EXECUTE 'ALTER TABLE %s ADD PRIMARY KEY (module_id, scope, version)';
+		   END IF;
+		 END $$`,
+		quoteLiteral(trackingTable), trackingTable, trackingTable)); err != nil {
+		return fmt.Errorf("rebuild primary key: %w", err)
+	}
+	return nil
+}
+
 // applyDevScope filters the embedded sql/<scope>/ migrations down to those not
-// already recorded in the schema's tracking table, then applies the remainder
-// via the same TxRunner the production install handler uses, pinned to the
-// target schema.
+// already recorded in the schema's tracking table FOR THIS MODULE, then applies
+// the remainder via the same TxRunner the production install handler uses,
+// pinned to the target schema.
+//
+// Self-heal: a version recorded as applied but whose effect is missing from the
+// schema (no table carrying this module's id prefix exists) is drift — the
+// historical search_path bug recorded the row while the DDL leaked into public.
+// Such recordings are discarded so the migrations re-apply into the right
+// schema on this run.
 func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, trackingTable, schema string, scope migration.Scope) error {
 	all, err := migration.List(m.config.SQL, scope)
 	if err != nil {
@@ -142,9 +197,27 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 		return nil
 	}
 
-	applied, err := loadAppliedVersions(ctx, pool, trackingTable, scope)
+	applied, err := m.loadAppliedVersions(ctx, pool, trackingTable, scope)
 	if err != nil {
 		return fmt.Errorf("dev migrate %s: load applied: %w", scope, err)
+	}
+
+	// Drift detection: if anything is recorded for this module but none of its
+	// tables exist in the schema, the recorded DDL never landed here (the public
+	// leak). Forget the recordings so every migration re-applies; clear the stale
+	// rows so the tracking table reflects reality after the re-apply.
+	if len(applied) > 0 {
+		present, err := m.moduleHasTables(ctx, pool, schema)
+		if err != nil {
+			return fmt.Errorf("dev migrate %s: drift check: %w", scope, err)
+		}
+		if !present {
+			m.logger.Printf("dev: %s schema %s has tracking rows for module %s but no tables — re-applying (search_path drift self-heal)", scope, schema, m.config.ID)
+			if err := m.clearAppliedVersions(ctx, pool, trackingTable, scope); err != nil {
+				return fmt.Errorf("dev migrate %s: clear drift: %w", scope, err)
+			}
+			applied = map[string]bool{}
+		}
 	}
 
 	pending := make([]migration.Migration, 0, len(all))
@@ -157,15 +230,17 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 		return nil
 	}
 
-	// Pin the whole sequence to the target schema so every migration lands in
-	// the same place. App scope runs via Module.Tx, which reads this schema from
-	// the context; module scope runs via Module.ModuleTx, which overlays
-	// mod_<id> itself (identical to schema here) — setting it is harmless.
+	// Pin the whole sequence to the target schema two ways: db.WithSchema sets it
+	// in context (the path Module.Tx/ModuleTx read), and pinnedRunTx forces a
+	// SET LOCAL search_path inside each migration's transaction. The explicit pin
+	// is defense-in-depth: it guarantees the DDL lands in the app schema even if
+	// the context-based path ever regresses — which is the exact failure that
+	// once leaked module tables into public.
 	migrateCtx := db.WithSchema(ctx, schema)
-	runTx := m.lifecycleTxRunner(scope)
+	runTx := pinnedRunTx(m.lifecycleTxRunner(scope), schema)
 	ran, err := migration.Apply(migrateCtx, runTx, m.config.SQL, pending)
 	// Record whatever ran before the failure (if any) so retries skip them.
-	if recErr := recordAppliedVersions(ctx, pool, trackingTable, scope, ran); recErr != nil && err == nil {
+	if recErr := m.recordAppliedVersions(ctx, pool, trackingTable, scope, ran); recErr != nil && err == nil {
 		return fmt.Errorf("dev migrate %s: record applied: %w", scope, recErr)
 	}
 	if err != nil {
@@ -175,10 +250,43 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 	return nil
 }
 
-func loadAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) (map[string]bool, error) {
+// pinnedRunTx wraps a TxRunner so the wrapped fn runs with search_path pinned
+// to schema for the duration of the transaction. SET LOCAL is cleared on
+// COMMIT/ROLLBACK, so it cannot leak to a later use of the pooled connection.
+// The pin runs inside the same transaction as the DDL, so even an empty
+// migration context (no db.WithSchema) still lands the DDL in the app schema.
+func pinnedRunTx(inner migration.TxRunner, schema string) migration.TxRunner {
+	pin := "SET LOCAL search_path TO " + pgx.Identifier{schema}.Sanitize()
+	return func(ctx context.Context, fn func(q db.Querier) error) error {
+		return inner(ctx, func(q db.Querier) error {
+			if _, err := q.Exec(ctx, pin); err != nil {
+				return fmt.Errorf("pin search_path to %s: %w", schema, err)
+			}
+			return fn(q)
+		})
+	}
+}
+
+// moduleHasTables reports whether the schema contains at least one ordinary
+// table whose name starts with this module's id prefix (m<id>_...). Used by the
+// drift self-heal: a module that recorded migrations but owns no tables in the
+// schema never actually ran its DDL there.
+func (m *Module) moduleHasTables(ctx context.Context, pool *pgxpool.Pool, schema string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = $1
+			  AND table_type = 'BASE TABLE'
+			  AND table_name LIKE $2
+		)`, schema, m.config.ID+"\\_%").Scan(&exists)
+	return exists, err
+}
+
+func (m *Module) loadAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) (map[string]bool, error) {
 	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT version FROM %s WHERE scope = $1`, trackingTable),
-		string(scope))
+		fmt.Sprintf(`SELECT version FROM %s WHERE module_id = $1 AND scope = $2`, trackingTable),
+		m.config.ID, string(scope))
 	if err != nil {
 		return nil, err
 	}
@@ -194,14 +302,33 @@ func loadAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable 
 	return out, rows.Err()
 }
 
-func recordAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope, versions []string) error {
+func (m *Module) recordAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope, versions []string) error {
 	for _, v := range versions {
 		if _, err := pool.Exec(ctx,
-			fmt.Sprintf(`INSERT INTO %s (scope, version) VALUES ($1, $2)
+			fmt.Sprintf(`INSERT INTO %s (module_id, scope, version) VALUES ($1, $2, $3)
 			 ON CONFLICT DO NOTHING`, trackingTable),
-			string(scope), v); err != nil {
+			m.config.ID, string(scope), v); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// clearAppliedVersions removes this module's recorded rows for the scope. Used
+// by the drift self-heal before a full re-apply so the tracking table is
+// rewritten to match what actually runs this time. Legacy rows under the empty
+// "unknown owner" id for the same versions are also cleared so the re-applied
+// rows are not shadowed by a duplicate version under a different module_id.
+func (m *Module) clearAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) error {
+	_, err := pool.Exec(ctx,
+		fmt.Sprintf(`DELETE FROM %s WHERE scope = $1 AND module_id IN ($2, '')`, trackingTable),
+		string(scope), m.config.ID)
+	return err
+}
+
+// quoteLiteral wraps s as a single-quoted SQL string literal (doubling embedded
+// quotes) for use where a value — not an identifier — is interpolated into DDL,
+// such as the regclass cast inside the tracking-table PK upgrade.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
