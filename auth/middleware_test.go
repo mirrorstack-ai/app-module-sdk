@@ -663,3 +663,121 @@ func TestRequireProxy_TokenFile_ReadError_NotMistakenForUnconfigured(t *testing.
 		t.Fatal("SecretConfigured() must be true when MS_PLATFORM_TOKEN_FILE is set even if unreadable")
 	}
 }
+
+// --- RequireProxy identity promotion (Public-route trusted app id) ---
+
+func TestRequireProxy_ValidToken_PromotesIdentity(t *testing.T) {
+	// The whole point of the #236 redesign: on a Public route, after the proxy
+	// token validates, the dispatch-injected X-MS-* headers are promoted to
+	// auth.Identity so the handler can read its TRUSTED app id via auth.Get —
+	// PlatformAuth doesn't run on Public, so without this promotion AppID is
+	// empty there.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	var seen *Identity
+	handler := requireProxy(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "real-token")
+	req.Header.Set(HeaderUserID, "u-pub-1")
+	req.Header.Set(HeaderAppID, "a-pub-2")
+	req.Header.Set(HeaderAppRole, RoleViewer)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid proxied request, got %d", rec.Code)
+	}
+	if seen == nil {
+		t.Fatal("expected promoted Identity on the context; got nil")
+	}
+	if seen.AppID != "a-pub-2" {
+		t.Errorf("AppID = %q, want a-pub-2 (the trusted, dispatch-injected app id)", seen.AppID)
+	}
+	if seen.UserID != "u-pub-1" || seen.AppRole != RoleViewer {
+		t.Errorf("identity mismatch: got %+v", seen)
+	}
+}
+
+func TestRequireProxy_RejectedRequest_NeverPromotes(t *testing.T) {
+	// A request rejected by the guard (no/wrong token) must NEVER reach the
+	// handler, so no identity is ever promoted from its (spoofable) headers.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	reached := false
+	handler := requireProxy(false)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		reached = true
+	}))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	// Attacker omits the token but tries to assert an app id directly.
+	req.Header.Set(HeaderAppID, "spoofed-app")
+	req.Header.Set(HeaderUserID, "spoofed-user")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	if reached {
+		t.Error("handler must not run on a rejected request — promotion would trust spoofed headers")
+	}
+}
+
+func TestRequireProxy_NoSecretInert_DoesNotPromote(t *testing.T) {
+	// Standalone `go test` (no token configured): the guard is inert and passes
+	// through, but it must NOT promote spoofable headers — nothing validated
+	// that they came from dispatch. Documented behavior: surface is open, app id
+	// unset (a module's own unit test injects identity explicitly if it needs
+	// one).
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	var seen *Identity
+	handler := requireProxy(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderAppID, "spoofed-app")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (inert without configured token), got %d", rec.Code)
+	}
+	if seen != nil {
+		t.Errorf("inert guard must not promote unvalidated headers; got identity %+v", seen)
+	}
+}
+
+func TestRequireProxy_PresetIdentity_NotClobbered(t *testing.T) {
+	// Lambda's InjectResources sets identity from the typed payload BEFORE any
+	// header promotion could run. The guard must never overwrite a preset
+	// identity with header values. Simulate by presetting on the context and
+	// sending conflicting headers on the validated-token path.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	var seen *Identity
+	handler := requireProxy(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "real-token")
+	req.Header.Set(HeaderAppID, "header-app")
+	req = req.WithContext(Set(req.Context(), Identity{
+		UserID:  "preset-user",
+		AppID:   "preset-app",
+		AppRole: RoleAdmin,
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil || seen.AppID != "preset-app" {
+		t.Errorf("preset identity must win over headers; got %+v", seen)
+	}
+}

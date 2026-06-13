@@ -134,3 +134,19 @@ func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
 func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return mustDefault("CallPost").CallPost(ctx, targetModuleID, path, body, out)
 }
+
+// AppID returns the app id from the request context's auth identity, or "" if
+// no identity is set. It is the inbound twin of WithAppID and the single
+// unspoofable way a handler reads its own app: the SDK promotes the trusted,
+// dispatch-injected app id into the identity (Platform via PlatformAuth, Public
+// via the proxy guard's success path; Lambda via runtime.InjectResources).
+// Reading request data (query/body) for the app id instead is forgeable.
+//
+// Not module-bound (no *Module receiver) — identity lives on the context, so
+// this works before Init and in tests.
+func AppID(ctx context.Context) string {
+	if a := auth.Get(ctx); a != nil {
+		return a.AppID
+	}
+	return ""
+}

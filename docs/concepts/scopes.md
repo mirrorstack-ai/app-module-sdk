@@ -10,9 +10,19 @@ Every HTTP route lives under one of three **scopes**. The scope determines which
 | **Public** | `ms.Public(fn)` | None | Anonymous (webhooks, OAuth callbacks, public APIs) |
 | **Internal** | `ms.Internal(fn)` | HMAC (`auth.InternalAuth`) | Platform itself (lifecycle, events, crons) |
 
+## Reading your app id
+
+On **both** Platform and Public routes, read your module's app id from the trusted context identity — never from request data (query string, body, path), which the caller controls and can forge:
+
+```go
+appID := ms.AppID(r.Context())
+```
+
+The SDK promotes the platform's trusted, dispatch-injected app id into the context **before your handler runs**: on Platform via the session auth, on Public via the proxy guard's validated-token path (the guard proves the request came through dispatch, so the `X-MS-App-ID` header it forwards is trustworthy). `ms.AppID` returns it; it returns `""` only in a standalone unit test where no platform token is configured. `ms.AppID` is the inbound twin of `ms.WithAppID` (which *retargets* an outbound `ms.Call` at a different app).
+
 ## Platform
 
-Authenticated users of the host dashboard. The SDK checks a session token set by the platform's auth flow. Routes receive an `auth.Identity` via context with `AppID`, `UserID`, and `AppRole`.
+Authenticated users of the host dashboard. The SDK checks a session token set by the platform's auth flow. Routes receive an `auth.Identity` via context with `AppID`, `UserID`, and `AppRole` — read the app id with `ms.AppID(r.Context())` (see above).
 
 ```go
 import p "github.com/mirrorstack-ai/app-module-sdk/roles"
@@ -39,7 +49,7 @@ ms.Public(func(r chi.Router) {
 })
 ```
 
-The SDK does not apply any auth here, but you are responsible for verifying payloads that claim identity (signed webhooks, OAuth state nonces, etc.).
+The SDK does not run user auth here, but the proxy guard still fronts every Public route: a request that did not come through the platform proxy is rejected with `403 not_proxied`. Because the guard validated the proxy token, the app id it promotes (`ms.AppID(r.Context())`) is trusted — use it instead of reading an app id off the request. You are still responsible for verifying payloads that claim *user* identity (signed webhooks, OAuth state nonces, etc.).
 
 ## Internal
 

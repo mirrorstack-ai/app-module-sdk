@@ -10,9 +10,19 @@
 | **Public** | `ms.Public(fn)` | 無 | 匿名(webhooks、OAuth callbacks、公開 API) |
 | **Internal** | `ms.Internal(fn)` | HMAC(`auth.InternalAuth`) | 平台本身(lifecycle、events、crons) |
 
+## 讀取自己的 app id
+
+在 Platform 與 Public route **兩者**,都從受信任的 context identity 讀取自己模組的 app id,**不要**從 request 資料(query string、body、path)讀 — 那些是呼叫者可控、可偽造的:
+
+```go
+appID := ms.AppID(r.Context())
+```
+
+SDK 會在你的 handler 執行**之前**,把平台經 dispatch 注入、受信任的 app id 提升進 context:Platform 透過 session auth,Public 透過 proxy guard 驗證過 token 的路徑(guard 證明 request 確實經過 dispatch,所以它轉發的 `X-MS-App-ID` 是可信的)。`ms.AppID` 會回傳它;只有在沒有設定 platform token 的獨立單元測試裡才回傳 `""`。`ms.AppID` 是 `ms.WithAppID` 的「入站對偶」(`ms.WithAppID` 用來把一個 *對外* 的 `ms.Call` *改指向* 另一個 app)。
+
 ## Platform
 
-已登入的 dashboard 使用者。SDK 會檢查 platform auth flow 發出的 session token。Route 可以從 context 取得 `auth.Identity`,內含 `AppID`、`UserID`、`AppRole`。
+已登入的 dashboard 使用者。SDK 會檢查 platform auth flow 發出的 session token。Route 可以從 context 取得 `auth.Identity`,內含 `AppID`、`UserID`、`AppRole` — 用 `ms.AppID(r.Context())` 讀取 app id(見上)。
 
 ```go
 ms.Platform(func(r chi.Router) {
@@ -37,7 +47,7 @@ ms.Public(func(r chi.Router) {
 })
 ```
 
-SDK 在這層不做任何認證,但如果 payload 裡宣稱了身分(signed webhook、OAuth state nonce 等),你必須自己驗證。
+SDK 在這層不做使用者認證,但 proxy guard 仍然守在每個 Public route 前面:沒有經過平台 proxy 的 request 會被以 `403 not_proxied` 拒絕。因為 guard 驗證過 proxy token,它提升出來的 app id(`ms.AppID(r.Context())`)是可信的 — 用它,不要從 request 讀 app id。但如果 payload 裡宣稱了 *使用者* 身分(signed webhook、OAuth state nonce 等),你還是必須自己驗證。
 
 ## Internal
 
