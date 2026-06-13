@@ -288,25 +288,30 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			// reject rather than silently pass every request through.
 			if expected == "" {
 				log.Printf("mirrorstack: proxy guard rejected (token source configured but unreadable) from %s %s", r.RemoteAddr, r.URL.Path)
-				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
-					Error: "request did not come through the platform proxy",
-					Code:  CodeNotProxied,
-				})
+				rejectNotProxied(w)
 				return
 			}
 
 			token := r.Header.Get(header)
 			if !constantTimeEqual(token, expected) {
 				log.Printf("mirrorstack: proxy guard rejected (token mismatch, header_present=%v) from %s %s", token != "", r.RemoteAddr, r.URL.Path)
-				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
-					Error: "request did not come through the platform proxy",
-					Code:  CodeNotProxied,
-				})
+				rejectNotProxied(w)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// rejectNotProxied writes the standard 403 not_proxied response. Both failure
+// paths in requireProxy (unreadable token source and token mismatch) produce
+// the same JSON body; the log call before each site carries the distinct
+// diagnostic.
+func rejectNotProxied(w http.ResponseWriter) {
+	httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
+		Error: "request did not come through the platform proxy",
+		Code:  CodeNotProxied,
+	})
 }
 
 // secretReader returns the current secret, which header carries it, and
