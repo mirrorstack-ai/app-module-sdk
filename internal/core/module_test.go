@@ -238,9 +238,11 @@ func TestPlatform_LocalDevBypass_InjectsSyntheticAdmin(t *testing.T) {
 }
 
 func TestPlatform_SecretSet_RejectsNoHeader(t *testing.T) {
-	// When MS_INTERNAL_SECRET is set (tunnel mode or prod), local bypass
-	// is off — a Platform-scope route 401s without a valid trusted-
-	// forwarder header.
+	// When MS_INTERNAL_SECRET is set (tunnel mode or prod), local bypass is
+	// off. The proxy guard now fronts PlatformAuth, so a request with NO
+	// trusted-forwarder token is rejected at the proxy boundary with
+	// 403 not_proxied (previously PlatformAuth returned 401). Either way the
+	// route is locked; the guard just catches it one step earlier.
 	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
 	m, _ := New(Config{ID: "test", Name: "Test"})
 	m.Platform(func(r chi.Router) {
@@ -250,8 +252,72 @@ func TestPlatform_SecretSet_RejectsNoHeader(t *testing.T) {
 	})
 
 	rec := doRequest(t, m.Router(), "GET", "/platform/admin")
-	if rec.Code != 401 {
-		t.Errorf("expected 401 without trusted-forwarder header, got %d", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 not_proxied without trusted-forwarder header, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), auth.CodeNotProxied) {
+		t.Errorf("expected not_proxied code in body, got %s", rec.Body.String())
+	}
+}
+
+func TestPublic_ProxyGuard_RejectsDirectCaller(t *testing.T) {
+	// With a platform token configured (tunnel / prod HTTP path), a direct
+	// caller that spoofs X-MS-App-ID but lacks the server-injected
+	// X-MS-Platform-Token is rejected with 403 not_proxied — it never reaches
+	// the public handler that would otherwise trust the app context.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Public(func(r chi.Router) {
+		r.Get("/start", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("started"))
+		})
+	})
+
+	req := httptest.NewRequest("GET", "/public/start", nil)
+	req.Header.Set(auth.HeaderAppID, "spoofed-app")
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for direct (non-proxied) caller, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), auth.CodeNotProxied) {
+		t.Errorf("expected not_proxied code in body, got %s", rec.Body.String())
+	}
+}
+
+func TestPublic_ProxyGuard_AllowsProxiedCaller(t *testing.T) {
+	// The same public route reached through dispatch — which injects the
+	// matching X-MS-Internal-Secret/Platform-Token — passes the guard.
+	m := newTestModuleWithSecret(t, "test") // MS_INTERNAL_SECRET = "secret"
+	m.Public(func(r chi.Router) {
+		r.Get("/start", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("started"))
+		})
+	})
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/public/start", "secret")
+	if rec.Code != 200 {
+		t.Errorf("expected 200 for proxied caller with valid token, got %d", rec.Code)
+	}
+}
+
+func TestPublic_ProxyGuard_InertWithoutToken(t *testing.T) {
+	// Standalone module `go test` (no platform token configured): the guard is
+	// inert so the public surface stays open for local unit tests.
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	m, _ := New(Config{ID: "test", Name: "Test"})
+	m.Public(func(r chi.Router) {
+		r.Get("/start", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("started"))
+		})
+	})
+
+	rec := doRequest(t, m.Router(), "GET", "/public/start")
+	if rec.Code != 200 {
+		t.Errorf("expected 200 (guard inert in standalone test), got %d", rec.Code)
 	}
 }
 
@@ -440,7 +506,11 @@ func TestScopes_AutoMountUnderPrefix(t *testing.T) {
 		suffix    string
 		needsAuth bool // Internal scope needs MS_INTERNAL_SECRET to reach the handler
 	}{
-		{registry.ScopePlatform, "GET", "/users", false}, // local-dev bypass injects synthetic admin
+		// No secret configured here, so the proxy guard is INERT and PlatformAuth
+		// takes the local-dev bypass (synthetic admin). This test only proves
+		// auto-mount under the prefix — guard ENFORCEMENT is covered by the
+		// TestPublic_ProxyGuard_* / TestRequireProxy_* tests, not here.
+		{registry.ScopePlatform, "GET", "/users", false},
 		{registry.ScopePublic, "GET", "/me", false},
 		{registry.ScopeInternal, "POST", "/sessions", true},
 	}
@@ -724,17 +794,34 @@ func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 		})
 	})
 
-	// Public route — no auth needed
-	if rec := doRequest(t, m.Router(), "GET", "/public/feed"); rec.Code != 200 {
-		t.Errorf("public route: code = %d, want 200", rec.Code)
+	// A module created with MS_INTERNAL_SECRET set runs the proxy guard on its
+	// public + platform surfaces, so requests must carry the matching token
+	// (the value dispatch injects). doRequestWithSecret sends X-MS-Internal-Secret.
+
+	// Public route — proxied (token present), no role needed → 200.
+	if rec := doRequestWithSecret(t, m.Router(), "GET", "/public/feed", "secret"); rec.Code != 200 {
+		t.Errorf("public route (proxied): code = %d, want 200", rec.Code)
 	}
-	// Platform route without auth → 401
-	if rec := doRequest(t, m.Router(), "GET", "/platform/admin/items"); rec.Code != 401 {
-		t.Errorf("platform route without auth: code = %d, want 401", rec.Code)
+	// Public route — direct caller (no token) → 403 not_proxied.
+	if rec := doRequest(t, m.Router(), "GET", "/public/feed"); rec.Code != http.StatusForbidden {
+		t.Errorf("public route (direct): code = %d, want 403", rec.Code)
 	}
-	// Platform route with auth → 200
-	if rec := doRequestWithRole(t, m.Router(), "GET", "/platform/admin/items", auth.RoleAdmin); rec.Code != 200 {
-		t.Errorf("platform route with admin: code = %d, want 200", rec.Code)
+	// Platform route without the proxy token → 403 not_proxied (the guard
+	// fronts PlatformAuth, so an unauthenticated direct call is caught here).
+	if rec := doRequest(t, m.Router(), "GET", "/platform/admin/items"); rec.Code != http.StatusForbidden {
+		t.Errorf("platform route without auth: code = %d, want 403", rec.Code)
+	}
+	// Platform route proxied with the token → PlatformAuth then reads the
+	// trusted identity headers (admin) → 200.
+	req := httptest.NewRequest("GET", "/platform/admin/items", nil)
+	req.Header.Set(auth.HeaderInternalSecret, "secret")
+	req.Header.Set(auth.HeaderUserID, "u-1")
+	req.Header.Set(auth.HeaderAppID, "a-1")
+	req.Header.Set(auth.HeaderAppRole, auth.RoleAdmin)
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Errorf("platform route (proxied, admin): code = %d, want 200", rec.Code)
 	}
 }
 

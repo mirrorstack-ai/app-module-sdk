@@ -492,3 +492,174 @@ func TestPlatformAuth_PlatformToken_OldHeaderIgnored(t *testing.T) {
 		t.Errorf("expected 401 when sending old header while platform token is configured, got %d", rec.Code)
 	}
 }
+
+// --- RequireProxy (not_proxied guard) ---
+
+func TestRequireProxy_NoSecret_Inert(t *testing.T) {
+	// Pure standalone `go test`: no platform token configured → the guard MUST
+	// pass through so module unit tests run unmodified.
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	// Even a spoofed app-id header is fine here — there's no token to enforce
+	// against, so the surface is simply open (local dev / unit test).
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderAppID, "spoofed-app")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (inert without configured token), got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_InLambda_PassThrough(t *testing.T) {
+	// In Lambda the runtime strips X-MS-* headers and injects identity from the
+	// typed payload, so there is no token header to match — the guard must pass
+	// through (otherwise every Lambda request 403s).
+	t.Setenv("MS_PLATFORM_TOKEN", "tok")
+	handler := requireProxy(true)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil) // no headers (stripped)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (Lambda payload is the trust boundary), got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_TokenConfigured_NoHeader_403NotProxied(t *testing.T) {
+	// HTTP dev/tunnel path with a token configured: a direct caller (no token)
+	// is rejected with 403 not_proxied.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderAppID, "spoofed-app") // attacker tries to assert app context
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), CodeNotProxied) {
+		t.Errorf("expected body to carry code %q, got %s", CodeNotProxied, rec.Body.String())
+	}
+}
+
+func TestRequireProxy_TokenConfigured_WrongToken_403(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "wrong-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for wrong token, got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_TokenConfigured_ValidToken_PassThrough(t *testing.T) {
+	// The proxied request (dispatch injected the matching X-MS-Platform-Token)
+	// is trusted and reaches the handler.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "real-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for valid proxied request, got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_LegacyInternalSecretHeader(t *testing.T) {
+	// When only MS_INTERNAL_SECRET is configured (legacy / internal-secret-only
+	// sessions), the guard matches the X-MS-Internal-Secret header — same
+	// fallback platformSecretReader uses for internalAuth.
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "legacy-secret")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderInternalSecret, "legacy-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 with valid legacy internal secret, got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_TokenFile_Refresh(t *testing.T) {
+	// MS_PLATFORM_TOKEN_FILE is re-read per request so a CLI reconnect that
+	// rotates the token is picked up without restarting the module.
+	dir := t.TempDir()
+	file := dir + "/token"
+	if err := os.WriteFile(file, []byte("first-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", file)
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "first-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with first token, got %d", rec.Code)
+	}
+
+	// Rotate the token on disk; the old header should now be rejected.
+	if err := os.WriteFile(file, []byte("second-token\n"), 0o600); err != nil {
+		t.Fatalf("rotate token file: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/public/me", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 after token rotation with no/old header, got %d", rec.Code)
+	}
+}
+
+func TestRequireProxy_TokenFile_ReadError_FailsClosed(t *testing.T) {
+	// MS_PLATFORM_TOKEN_FILE is set (the operator intends enforcement) but the
+	// file can't be read (missing/deleted/bad perms/mid-rotation). The guard
+	// must FAIL CLOSED — 403 not_proxied — not silently pass through. A
+	// transient I/O error turning the guard inert would be a security hole.
+	missing := t.TempDir() + "/does-not-exist"
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", missing)
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	// Even a request that carries SOME token header must be rejected: there is
+	// no readable expected value to match against, so nothing can be trusted.
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "anything")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when token file is unreadable, got %d", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, CodeNotProxied) {
+		t.Errorf("expected %q error code in body, got %q", CodeNotProxied, body)
+	}
+}
+
+func TestRequireProxy_TokenFile_ReadError_NotMistakenForUnconfigured(t *testing.T) {
+	// Guards against a regression where a token-file read error collapses to
+	// the "no secret configured" path (configured=false) and bypasses. Here the
+	// file is configured but unreadable, so SecretConfigured stays true and the
+	// guard enforces.
+	missing := t.TempDir() + "/does-not-exist"
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", missing)
+	if !SecretConfigured() {
+		t.Fatal("SecretConfigured() must be true when MS_PLATFORM_TOKEN_FILE is set even if unreadable")
+	}
+}

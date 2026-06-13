@@ -101,6 +101,16 @@ type Module struct {
 	contribReg     *contributions.Registry // declared contribution slots
 	contribStorage *contributions.Storage  // contributions table CRUD
 	internalAuth   func(http.Handler) http.Handler
+	// proxyGuard rejects non-proxied requests on the public + platform
+	// surfaces (auth.RequireProxy). Captured once at New() so every
+	// Public/Platform registration reuses one closure, matching internalAuth.
+	proxyGuard func(http.Handler) http.Handler
+	// platformAuth promotes trusted-forwarder identity headers on the platform
+	// surface (auth.PlatformAuth). Captured once at New() — same "captured
+	// once" contract as internalAuth/proxyGuard — so every Platform()
+	// registration reuses one closure instead of re-reading env + re-allocating
+	// the closure (and its secret snapshot) on each call.
+	platformAuth func(http.Handler) http.Handler
 	poolCache      *db.PoolCache // production: per-app DB pools
 	devDBOnce      sync.Once     // dev mode: lazy DB init
 	devDB          *db.DB
@@ -205,24 +215,33 @@ func New(cfg Config) (*Module, error) {
 		contribReg:     contributions.NewRegistry(),
 		contribStorage: contributions.NewStorage(cfg.ID),
 		internalAuth:   auth.InternalAuth(),
+		proxyGuard:     auth.RequireProxy(),
+		platformAuth:   auth.PlatformAuth(),
 		poolCache:      db.NewPoolCache(),
 		cacheCache:     cache.NewClientCache(),
 		taskHandlers:   make(map[string]taskEntry),
 		signingKey:     []byte(os.Getenv("MS_TASK_SIGNING_KEY")),
 	}
 
-	// Local-dev CORS: when MS_INTERNAL_SECRET is unset (i.e. the
-	// auth/PlatformAuth + InternalAuth bypass branch is active), echo
-	// the request Origin so a module's React bundle running on the
+	// Local-dev CORS: when NO platform-secret source is configured (i.e. the
+	// auth/PlatformAuth + InternalAuth + proxy-guard bypass branch is active),
+	// echo the request Origin so a module's React bundle running on the
 	// platform's domain (e.g. localhost:3001) can fetch the module's
 	// own /platform/* and /me endpoints cross-origin. Wildcard "*"
 	// won't do — the bundle's api.ts uses credentials: 'include' for
 	// the /me cookie flow, and browsers reject "*" with credentials.
 	//
-	// Tunnel/prod (secret set) leaves CORS off entirely — bundles in
-	// those modes go through the platform proxy at same-origin, so
+	// Tunnel/prod (a secret is configured) leaves CORS off entirely — bundles
+	// in those modes go through the platform proxy at same-origin, so
 	// cross-origin requests from random origins shouldn't be allowed.
-	if os.Getenv("MS_INTERNAL_SECRET") == "" {
+	//
+	// Gate on the FULL secret chain (auth.SecretConfigured), not just
+	// MS_INTERNAL_SECRET: with the MS_PLATFORM_TOKEN[_FILE] > MS_INTERNAL_SECRET
+	// hierarchy, a tunnel module may carry only MS_PLATFORM_TOKEN. Checking the
+	// old single var would attach permissive credentialed CORS in that
+	// enforcing mode — reflecting arbitrary origins, the exact surface this
+	// dev-only helper must never expose outside local dev.
+	if !auth.SecretConfigured() {
 		m.router.Use(localDevCORS)
 	}
 
@@ -282,14 +301,23 @@ func (m *Module) Router() *chi.Mux { return m.router }
 // Default role gate: admin only. Use Module.RequirePermission to
 // open routes to member/viewer.
 func (m *Module) Platform(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopePlatform, auth.PlatformAuth(), fn)
+	// proxyGuard runs BEFORE PlatformAuth: reject non-proxied callers at the
+	// trust boundary, then let PlatformAuth read the now-trusted identity
+	// headers. (PlatformAuth already validates the platform token on its own,
+	// so the guard is belt-and-suspenders here, but keeping it makes the
+	// public + platform surfaces enforce identically and auditably.)
+	m.scopedRoutes(registry.ScopePlatform, fn, m.proxyGuard, m.platformAuth)
 }
 
 // Public registers routes with public auth scope (anyone, including
 // anonymous). Auto-mounted under /public/ — write `r.Get("/me", ...)`
 // and the route lands at /public/me.
 func (m *Module) Public(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopePublic, nil, fn)
+	// proxyGuard is the ONLY thing standing between a direct caller and the
+	// public surface trusting spoofable X-MS-App-ID / X-MS-User-ID /
+	// X-MS-App-Role. Public scope has no role gate, so this is where the
+	// not_proxied check has to live.
+	m.scopedRoutes(registry.ScopePublic, fn, m.proxyGuard)
 }
 
 // Internal registers routes with internal auth scope (platform-to-module
@@ -299,7 +327,7 @@ func (m *Module) Public(fn func(r chi.Router)) {
 // is cached on the Module at New() so OnEvent / Cron registrations reuse a
 // single closure instead of constructing one per call.
 func (m *Module) Internal(fn func(r chi.Router)) {
-	m.scopedRoutes(registry.ScopeInternal, m.internalAuth, fn)
+	m.scopedRoutes(registry.ScopeInternal, fn, m.internalAuth)
 }
 
 // internalRouteBodyCap is the default body size limit for Internal-scope
@@ -346,13 +374,15 @@ func (m *Module) mountSystemInternalRoute(method, path string, handler http.Hand
 // route tree, which indicates a misconfigured module that should not start.
 // Panic instead of silently leaving the registry and router in inconsistent
 // states (some routes recorded but not re-registered, or vice versa).
-func (m *Module) scopedRoutes(scope registry.Scope, scopeMiddleware func(http.Handler) http.Handler, fn func(r chi.Router)) {
+func (m *Module) scopedRoutes(scope registry.Scope, fn func(r chi.Router), scopeMiddleware ...func(http.Handler) http.Handler) {
 	sub := chi.NewRouter()
 	if scope == registry.ScopeInternal {
 		sub.Use(httputil.MaxBytes(internalRouteBodyCap))
 	}
-	if scopeMiddleware != nil {
-		sub.Use(scopeMiddleware)
+	for _, mw := range scopeMiddleware {
+		if mw != nil {
+			sub.Use(mw)
+		}
 	}
 	sub.Route("/"+string(scope), fn)
 
@@ -668,11 +698,15 @@ func parseTaskConcurrency() (int, error) {
 	return n, nil
 }
 
-// requireInternalSecret errors if MS_INTERNAL_SECRET is unset — used by
-// Module.Start() in Lambda mode to fail init before lambda.Start handoff.
+// requireInternalSecret errors if no platform-secret source is configured —
+// used by Module.Start() in Lambda mode to fail init before lambda.Start
+// handoff. It checks the full hierarchy (auth.SecretConfigured:
+// MS_PLATFORM_TOKEN[_FILE] > MS_INTERNAL_SECRET) rather than a single var name,
+// so a Lambda module configured with the preferred MS_PLATFORM_TOKEN key (which
+// the auth guards already accept) is not blocked at Start.
 func requireInternalSecret() error {
-	if os.Getenv("MS_INTERNAL_SECRET") == "" {
-		return errors.New("mirrorstack: MS_INTERNAL_SECRET not set — required for platform routes in Lambda mode")
+	if !auth.SecretConfigured() {
+		return errors.New("mirrorstack: no platform secret set (MS_PLATFORM_TOKEN / MS_INTERNAL_SECRET) — required for platform routes in Lambda mode")
 	}
 	return nil
 }
@@ -876,8 +910,10 @@ func StoredContributions(ctx context.Context, slot string) ([]contributions.Cont
 }
 
 // localDevCORS echoes the request Origin (with credentials) and answers
-// OPTIONS preflights. Installed on the module router only when
-// MS_INTERNAL_SECRET is unset — gated parallel to the auth bypasses.
+// OPTIONS preflights. Installed on the module router only when no
+// platform-secret source is configured (auth.SecretConfigured() == false) —
+// gated parallel to the auth/proxy-guard bypasses so it is never active in
+// tunnel/prod, regardless of which secret env var carries the token.
 func localDevCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin != "" {
