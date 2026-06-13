@@ -506,7 +506,11 @@ func TestScopes_AutoMountUnderPrefix(t *testing.T) {
 		suffix    string
 		needsAuth bool // Internal scope needs MS_INTERNAL_SECRET to reach the handler
 	}{
-		{registry.ScopePlatform, "GET", "/users", false}, // local-dev bypass injects synthetic admin
+		// No secret configured here, so the proxy guard is INERT and PlatformAuth
+		// takes the local-dev bypass (synthetic admin). This test only proves
+		// auto-mount under the prefix — guard ENFORCEMENT is covered by the
+		// TestPublic_ProxyGuard_* / TestRequireProxy_* tests, not here.
+		{registry.ScopePlatform, "GET", "/users", false},
 		{registry.ScopePublic, "GET", "/me", false},
 		{registry.ScopeInternal, "POST", "/sessions", true},
 	}

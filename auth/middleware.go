@@ -64,7 +64,7 @@ func PlatformAuth() func(http.Handler) http.Handler {
 //	                          where the CLI sets the secret)
 func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 	readSecret := platformSecretReader()
-	if expected, _ := readSecret(); expected == "" && !inLambda {
+	if _, _, configured := readSecret(); !configured && !inLambda {
 		log.Printf("mirrorstack: no platform secret set; platform routes bypass auth with synthetic admin identity (local dev)")
 	}
 
@@ -76,10 +76,13 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 				return
 			}
 
-			expected, header := readSecret()
+			expected, header, configured := readSecret()
 
-			// Step 2: local-dev bypass — inject synthetic admin.
-			if expected == "" && !inLambda {
+			// Step 2: local-dev bypass — inject synthetic admin. Only when NO
+			// secret source is configured; a configured-but-unreadable secret
+			// (configured=true, expected="") falls through to Step 3/4 and
+			// fails closed rather than minting a synthetic admin.
+			if !configured && !inLambda {
 				ctx := Set(r.Context(), Identity{
 					UserID:  "local-dev-user",
 					AppID:   "local-dev-app",
@@ -89,9 +92,11 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Step 3: Lambda + no secret is a misconfig.
+			// Step 3: no usable secret (Lambda misconfig, or a configured token
+			// file that could not be read) → reject. 503 signals operator
+			// misconfiguration to platform alerting.
 			if expected == "" {
-				log.Printf("mirrorstack: platform auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
+				log.Printf("mirrorstack: platform auth rejected (no usable secret; configured=%v) from %s %s", configured, r.RemoteAddr, r.URL.Path)
 				httputil.JSON(w, http.StatusServiceUnavailable, httputil.ErrorResponse{
 					Error: "service unavailable",
 				})
@@ -168,7 +173,7 @@ func InternalAuth() func(http.Handler) http.Handler {
 // when tunneling).
 func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 	readSecret := platformSecretReader()
-	if expected, _ := readSecret(); expected == "" {
+	if _, _, configured := readSecret(); !configured {
 		if inLambda {
 			log.Printf("mirrorstack: WARNING — no platform secret set, all internal routes will be rejected")
 		} else {
@@ -178,11 +183,14 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			expected, header := readSecret()
+			expected, header, configured := readSecret()
 
 			if expected == "" {
-				if inLambda {
-					log.Printf("mirrorstack: internal auth rejected (no secret configured) from %s %s", r.RemoteAddr, r.URL.Path)
+				// Lambda misconfig OR a configured-but-unreadable token file →
+				// 503 (fail closed). Only the genuinely unconfigured local-dev
+				// state (configured=false, not in Lambda) bypasses.
+				if inLambda || configured {
+					log.Printf("mirrorstack: internal auth rejected (no secret configured/usable; source_configured=%v) from %s %s", configured, r.RemoteAddr, r.URL.Path)
 					httputil.JSON(w, http.StatusServiceUnavailable, httputil.ErrorResponse{
 						Error: "service unavailable",
 					})
@@ -244,6 +252,12 @@ func RequireProxy() func(http.Handler) http.Handler {
 //	                          `mirrorstack dev` / `--tunnel` / self-hosted HTTP
 //	                          path where dispatch forwards raw headers and injects
 //	                          X-MS-Platform-Token.
+//	local + token file set  → FAIL CLOSED: when MS_PLATFORM_TOKEN_FILE is set but
+//	  but unreadable           the file can't be read (deleted mid-rotation, bad
+//	                          perms, tmpfs full), the secret SOURCE is configured
+//	                          so the guard rejects (403 not_proxied) rather than
+//	                          silently going inert. A transient I/O error must
+//	                          never turn an enforcing guard into a no-op.
 //
 // CRITICAL: an accidentally-inert guard in production is a security hole; an
 // accidentally-active guard in standalone tests bricks every module's tests.
@@ -260,11 +274,24 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 				return
 			}
 
-			expected, header := readSecret()
+			expected, header, configured := readSecret()
 
-			// No token configured: inert (standalone unit tests).
-			if expected == "" {
+			// No token SOURCE configured: inert (standalone unit tests).
+			if !configured {
 				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Configured but the secret could not be read this call (e.g. the
+			// token file is missing, unreadable, or mid-rotation). Fail CLOSED:
+			// the guard was meant to enforce, so a transient I/O error must
+			// reject rather than silently pass every request through.
+			if expected == "" {
+				log.Printf("mirrorstack: proxy guard rejected (token source configured but unreadable) from %s %s", r.RemoteAddr, r.URL.Path)
+				httputil.JSON(w, http.StatusForbidden, httputil.ErrorResponse{
+					Error: "request did not come through the platform proxy",
+					Code:  CodeNotProxied,
+				})
 				return
 			}
 
@@ -282,10 +309,23 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 	}
 }
 
-// secretReader returns the current secret and which header carries it.
-// The file-backed variant re-reads on every call so a refreshed token
-// (CLI reconnect) is picked up without restarting the module process.
-type secretReader func() (expected, header string)
+// secretReader returns the current secret, which header carries it, and
+// whether a secret SOURCE is configured at all. The file-backed variant
+// re-reads on every call so a refreshed token (CLI reconnect) is picked up
+// without restarting the module process.
+//
+// `configured` distinguishes two states that both yield an empty `expected`:
+//
+//   - no source configured (no env var set)        → configured=false
+//   - source configured but unreadable this call   → configured=true, expected=""
+//     (e.g. MS_PLATFORM_TOKEN_FILE points at a file that is missing,
+//     unreadable, or mid-rotation)
+//
+// Guards MUST fail CLOSED on the second state: a configured-but-unreadable
+// secret means the operator intended enforcement, so a transient I/O error
+// must reject rather than silently make the guard inert. Only the genuinely
+// unconfigured state (configured=false) takes the local-dev bypass path.
+type secretReader func() (expected, header string, configured bool)
 
 // platformSecretReader builds the reader once at middleware construction.
 //   - MS_PLATFORM_TOKEN_FILE set → read from file per call (dev)
@@ -293,19 +333,35 @@ type secretReader func() (expected, header string)
 //   - MS_INTERNAL_SECRET set     → static, captured once (legacy)
 func platformSecretReader() secretReader {
 	if file := os.Getenv("MS_PLATFORM_TOKEN_FILE"); file != "" {
-		return func() (string, string) {
+		return func() (string, string, bool) {
 			data, err := os.ReadFile(file)
 			if err != nil {
-				return "", HeaderPlatformToken
+				// Configured but unreadable: signal configured=true so guards
+				// fail closed instead of treating this as "no secret set".
+				log.Printf("mirrorstack: MS_PLATFORM_TOKEN_FILE %q read error: %v (failing closed)", file, err)
+				return "", HeaderPlatformToken, true
 			}
-			return strings.TrimSpace(string(data)), HeaderPlatformToken
+			return strings.TrimSpace(string(data)), HeaderPlatformToken, true
 		}
 	}
 	if v := os.Getenv("MS_PLATFORM_TOKEN"); v != "" {
-		return func() (string, string) { return v, HeaderPlatformToken }
+		return func() (string, string, bool) { return v, HeaderPlatformToken, true }
 	}
-	v := os.Getenv("MS_INTERNAL_SECRET")
-	return func() (string, string) { return v, HeaderInternalSecret }
+	if v := os.Getenv("MS_INTERNAL_SECRET"); v != "" {
+		return func() (string, string, bool) { return v, HeaderInternalSecret, true }
+	}
+	return func() (string, string, bool) { return "", HeaderInternalSecret, false }
+}
+
+// SecretConfigured reports whether any platform-secret source
+// (MS_PLATFORM_TOKEN_FILE / MS_PLATFORM_TOKEN / MS_INTERNAL_SECRET) is set.
+// It is the single source of truth for "are we in local-dev (no secret) mode",
+// used by the SDK to gate local-dev-only behavior (e.g. permissive CORS) so
+// that gate stays in lockstep with the auth/proxy guards' bypass branches
+// rather than checking one specific env var name.
+func SecretConfigured() bool {
+	_, _, configured := platformSecretReader()()
+	return configured
 }
 
 func constantTimeEqual(a, b string) bool {

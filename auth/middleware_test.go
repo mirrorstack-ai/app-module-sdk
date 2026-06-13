@@ -628,3 +628,38 @@ func TestRequireProxy_TokenFile_Refresh(t *testing.T) {
 		t.Errorf("expected 403 after token rotation with no/old header, got %d", rec.Code)
 	}
 }
+
+func TestRequireProxy_TokenFile_ReadError_FailsClosed(t *testing.T) {
+	// MS_PLATFORM_TOKEN_FILE is set (the operator intends enforcement) but the
+	// file can't be read (missing/deleted/bad perms/mid-rotation). The guard
+	// must FAIL CLOSED — 403 not_proxied — not silently pass through. A
+	// transient I/O error turning the guard inert would be a security hole.
+	missing := t.TempDir() + "/does-not-exist"
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", missing)
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	// Even a request that carries SOME token header must be rejected: there is
+	// no readable expected value to match against, so nothing can be trusted.
+	req := httptest.NewRequest("GET", "/public/me", nil)
+	req.Header.Set(HeaderPlatformToken, "anything")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when token file is unreadable, got %d", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, CodeNotProxied) {
+		t.Errorf("expected %q error code in body, got %q", CodeNotProxied, body)
+	}
+}
+
+func TestRequireProxy_TokenFile_ReadError_NotMistakenForUnconfigured(t *testing.T) {
+	// Guards against a regression where a token-file read error collapses to
+	// the "no secret configured" path (configured=false) and bypasses. Here the
+	// file is configured but unreadable, so SecretConfigured stays true and the
+	// guard enforces.
+	missing := t.TempDir() + "/does-not-exist"
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", missing)
+	if !SecretConfigured() {
+		t.Fatal("SecretConfigured() must be true when MS_PLATFORM_TOKEN_FILE is set even if unreadable")
+	}
+}
