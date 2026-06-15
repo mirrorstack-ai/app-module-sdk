@@ -104,7 +104,12 @@ func MCPResource[Out any](name, description string, handler func(ctx context.Con
 
 func deriveSchema[T any]() (json.RawMessage, error) {
 	var zero T
-	return json.Marshal(jsonschema.Reflect(zero))
+	// DoNotReference inlines the struct schema so the top level is a concrete
+	// {"type":"object",...} rather than invopop's default {"$ref":"#/$defs/..."}.
+	// The MCP spec requires inputSchema/outputSchema to be an object schema with
+	// type:"object"; a top-level $ref makes clients reject the whole tools/list.
+	r := &jsonschema.Reflector{DoNotReference: true}
+	return json.Marshal(r.Reflect(zero))
 }
 
 // wrapMCPToolHandler adapts a typed handler into the type-erased registry form.
