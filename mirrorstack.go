@@ -138,8 +138,62 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) { return core.Cach
 // Storage returns a scoped storage client on the default module.
 func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(ctx) }
 
-// Meter returns a scoped meter for recording usage events on the default module.
-func Meter(ctx context.Context) meter.Meter { return core.Meter(ctx) }
+// Kind is a usage-metric's billing semantic: Counter (additive; SUM) or Gauge
+// (absolute level; MAX / time-weighted integral, never summed).
+type Kind = meter.Kind
+
+// Counter and Gauge are the two metric kinds passed to Meter.
+const (
+	Counter = meter.Counter
+	Gauge   = meter.Gauge
+)
+
+// MetricOption configures a metric at declaration (Unit, Price).
+type MetricOption = meter.MetricOption
+
+// Unit sets a metric's display unit (e.g. "order", "byte"). Optional.
+func Unit(u string) MetricOption { return meter.Unit(u) }
+
+// Price sets a metric's per-unit CUSTOMER price in micro-dollars (1e-6 USD).
+// Optional — omit to meter without charging. The platform charges
+// quantity × this price with NO blanket markup for a module's custom metric.
+func Price(microDollars int64) MetricOption { return meter.Price(microDollars) }
+
+// Meter DECLARES a usage metric on the default module. Call it ONCE per metric
+// in startup code (exactly like ms.Emits / ms.RegisterPermission) — it registers
+// the metric as a SIDE EFFECT and returns NOTHING. The declaration (name + kind
+// + unit + price) is recorded in the manifest so the platform's metric catalog
+// is authoritative before any event arrives.
+//
+// kind is ms.Counter (additive; platform SUMs) or ms.Gauge (absolute level;
+// platform takes MAX or a time-weighted integral). Emit at runtime BY NAME with
+// ms.Record(ctx, name, value) — mirroring ms.Emits/ms.Emit; the platform reads
+// the declared kind from the catalog, so a call site can never mislabel a metric.
+//
+// Panics on a duplicate metric name, an invalid name, an unknown kind, or a
+// reserved infra.*/platform.* prefix.
+//
+//	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
+func Meter(name string, kind Kind, opts ...MetricOption) {
+	core.Meter(name, kind, opts...)
+}
+
+// Record emits a usage event for the metric DECLARED (via ms.Meter) under name
+// — BY NAME, exactly mirroring ms.Emit. The platform reads the declared kind
+// from its catalog to decide how to aggregate, so the call site never repeats
+// the kind.
+//
+// Declaration-first: Record returns an error if name was never declared via
+// ms.Meter (fail fast). It also returns an error (never panics) if value is
+// negative or non-finite. A billing failure must NEVER fail the handler — log
+// the error, don't propagate it.
+//
+//	if err := ms.Record(r.Context(), "orders.placed", 1); err != nil {
+//	    log.Printf("meter: %v", err) // don't fail the handler
+//	}
+func Record(ctx context.Context, name string, value float64) error {
+	return core.Record(ctx, name, value)
+}
 
 // --- Inter-module calls ---
 

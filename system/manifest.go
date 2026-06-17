@@ -32,7 +32,12 @@ type ManifestPayload struct {
 	Schedules    []registry.Schedule                 `json:"schedules"`
 	Tasks        []registry.Task                     `json:"tasks"`
 	Permissions  []registry.Permission               `json:"permissions"`
-	MCP          ManifestMCP                         `json:"mcp"`
+	// Metrics lists the usage metrics this module declares (ms.Meter). The
+	// platform populates its metric_definitions catalog (kind/unit/price) from
+	// this at install/publish, so the catalog is authoritative before any usage
+	// event arrives. Omitted when the module declares no metrics.
+	Metrics []registry.MetricDecl `json:"metrics,omitempty"`
+	MCP     ManifestMCP           `json:"mcp"`
 	// UI is the module's declared UI surface (RegisterUI). Nil/absent when
 	// the module ships no UI — callers must nil-check before reading.
 	UI *registry.ModuleUI `json:"ui,omitempty"`
@@ -152,6 +157,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Schedules:     reg.Schedules(),
 			Tasks:         reg.Tasks(),
 			Permissions:   reg.Permissions(),
+			Metrics:       reg.Metrics(),
 			MCP:           buildManifestMCP(reg),
 			UI:            reg.UI(),
 			Provides:      contribSlots,

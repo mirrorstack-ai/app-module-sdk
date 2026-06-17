@@ -14,6 +14,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	p "github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -959,7 +960,8 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"Cron":               func() { Cron("cleanup", "0 3 * * *", func(w http.ResponseWriter, r *http.Request) {}) },
 		"OnTask":             func() { OnTask("work", func(ctx context.Context, p json.RawMessage) error { return nil }) },
 		"RunTask":            func() { _, _ = RunTask(context.Background(), "work", nil) },
-		"Meter":              func() { _ = Meter(context.Background()).Record("m", 1) },
+		"Meter":              func() { Meter("m", meter.Counter) },
+		"Record":             func() { _ = Record(context.Background(), "m", 1) },
 		"ModuleDB":           func() { _, _, _ = ModuleDB(context.Background()) },
 		"ModuleTx":           func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 		"DependsOn":          func() { DependsOn("other") },

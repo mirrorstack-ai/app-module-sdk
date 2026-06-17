@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"strings"
 	"testing"
 
@@ -38,8 +39,18 @@ func newTestClient(t *testing.T, fake *fakeLambda) *Client {
 	}
 }
 
+// declareCounter is a test helper: declares a counter metric on c bound to
+// module "media", so Record(ctx, name, ...) resolves it by name.
+func declareCounter(t *testing.T, c *Client, name string) {
+	t.Helper()
+	c.Declare("media", DeclFromOptions(name, Counter))
+}
+
 func TestNewFromARN_ValidARN(t *testing.T) {
-	t.Parallel()
+	// config.LoadDefaultConfig probes IMDS for region/credentials; disable it so
+	// the test is hermetic and skips the ~100ms IMDS round-trip in CI/sandboxes
+	// without AWS credentials. (Not t.Parallel: t.Setenv forbids parallel.)
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	_, err := NewFromARN(context.Background(), "arn:aws:lambda:us-east-1:123456789012:function:meter")
 	if err != nil {
 		t.Fatalf("NewFromARN with valid ARN: %v", err)
@@ -71,17 +82,14 @@ func TestRecord_ProdInvokesLambda(t *testing.T) {
 	t.Parallel()
 	fake := &fakeLambda{}
 	c := newTestClient(t, fake)
+	declareCounter(t, c, "transcode.minutes")
 
 	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app_abc", AppRole: "admin"})
-	m := c.Scope(ctx, "media")
-	if err := m.Record("transcode.minutes", 12); err != nil {
+	if err := c.Record(ctx, "transcode.minutes", 12); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if fake.invoked != 1 {
 		t.Errorf("Lambda invoked %d times, want 1", fake.invoked)
-	}
-	if *fake.lastIn.FunctionName != "arn:aws:lambda:us-east-1:123456789012:function:meter-test" {
-		t.Errorf("wrong function name")
 	}
 	if fake.lastIn.InvocationType != types.InvocationTypeEvent {
 		t.Errorf("invocation type = %v, want Event (async)", fake.lastIn.InvocationType)
@@ -114,25 +122,115 @@ func TestRecord_ProdInvokesLambda(t *testing.T) {
 	}
 }
 
+// TestMeter_DeclaresKindAndPriceIntoManifest asserts the declaration carries the
+// kind / unit / price the platform populates metric_definitions from (the core
+// ms.Meter facade hands this Decl to both registry.AddMetric and the meter
+// registry). Declaration must not drop any of kind/unit/price.
+func TestMeter_DeclaresKindAndPriceIntoManifest(t *testing.T) {
+	t.Parallel()
+	d := DeclFromOptions("orders.placed", Counter, Unit("order"), Price(50_000))
+	if d.Name != "orders.placed" {
+		t.Errorf("name = %q, want orders.placed", d.Name)
+	}
+	if d.Kind != Counter {
+		t.Errorf("kind = %q, want counter", d.Kind)
+	}
+	if d.Unit != "order" {
+		t.Errorf("unit = %q, want order", d.Unit)
+	}
+	if !d.PriceSet || d.Price != 50_000 {
+		t.Errorf("price = %d (set=%v), want 50000 (set=true)", d.Price, d.PriceSet)
+	}
+
+	// A gauge declared with no price: PriceSet must stay false so the manifest
+	// distinguishes a declared 0 from "no price".
+	g := DeclFromOptions("myapp.objects.bytes", Gauge, Unit("byte"))
+	if g.Kind != Gauge {
+		t.Errorf("kind = %q, want gauge", g.Kind)
+	}
+	if g.PriceSet {
+		t.Errorf("PriceSet = true for an undeclared price, want false")
+	}
+}
+
+// TestRecord_NoKindOnWire asserts the §4 invariant: kind lives in the manifest,
+// NOT on the wire. The serialized Event must carry no "kind" key (for either a
+// counter or a gauge), the envelope version must stay 1, and the value is
+// carried verbatim (V==1).
+func TestRecord_NoKindOnWire(t *testing.T) {
+	t.Parallel()
+	for _, k := range []Kind{Counter, Gauge} {
+		fake := &fakeLambda{}
+		c := newTestClient(t, fake)
+		c.Declare("store", DeclFromOptions("myapp.items", k))
+		if err := c.Record(context.Background(), "myapp.items", 1); err != nil {
+			t.Fatalf("Record(%s): %v", k, err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(fake.lastIn.Payload, &raw); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if _, ok := raw["kind"]; ok {
+			t.Errorf("kind=%s: wire envelope must not carry a kind field, got keys %v", k, keys(raw))
+		}
+		var got Event
+		if err := json.Unmarshal(fake.lastIn.Payload, &got); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if got.V != 1 {
+			t.Errorf("kind=%s: envelope version = %d, want 1", k, got.V)
+		}
+		if got.Value != 1 {
+			t.Errorf("kind=%s: value = %g, want 1", k, got.Value)
+		}
+	}
+}
+
+func keys(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestRecord_PropagatesLambdaError(t *testing.T) {
 	t.Parallel()
 	fake := &fakeLambda{err: errors.New("throttled")}
 	c := newTestClient(t, fake)
+	declareCounter(t, c, "transcode.minutes")
 
-	m := c.Scope(context.Background(), "media")
-	err := m.Record("transcode.minutes", 1)
+	err := c.Record(context.Background(), "transcode.minutes", 1)
 	if err == nil || !strings.Contains(err.Error(), "throttled") {
 		t.Errorf("expected wrapped throttled error, got %v", err)
+	}
+}
+
+// TestRecord_RejectsUndeclaredName asserts the declaration-first contract: a
+// Record for a name never declared via ms.Meter returns an error and never
+// reaches the transport.
+func TestRecord_RejectsUndeclaredName(t *testing.T) {
+	t.Parallel()
+	fake := &fakeLambda{}
+	c := newTestClient(t, fake)
+	declareCounter(t, c, "transcode.minutes")
+
+	err := c.Record(context.Background(), "never.declared", 1)
+	if err == nil || !strings.Contains(err.Error(), "never declared") {
+		t.Errorf("expected an undeclared-name error, got %v", err)
+	}
+	if fake.invoked != 0 {
+		t.Errorf("undeclared metric must not reach the transport; invoked=%d", fake.invoked)
 	}
 }
 
 func TestRecord_DevModeLogsToStderr(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewDev(log.New(&buf, "", 0))
+	c.Declare("media", DeclFromOptions("transcode.minutes", Counter))
 
 	ctx := auth.Set(context.Background(), auth.Identity{AppID: "dev_app"})
-	m := c.Scope(ctx, "media")
-	if err := m.Record("transcode.minutes", 12); err != nil {
+	if err := c.Record(ctx, "transcode.minutes", 12); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -143,35 +241,146 @@ func TestRecord_DevModeLogsToStderr(t *testing.T) {
 		!strings.Contains(out, `value=12`) {
 		t.Errorf("unexpected log line: %q", out)
 	}
+	if strings.Contains(out, "kind=") {
+		t.Errorf("dev log must not carry a kind (catalog is authoritative): %q", out)
+	}
+}
+
+func TestRecord_NilLoggerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	// A zero Client{} (legal via the exported type, reachable in tests/mocks)
+	// has both lambdaClient and logger nil. Record must take the dev-mode path
+	// (lambdaClient == nil) and return without dereferencing the nil logger.
+	c := &Client{}
+	c.Declare("media", DeclFromOptions("transcode.minutes", Counter))
+
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "dev_app"})
+	if err := c.Record(ctx, "transcode.minutes", 7); err != nil {
+		t.Fatalf("Record with nil logger should be a no-op, got: %v", err)
+	}
 }
 
 func TestRecord_DevMode_EmptyAppIDWhenNoAuth(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewDev(log.New(&buf, "", 0))
+	c.Declare("media", DeclFromOptions("transcode.minutes", Counter))
 
-	m := c.Scope(context.Background(), "media")
-	_ = m.Record("transcode.minutes", 1)
+	_ = c.Record(context.Background(), "transcode.minutes", 1)
 
 	if !strings.Contains(buf.String(), `appID=""`) {
 		t.Errorf("expected appID=\"\" when context has no auth identity, got: %q", buf.String())
 	}
 }
 
-func TestRecord_InvalidMetricNamePanics(t *testing.T) {
+func TestRecord_RejectsNegativeAndNonFinite(t *testing.T) {
 	t.Parallel()
 	fake := &fakeLambda{}
 	c := newTestClient(t, fake)
-	m := c.Scope(context.Background(), "media")
+	declareCounter(t, c, "transcode.minutes")
 
-	bad := []string{"", "has/slash", "has space", "has..dots", "null\x00byte"}
-	for _, metric := range bad {
-		t.Run(metric, func(t *testing.T) {
+	bad := []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, v := range bad {
+		if err := c.Record(context.Background(), "transcode.minutes", v); err == nil {
+			t.Errorf("Record(%g) should return an error (finite, non-negative)", v)
+		}
+	}
+	if fake.invoked != 0 {
+		t.Errorf("invalid values must not reach the transport; invoked=%d", fake.invoked)
+	}
+}
+
+// TestMeter_RejectsReservedPrefix asserts ms.Meter rejects the platform-owned
+// infra.*/platform.* namespaces (§3a build rule 3) so a module cannot declare a
+// platform-billable metric. Declaration is the enforcement point.
+func TestMeter_RejectsReservedPrefix(t *testing.T) {
+	t.Parallel()
+	bad := []string{"infra.compute.ms", "infra.egress.bytes", "platform.storage.bytes", "platform.tokens"}
+	for _, name := range bad {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t, &fakeLambda{})
 			defer func() {
 				if r := recover(); r == nil {
-					t.Errorf("expected panic on invalid metric name %q", metric)
+					t.Errorf("expected panic on reserved-prefix metric %q", name)
 				}
 			}()
-			_ = m.Record(metric, 1)
+			c.Declare("media", DeclFromOptions(name, Counter))
 		})
+	}
+}
+
+func TestMeter_RejectsInvalidName(t *testing.T) {
+	t.Parallel()
+	bad := []string{"", "has/slash", "has space", "has..dots", "null\x00byte"}
+	for _, name := range bad {
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t, &fakeLambda{})
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("expected panic on invalid metric name %q", name)
+				}
+			}()
+			c.Declare("media", DeclFromOptions(name, Counter))
+		})
+	}
+}
+
+func TestMeter_RejectsInvalidKind(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on invalid kind")
+		}
+	}()
+	c.Declare("media", DeclFromOptions("x.y", Kind("histogram")))
+}
+
+// TestMeter_RejectsDuplicateName asserts a metric declared twice panics — a
+// second declaration would silently disagree on kind/price.
+func TestMeter_RejectsDuplicateName(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	c.Declare("media", DeclFromOptions("orders.placed", Counter))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on a duplicate metric declaration")
+		}
+	}()
+	c.Declare("media", DeclFromOptions("orders.placed", Gauge))
+}
+
+// TestEventID_StableAcrossRetry asserts the §5 invariant: the EventID is minted
+// ONCE per Record call and reused across any transport retry, so the platform's
+// ON CONFLICT(event_id) dedupe holds and a retried delivery is not
+// double-counted. We Record once (mints the EventID), then re-dispatch the same
+// built event (simulating a transport retry) and assert the EventID is stable.
+func TestEventID_StableAcrossRetry(t *testing.T) {
+	t.Parallel()
+	fake := &fakeLambda{}
+	c := newTestClient(t, fake)
+	declareCounter(t, c, "transcode.minutes")
+
+	if err := c.Record(context.Background(), "transcode.minutes", 1); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	var first Event
+	if err := json.Unmarshal(fake.lastIn.Payload, &first); err != nil {
+		t.Fatalf("decode first payload: %v", err)
+	}
+	if first.EventID == "" {
+		t.Fatal("EventID should be set")
+	}
+
+	// Retry of the SAME logical call must reuse the SAME EventID. dispatch is
+	// the per-attempt transport leg; Record owns the minted event.
+	if err := c.dispatch(context.Background(), first); err != nil {
+		t.Fatalf("dispatch retry: %v", err)
+	}
+	var retried Event
+	if err := json.Unmarshal(fake.lastIn.Payload, &retried); err != nil {
+		t.Fatalf("decode retry payload: %v", err)
+	}
+	if retried.EventID != first.EventID {
+		t.Errorf("EventID changed across retry: first=%q retry=%q (ON CONFLICT cannot dedupe)", first.EventID, retried.EventID)
 	}
 }

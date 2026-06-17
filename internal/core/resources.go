@@ -5,6 +5,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
@@ -73,20 +74,47 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 	return m.devStorage, m.devStorageErr
 }
 
-// Meter returns a scoped meter for recording usage events (billing metrics).
-// Unlike DB/Cache/Storage, Meter returns the interface directly — there is
-// no release closure (nothing to release) and no construction error
-// (init errors happen eagerly in New()).
+// Meter DECLARES a usage metric. Call it once, up front (startup code), per
+// metric — exactly like Emits / RegisterPermission: it registers the metric as
+// a SIDE EFFECT and returns NOTHING. The declaration (name + kind + unit +
+// price) is recorded in the manifest so the platform's metric catalog is
+// authoritative before any event arrives, AND in the meter client's by-name
+// registry so Record can resolve the metric.
 //
-// In production (MS_METER_LAMBDA_ARN set), Record dispatches to the platform
-// meter Lambda via async invoke (~5-15ms per call). In dev mode, Record
-// logs to stderr.
+// kind is meter.Counter (additive; the platform SUMs) or meter.Gauge (absolute
+// level; the platform takes MAX or a time-weighted integral, never a SUM).
+// Options set the unit and the per-unit customer price (meter.Unit/meter.Price,
+// both optional).
 //
-//	if err := ms.Meter(r.Context()).Record("transcode.minutes", 12); err != nil {
-//	    log.Printf("meter: %v", err) // don't fail the handler
-//	}
-func (m *Module) Meter(ctx context.Context) meter.Meter {
-	return m.meterClient.Scope(ctx, m.config.ID)
+// Emit at runtime with the package-level Record(ctx, name, value) — BY NAME,
+// mirroring Emits/Emit. Panics on a duplicate metric name (a second
+// declaration would silently disagree on kind/price), an invalid name, an
+// unknown kind, or a reserved infra.*/platform.* prefix. Like the other Module
+// resource methods, it requires New() to have returned successfully — calling
+// it on a zero Module panics on the nil meterClient (the package-level
+// wrapper's mustDefault guards the before-Init case).
+//
+//	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
+func (m *Module) Meter(name string, kind meter.Kind, opts ...meter.MetricOption) {
+	d := meter.DeclFromOptions(name, kind, opts...)
+	// Declare validates name/kind/reserved-prefix and registers into the meter
+	// client's by-name registry (panics on a duplicate name there).
+	m.meterClient.Declare(m.config.ID, d)
+	decl := registry.MetricDecl{Name: d.Name, Kind: string(d.Kind), Unit: d.Unit}
+	if d.PriceSet {
+		p := d.Price
+		decl.Price = &p
+	}
+	m.registry.AddMetric(decl)
+}
+
+// Record emits a usage event for the metric declared (via Meter) under name —
+// BY NAME, mirroring Emit. Resolves the declared metric from the meter client's
+// registry; returns an error (never panics) if name was never declared, or if
+// value is negative/non-finite. A billing failure must never fail the handler,
+// so the error should be logged, not propagated.
+func (m *Module) Record(ctx context.Context, name string, value float64) error {
+	return m.meterClient.Record(ctx, name, value)
 }
 
 // Package-level convenience wrappers — dispatch to defaultModule.
@@ -101,8 +129,13 @@ func Storage(ctx context.Context) (storage.Storer, error) {
 	return mustDefault("Storage").Storage(ctx)
 }
 
-// Meter returns a scoped meter for recording usage events on the default module.
+// Meter declares a usage metric on the default module (side effect, no return).
 // Panics before Init.
-func Meter(ctx context.Context) meter.Meter {
-	return mustDefault("Meter").Meter(ctx)
+func Meter(name string, kind meter.Kind, opts ...meter.MetricOption) {
+	mustDefault("Meter").Meter(name, kind, opts...)
+}
+
+// Record emits a usage event by name on the default module. Panics before Init.
+func Record(ctx context.Context, name string, value float64) error {
+	return mustDefault("Record").Record(ctx, name, value)
 }
