@@ -1,10 +1,20 @@
-// Package meter emits usage events for billing to a platform-owned AWS
-// Lambda function via async invoke. See the Meter interface for the API.
+// Package meter is the module usage-metering surface. A module DECLARES each
+// metric once, up front, with its kind + unit + price; runtime code then emits
+// BY NAME with a single Record call — exactly mirroring ms.Emits (declare) /
+// ms.Emit (emit by name). Declaration registers the metric into the module
+// MANIFEST (via the registry, in core) AND into the module's meter registry, so
+// the platform can populate its metric catalog BEFORE any event arrives — and a
+// call site can never mislabel a metric's kind, because kind is read from the
+// catalog, not the wire. There is NO stored handle: Record resolves the metric
+// by name and fails fast if it was never declared (declaration-first).
 //
-// Security model: IAM invoke permission scoped to the exact meter ARN is
-// the sole access control. Wire-format fields suffixed with Hint (AppIDHint,
-// ModuleIDHint, RecordedAtHint) are NOT trusted — the platform meter Lambda
-// re-derives authoritative values from the invoker's AWS identity.
+// Security model: the SDK runs inside the module's own (untrusted) process.
+// Wire-format fields suffixed with Hint (AppIDHint, ModuleIDHint,
+// RecordedAtHint) are NOT trusted — the platform re-derives authoritative
+// values from the authenticated invoker. Reported VALUES affect only the
+// developer's own customer billing. The reserved infra.*/platform.* namespace
+// is rejected at declaration (and at platform ingress) so a module cannot
+// declare or self-report a platform-billable infra metric.
 package meter
 
 import (
@@ -12,7 +22,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -21,7 +34,6 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
-	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
 // arnPattern matches a valid Lambda function ARN. Validated at Client
@@ -29,19 +41,224 @@ import (
 // rather than at first Record call (silent revenue loss otherwise).
 var arnPattern = regexp.MustCompile(`^arn:aws:lambda:[a-z0-9-]+:[0-9]+:function:[a-zA-Z0-9_-]+$`)
 
-// Meter records usage events for billing.
-type Meter interface {
-	// Record emits a usage event via async Lambda invoke (production) or
-	// stderr log (dev mode). Synchronous: blocks for the duration of the
-	// Lambda control-plane round-trip (~5-15ms).
-	//
-	// Call sparingly — once per meaningful action, not per row processed.
-	// Errors should be logged, not propagated — billing failures should
-	// never fail the handler.
-	//
-	// Metric names must not contain path separators (/, \), whitespace,
-	// dot-segments (..), or null bytes. Panics on invalid name.
-	Record(metric string, value float64) error
+// reservedPrefixes are the platform-owned metric namespaces. A module may not
+// declare or self-report a metric under these — they belong to platform-side
+// infra metering (model tokens, storage bytes, egress, compute), which is
+// measured at the platform chokepoint and never trusts an SDK value. ms.Meter
+// panics on a reserved name, and the platform ingress rejects it too.
+var reservedPrefixes = []string{"infra.", "platform."}
+
+// Kind is the billing semantic of a declared metric. It is fixed at
+// declaration and recorded in the manifest; it does NOT travel on the wire
+// (the platform's manifest-fed catalog is authoritative). A single Record
+// call emits for both kinds — the kind decides how the platform aggregates.
+type Kind string
+
+const (
+	// Counter is an additive / one-time value the platform SUMs over the
+	// billing period. Use it for things you count: orders placed, minutes
+	// transcoded, messages sent.
+	Counter Kind = "counter"
+	// Gauge is an absolute current level the platform never SUMs — it takes
+	// the MAX or a time-weighted integral. Use it for levels you can safely
+	// re-report on a heartbeat: stored bytes, active rows, open connections.
+	// Gauge is self-healing: a lost sample only loses resolution.
+	Gauge Kind = "gauge"
+)
+
+// IsValid reports whether k is one of the two known kinds.
+func (k Kind) IsValid() bool { return k == Counter || k == Gauge }
+
+// MetricOption configures a metric at declaration time. The only options today
+// are Unit and Price; both are optional (a metric may be metered without a
+// declared unit or price).
+type MetricOption func(*metricOptions)
+
+type metricOptions struct {
+	unit     string
+	price    int64
+	priceSet bool
+}
+
+// Unit sets the metric's display unit (e.g. "order", "byte"). Informational
+// metadata for the platform UI / invoice line; it does not affect aggregation.
+func Unit(u string) MetricOption {
+	return func(o *metricOptions) { o.unit = u }
+}
+
+// Price sets the metric's per-unit CUSTOMER price in micro-dollars (1e-6 USD).
+// This is the developer's Plane-2 pricing for THEIR customer; the platform
+// charges quantity × this price with NO blanket markup (the flat 1.2× applies
+// only to platform-infra metrics, never a module's custom metric). Optional —
+// omit it to meter without charging.
+func Price(microDollars int64) MetricOption {
+	return func(o *metricOptions) {
+		o.price = microDollars
+		o.priceSet = true
+	}
+}
+
+// DeclFromOptions applies the variadic options to produce a Decl. Used by core
+// (ms.Meter) to translate the public name/kind/options into the declaration
+// that is both validated + registered (Declare) and registered into the
+// manifest (registry.AddMetric).
+func DeclFromOptions(name string, kind Kind, opts ...MetricOption) Decl {
+	o := &metricOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(o)
+		}
+	}
+	return Decl{Name: name, Kind: kind, Unit: o.unit, Price: o.price, PriceSet: o.priceSet}
+}
+
+// Decl is the declared shape of a metric: name + kind + unit + optional price.
+// It is what flows into the manifest (see registry.MetricDecl), so the platform
+// can populate its metric_definitions catalog at install/publish.
+type Decl struct {
+	Name     string
+	Kind     Kind
+	Unit     string
+	Price    int64
+	PriceSet bool
+}
+
+// ValidateMetricName rejects names that are empty, contain a path separator,
+// whitespace, a dot-segment, or a null byte, or that fall under a reserved
+// platform namespace. It mirrors registry.ValidateName plus the reserved-prefix
+// rule specific to metrics. The mirroring is deliberate, NOT accidental
+// duplication: meter is a public package and must not import internal/registry,
+// so the shared rule is restated here rather than shared via an internal import.
+func ValidateMetricName(name string) {
+	if name == "" {
+		panic("mirrorstack/meter: Meter name cannot be empty")
+	}
+	if strings.ContainsAny(name, "/\\ \t\n\r\x00") {
+		panic("mirrorstack/meter: Meter(" + name + ") contains a path separator, whitespace, or null byte")
+	}
+	if strings.Contains(name, "..") {
+		panic("mirrorstack/meter: Meter(" + name + ") contains '..'")
+	}
+	for _, p := range reservedPrefixes {
+		if strings.HasPrefix(name, p) {
+			panic("mirrorstack/meter: Meter(" + name + ") uses reserved platform prefix " + p + " (infra.*/platform.* are platform-measured, not module-declarable)")
+		}
+	}
+}
+
+// Declare validates a metric declaration and registers it into the client's
+// metric registry under decl.Name, so a later Record(ctx, name, value)
+// resolves it BY NAME (mirroring how ms.Emits records an emit name that
+// ms.Emit later resolves). NO handle is returned — emission is by name.
+//
+// The caller (core) is responsible for registering decl into the MANIFEST
+// (registry.AddMetric); Declare owns the name/kind/reserved-prefix validation
+// so the public ms.Meter contract is enforced in one place, plus its own
+// registry duplicate guard.
+//
+// Panics on an empty/malformed name, an unknown kind, a reserved
+// infra.*/platform.* prefix, or a duplicate metric name — declaration is
+// startup code, so a bad declaration is a programmer error that must fail
+// loudly (a second declaration would silently disagree on kind/price).
+func (c *Client) Declare(moduleID string, decl Decl) {
+	ValidateMetricName(decl.Name)
+	if !decl.Kind.IsValid() {
+		panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) has invalid kind %q (use ms.Counter or ms.Gauge)", decl.Name, decl.Kind))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.moduleID == "" {
+		c.moduleID = moduleID
+	}
+	if c.metrics == nil {
+		c.metrics = make(map[string]Decl)
+	}
+	if _, dup := c.metrics[decl.Name]; dup {
+		panic("mirrorstack/meter: Meter(" + decl.Name + ") declared twice")
+	}
+	c.metrics[decl.Name] = decl
+}
+
+// Record emits a usage event for the metric declared under name with the given
+// value. It mirrors ms.Emit: resolve the declared name, build the envelope,
+// hand it to the transport. The platform reads the declared kind from its
+// manifest-fed catalog to decide SUM vs MAX/integral, so a call site can never
+// mislabel a metric.
+//
+// Declaration-first: if name was never declared via ms.Meter, Record returns an
+// error (fail fast in dev) — it never silently emits an unknown metric.
+//
+// Emitted via async Lambda invoke (production) or stderr log (dev mode).
+// Call sparingly — once per meaningful action, not per row processed. Errors
+// are returned, NOT panicked, and should be logged, not propagated: a billing
+// failure must never fail the handler.
+//
+// Returns an error (does NOT panic) if value is negative, NaN, or infinite —
+// a single bad value can't crash the handler. The metric name was already
+// validated at declaration.
+//
+// The EventID is minted ONCE per Record call and reused across any transport
+// retry within the call, so the platform's ON CONFLICT(event_id) dedupe holds
+// for a retried delivery (the retry loop lands with the transport rewrite).
+func (c *Client) Record(ctx context.Context, name string, value float64) error {
+	c.mu.RLock()
+	decl, declared := c.metrics[name]
+	moduleID := c.moduleID
+	c.mu.RUnlock()
+	if !declared {
+		return fmt.Errorf("mirrorstack/meter: metric %q was never declared (call ms.Meter(%q, ...) in setup before ms.Record)", name, name)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return fmt.Errorf("mirrorstack/meter: metric %q: value must be finite and non-negative, got %g", decl.Name, value)
+	}
+
+	appID := ""
+	if a := auth.Get(ctx); a != nil {
+		appID = a.AppID
+	}
+
+	// Dev mode: log to stderr and return. appID may be empty if the context
+	// has no auth identity (internal route, test harness). A zero Client{} (or
+	// one built via NewFromARN before the logger is wired) may have a nil
+	// logger, so guard it — a missing dev sink must not panic the handler.
+	if c.lambdaClient == nil {
+		if c.logger != nil {
+			c.logger.Printf("meter: appID=%q moduleID=%q metric=%q value=%g", appID, moduleID, decl.Name, value)
+		}
+		return nil
+	}
+
+	// Mint the EventID ONCE here so a retried delivery reuses it. NO kind on
+	// the wire — the manifest/catalog is authoritative.
+	event := Event{
+		V:              envelopeVersion,
+		EventID:        ids.NewUUID(),
+		AppIDHint:      appID,
+		ModuleIDHint:   moduleID,
+		Metric:         decl.Name,
+		Value:          value,
+		RecordedAtHint: time.Now().UTC(),
+	}
+	return c.dispatch(ctx, event)
+}
+
+// dispatch delivers an already-built Event to the transport. The caller mints
+// the EventID once (in Record), so retrying dispatch with the same Event reuses
+// the same EventID and the platform deduplicates rather than double-counts.
+func (c *Client) dispatch(ctx context.Context, event Event) error {
+	body, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)
+	}
+	_, err = c.lambdaClient.Invoke(ctx, &lambda.InvokeInput{
+		FunctionName:   &c.functionARN,
+		InvocationType: types.InvocationTypeEvent, // async fire-and-forget
+		Payload:        body,
+	})
+	if err != nil {
+		return fmt.Errorf("mirrorstack/meter: invoke %s: %w", c.functionARN, err)
+	}
+	return nil
 }
 
 // lambdaInvoker is the subset of lambda.Client used by Client. Makes the
@@ -50,12 +267,22 @@ type lambdaInvoker interface {
 	Invoke(ctx context.Context, params *lambda.InvokeInput, optFns ...func(*lambda.Options)) (*lambda.InvokeOutput, error)
 }
 
-// Client is the module-level meter client. Created eagerly at Module.New()
-// when MS_METER_LAMBDA_ARN is set. Nil in dev mode.
+// Client is the module-level meter transport AND metric registry. Created
+// eagerly at ms.Init: a production client (MS_METER_LAMBDA_ARN set)
+// async-invokes the platform meter Lambda; a dev client logs to stderr.
+// Declared metrics live in its registry, keyed by name, so Record resolves a
+// metric by name (mirroring ms.Emits/ms.Emit).
+//
+// The dispatch-HTTP transport rewrite is a follow-up (PR #2); this PR keeps
+// the existing MS_METER_LAMBDA_ARN / lambda.Invoke transport.
 type Client struct {
 	lambdaClient lambdaInvoker
 	functionARN  string
 	logger       *log.Logger // dev-mode stderr sink when lambdaClient is nil
+
+	mu       sync.RWMutex
+	moduleID string          // emitting module's Config.ID, set at first Declare
+	metrics  map[string]Decl // declared metrics, keyed by name (Record resolves here)
 }
 
 // NewFromARN creates a production meter client for the given Lambda function
@@ -76,64 +303,7 @@ func NewFromARN(ctx context.Context, arn string) (*Client, error) {
 }
 
 // NewDev creates a dev-mode meter client that logs Record calls to the given
-// logger (typically Module.logger writing to stderr). Returns a non-nil
-// Client; Meter.Record is a no-op beyond the log line.
+// logger (typically Module.logger writing to stderr).
 func NewDev(logger *log.Logger) *Client {
 	return &Client{logger: logger}
-}
-
-// Scope returns a Meter bound to the current request context. The AppID is
-// read from auth.Get(ctx) as a hint only — the platform does not trust it.
-func (c *Client) Scope(ctx context.Context, moduleID string) Meter {
-	appID := ""
-	if a := auth.Get(ctx); a != nil {
-		appID = a.AppID
-	}
-	return &scopedMeter{
-		ctx:      ctx,
-		client:   c,
-		moduleID: moduleID,
-		appID:    appID,
-	}
-}
-
-type scopedMeter struct {
-	ctx      context.Context
-	client   *Client
-	moduleID string
-	appID    string
-}
-
-func (s *scopedMeter) Record(metric string, value float64) error {
-	registry.ValidateName("Record", metric)
-
-	// Dev mode: log to stderr and return. The appID may be empty if the
-	// context has no auth identity (e.g., internal route, test harness).
-	if s.client.lambdaClient == nil {
-		s.client.logger.Printf("meter: appID=%q moduleID=%q metric=%q value=%g", s.appID, s.moduleID, metric, value)
-		return nil
-	}
-
-	event := Event{
-		V:              envelopeVersion,
-		EventID:        ids.NewUUID(),
-		AppIDHint:      s.appID,
-		ModuleIDHint:   s.moduleID,
-		Metric:         metric,
-		Value:          value,
-		RecordedAtHint: time.Now().UTC(),
-	}
-	body, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)
-	}
-	_, err = s.client.lambdaClient.Invoke(s.ctx, &lambda.InvokeInput{
-		FunctionName:   &s.client.functionARN,
-		InvocationType: types.InvocationTypeEvent, // async fire-and-forget
-		Payload:        body,
-	})
-	if err != nil {
-		return fmt.Errorf("mirrorstack/meter: invoke %s: %w", s.client.functionARN, err)
-	}
-	return nil
 }

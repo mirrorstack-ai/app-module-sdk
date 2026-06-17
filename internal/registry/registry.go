@@ -121,6 +121,23 @@ type OutboundContribution struct {
 	Payload json.RawMessage `json:"payload"` // typed payload, validated by the host's slot at registration
 }
 
+// MetricDecl is a declared usage metric (ms.Meter). Exposed in the manifest so
+// the platform populates its metric_definitions catalog (kind, unit, customer
+// price) at install/publish — BEFORE any usage event arrives, so the catalog
+// is authoritative for how a metric aggregates and is priced.
+//
+// Kind is "counter" (additive; SUM) or "gauge" (absolute level; MAX/integral).
+// Unit is a display unit (e.g. "order", "byte"); empty when undeclared.
+// Price is the per-unit CUSTOMER price in micro-dollars and is omitempty: a
+// metric may be metered without a declared price (PriceSet distinguishes a
+// declared 0 from "no price", carried via the pointer being non-nil).
+type MetricDecl struct {
+	Name  string `json:"name"`
+	Kind  string `json:"kind"`
+	Unit  string `json:"unit,omitempty"`
+	Price *int64 `json:"price,omitempty"`
+}
+
 // MCPToolHandler is the type-erased handler signature used after generic
 // MCPTool registration at the SDK level has wrapped the typed handler.
 type MCPToolHandler func(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
@@ -161,6 +178,7 @@ type Registry struct {
 	schedules             []Schedule
 	tasks                 []Task
 	permissions           []Permission
+	metrics               []MetricDecl
 	description           string
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution
@@ -516,6 +534,49 @@ func (r *Registry) Permissions() []Permission {
 			DefaultRole:  p.DefaultRole,
 			Labels:       maps.Clone(p.Labels),
 			Descriptions: maps.Clone(p.Descriptions),
+		}
+	}
+	return out
+}
+
+// AddMetric records a declared usage metric. Returns true if added, false if a
+// metric with the same name already exists. The caller (ms.Meter via meter.
+// Declare) owns name + kind + reserved-prefix validation; this only dedups by
+// name. Unlike the first-wins declarations (AddEmit/AddPermission), a duplicate
+// metric name is treated as a programmer error by the caller (ms.Meter panics
+// on a false return) — two declarations of the same metric with different
+// kind/price would silently disagree, so it must fail loudly.
+func (r *Registry) AddMetric(d MetricDecl) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.metrics {
+		if existing.Name == d.Name {
+			return false
+		}
+	}
+	if d.Price != nil {
+		p := *d.Price
+		d.Price = &p
+	}
+	r.metrics = append(r.metrics, d)
+	return true
+}
+
+// Metrics returns a non-nil deep copy of all declared metrics in registration
+// order. The Price pointer on each entry is cloned so caller mutations cannot
+// leak back into the registry.
+func (r *Registry) Metrics() []MetricDecl {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.metrics == nil {
+		return []MetricDecl{}
+	}
+	out := make([]MetricDecl, len(r.metrics))
+	for i, d := range r.metrics {
+		out[i] = d
+		if d.Price != nil {
+			p := *d.Price
+			out[i].Price = &p
 		}
 	}
 	return out

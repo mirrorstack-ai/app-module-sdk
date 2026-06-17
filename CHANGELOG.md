@@ -7,6 +7,19 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-06-16
+
+Declaration-first usage metering. A module DECLARES each metric once, up front, with its kind + unit + price (`ms.Meter`), then emits at runtime **by name** with a single `ms.Record` — exactly mirroring the `ms.Emits` (declare) / `ms.Emit` (emit by name) pair. There is no stored handle. The declaration flows into the manifest, so the platform's metric catalog is authoritative — a call site can never mislabel a metric's kind, and billing can populate its catalog before any event arrives.
+
+### Changed (BREAKING)
+- **`ms.Meter` is a DECLARATION with no return value.** `ms.Meter(name string, kind ms.Kind, opts ...ms.MetricOption)` declares a metric once in startup code (exactly like `ms.Emits` / `ms.RegisterPermission`) — it registers the metric as a side effect and returns **nothing** (no `*ms.Metric` handle). `ms.Kind` is `ms.Counter` (additive; the platform SUMs) or `ms.Gauge` (absolute level; the platform takes MAX or a time-weighted integral, never a SUM). Options: `ms.Unit(string)` and `ms.Price(microDollars int64)` — the per-unit **customer** price (charged as quantity × price with NO blanket markup); both optional. The old runtime accessor `ms.Meter(ctx) Meter`, its `Record`/`Gauge` methods, **and the `*ms.Metric` handle type are removed**.
+- **Emit by name with `ms.Record(ctx, name, value) error`.** One package-level function, mirroring `ms.Emit`: it resolves the metric declared under `name` and hands it to the transport. The platform reads the declared kind from its manifest-fed catalog to decide SUM vs MAX/integral, so the call site never repeats the kind. Returns an error (does **not** panic) when `name` was never declared via `ms.Meter` (declaration-first, fail fast) or when the value is negative, NaN, or infinite; the non-fatal contract is unchanged (transport failures are logged, not propagated). The `EventID` is minted once per `Record` and reused across any transport retry.
+- **`kind` does not travel on the wire.** The metric kind lives in the manifest/catalog, so the meter `Event` envelope carries no `kind` field and `envelopeVersion` stays **1**.
+
+### Added
+- **Manifest `metrics[]`** — each declared metric (`{name, kind, unit, price}`) appears in the module manifest so the platform populates its `metric_definitions` catalog at install/publish.
+- **Reserved-namespace + duplicate guards.** `ms.Meter` panics on a duplicate metric name (two declarations would silently disagree on kind/price) or on a reserved `infra.*` / `platform.*` prefix (those are platform-measured infra metrics a module may not self-declare).
+
 ## [v0.2.1] - 2026-06-13
 
 A module can now read its own **trusted app id** on every guarded surface — including Public routes, which previously had no identity at all.

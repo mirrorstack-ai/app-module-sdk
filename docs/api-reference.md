@@ -117,10 +117,14 @@ ms.Tx(ctx, func(q db.Querier) error {
 |---|---|
 | `ms.Cache(ctx)` | Per-app Redis client. |
 | `ms.Storage(ctx)` | Per-app object storage. S3 as origin + presigned multipart upload; reads served from R2 via a Cloudflare Worker cache layer. |
-| `ms.Meter(ctx).Record(metric, value)` | Emit a billing event via async Lambda invoke. |
+| `ms.Meter(name, kind, opts...)` | DECLARE a usage metric once in setup (kind `ms.Counter`/`ms.Gauge`; `ms.Unit`/`ms.Price` options). Registers it into the manifest; returns nothing. |
+| `ms.Record(ctx, name, value)` | Emit a usage event BY NAME for a declared metric. Mirrors `ms.Emits`/`ms.Emit`; errors on an undeclared name. |
 
 ```go
-ms.Meter(r.Context()).Record("transcode.minutes", 12)
+// setup
+ms.Meter("transcode.minutes", ms.Counter, ms.Unit("minute"), ms.Price(50_000))
+// handler
+ms.Record(r.Context(), "transcode.minutes", 12)
 ```
 
 ## Agent surface (MCP)
