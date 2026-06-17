@@ -7,6 +7,17 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.3] - 2026-06-17
+
+Metric kind moves from a positional argument to a declaration OPTION, and a module may now override the **customer** price of a platform-infra metric. The runtime emit (`ms.Record`) and the declaration-first contract are unchanged; only the `ms.Meter` shape and the reserved-namespace rules change.
+
+### Changed (BREAKING)
+- **`ms.Meter` kind is now an OPTION, not a positional argument.** The signature is `ms.Meter(name string, opts ...ms.MetricOption)`. `ms.Counter` and `ms.Gauge` are now `ms.MetricOption`s (functional options that set the kind) rather than `ms.Kind` values, so a call reads the same — `ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))` — but the kind is supplied positionally no longer. A **custom** (non-reserved) metric MUST pass exactly one kind option: `ms.Meter` panics if no kind is given or if both `ms.Counter` and `ms.Gauge` are passed. The exported `ms.Kind` type and the `ms.Counter`/`ms.Gauge` `Kind` constants are gone (the kind enum is now internal to the manifest/registry).
+
+### Added
+- **Platform-infra customer-price override.** A reserved `infra.*` / `platform.*` metric — previously rejected outright at declaration — may now be DECLARED with `ms.Price` **only**, to override what the module's customer is billed for that platform-measured infra (e.g. `ms.Meter("infra.compute.ms", ms.Price(0))` to absorb platform compute into the module's own pricing). This is a pure customer-facing (Plane-2) choice: the developer still owes the platform the measured COGS regardless. Passing a kind (`ms.Counter`/`ms.Gauge`) or `ms.Unit` on a reserved name panics — kind/unit are platform-owned. The manifest entry for such an override carries the price only (no kind/unit; the platform catalog supplies them).
+- **`ms.Record` rejects a reserved name.** A module can declare a reserved `infra.*`/`platform.*` price-override but can never self-report its value: `ms.Record(ctx, "infra.compute.ms", …)` returns an error. The platform meters its own infra at its own chokepoint; an SDK-reported quantity for a reserved metric is never billable.
+
 ## [v0.2.2] - 2026-06-16
 
 Declaration-first usage metering. A module DECLARES each metric once, up front, with its kind + unit + price (`ms.Meter`), then emits at runtime **by name** with a single `ms.Record` — exactly mirroring the `ms.Emits` (declare) / `ms.Emit` (emit by name) pair. There is no stored handle. The declaration flows into the manifest, so the platform's metric catalog is authoritative — a call site can never mislabel a metric's kind, and billing can populate its catalog before any event arrives.
