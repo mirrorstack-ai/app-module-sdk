@@ -76,30 +76,34 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 
 // Meter DECLARES a usage metric. Call it once, up front (startup code), per
 // metric — exactly like Emits / RegisterPermission: it registers the metric as
-// a SIDE EFFECT and returns NOTHING. The declaration (name + kind + unit +
-// price) is recorded in the manifest so the platform's metric catalog is
-// authoritative before any event arrives, AND in the meter client's by-name
-// registry so Record can resolve the metric.
+// a SIDE EFFECT and returns NOTHING. The declaration (kind + unit + price) is
+// recorded in the manifest so the platform's metric catalog is authoritative
+// before any event arrives, AND in the meter client's by-name registry so
+// Record can resolve the metric.
 //
-// kind is meter.Counter (additive; the platform SUMs) or meter.Gauge (absolute
-// level; the platform takes MAX or a time-weighted integral, never a SUM).
-// Options set the unit and the per-unit customer price (meter.Unit/meter.Price,
-// both optional).
+// The kind is an OPTION: meter.Counter (additive; the platform SUMs) or
+// meter.Gauge (absolute level; the platform takes MAX or a time-weighted
+// integral, never a SUM). meter.Unit / meter.Price set the unit and the
+// per-unit customer price (both optional).
 //
 // Emit at runtime with the package-level Record(ctx, name, value) — BY NAME,
-// mirroring Emits/Emit. Panics on a duplicate metric name (a second
-// declaration would silently disagree on kind/price), an invalid name, an
-// unknown kind, or a reserved infra.*/platform.* prefix. Like the other Module
-// resource methods, it requires New() to have returned successfully — calling
-// it on a zero Module panics on the nil meterClient (the package-level
-// wrapper's mustDefault guards the before-Init case).
+// mirroring Emits/Emit. A custom metric MUST pass exactly one kind option; a
+// reserved infra.*/platform.* metric may carry meter.Price ONLY (kind/unit are
+// platform-owned). Panics on a duplicate name, an invalid name, conflicting
+// kinds, a missing kind on a custom metric, or a kind/unit on a reserved name.
+// Like the other Module resource methods, it requires New() to have returned
+// successfully — calling it on a zero Module panics on the nil meterClient (the
+// package-level wrapper's mustDefault guards the before-Init case).
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
-func (m *Module) Meter(name string, kind meter.Kind, opts ...meter.MetricOption) {
-	d := meter.DeclFromOptions(name, kind, opts...)
-	// Declare validates name/kind/reserved-prefix and registers into the meter
-	// client's by-name registry (panics on a duplicate name there).
+//	ms.Meter("infra.compute.ms", ms.Price(0)) // reserved price-override
+func (m *Module) Meter(name string, opts ...meter.MetricOption) {
+	d := meter.DeclFromOptions(name, opts...)
+	// Declare validates the name + custom/reserved option rules and registers
+	// into the meter client's by-name registry (panics on a duplicate name).
 	m.meterClient.Declare(m.config.ID, d)
+	// For a reserved price-override d.Kind is empty (the platform catalog
+	// supplies the kind/unit); the manifest entry then carries price only.
 	decl := registry.MetricDecl{Name: d.Name, Kind: string(d.Kind), Unit: d.Unit}
 	if d.PriceSet {
 		p := d.Price
@@ -131,8 +135,8 @@ func Storage(ctx context.Context) (storage.Storer, error) {
 
 // Meter declares a usage metric on the default module (side effect, no return).
 // Panics before Init.
-func Meter(name string, kind meter.Kind, opts ...meter.MetricOption) {
-	mustDefault("Meter").Meter(name, kind, opts...)
+func Meter(name string, opts ...meter.MetricOption) {
+	mustDefault("Meter").Meter(name, opts...)
 }
 
 // Record emits a usage event by name on the default module. Panics before Init.

@@ -132,8 +132,8 @@ func TestMeter_DeclaresKindAndPriceIntoManifest(t *testing.T) {
 	if d.Name != "orders.placed" {
 		t.Errorf("name = %q, want orders.placed", d.Name)
 	}
-	if d.Kind != Counter {
-		t.Errorf("kind = %q, want counter", d.Kind)
+	if !d.KindSet || d.Kind != counterKind {
+		t.Errorf("kind = %q (set=%v), want counter (set=true)", d.Kind, d.KindSet)
 	}
 	if d.Unit != "order" {
 		t.Errorf("unit = %q, want order", d.Unit)
@@ -145,11 +145,132 @@ func TestMeter_DeclaresKindAndPriceIntoManifest(t *testing.T) {
 	// A gauge declared with no price: PriceSet must stay false so the manifest
 	// distinguishes a declared 0 from "no price".
 	g := DeclFromOptions("myapp.objects.bytes", Gauge, Unit("byte"))
-	if g.Kind != Gauge {
-		t.Errorf("kind = %q, want gauge", g.Kind)
+	if !g.KindSet || g.Kind != gaugeKind {
+		t.Errorf("kind = %q (set=%v), want gauge (set=true)", g.Kind, g.KindSet)
 	}
 	if g.PriceSet {
 		t.Errorf("PriceSet = true for an undeclared price, want false")
+	}
+}
+
+// TestMeter_KindIsAnOption asserts the kind is passed as an OPTION (Counter /
+// Gauge) and lands on the Decl + the manifest registration. This is the core
+// of PR #1b: kind moved from a positional argument to a functional option.
+func TestMeter_KindIsAnOption(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	// Order-independent: kind option can sit anywhere in the variadic list.
+	c.Declare("media", DeclFromOptions("orders.placed", Unit("order"), Counter, Price(50_000)))
+	c.mu.RLock()
+	got := c.metrics["orders.placed"]
+	c.mu.RUnlock()
+	if !got.KindSet || got.Kind != counterKind {
+		t.Errorf("kind = %q (set=%v), want counter (set=true)", got.Kind, got.KindSet)
+	}
+}
+
+// TestMeter_RejectsMissingKind asserts a CUSTOM metric declared without a kind
+// option panics — the platform must know SUM vs MAX/integral up front.
+func TestMeter_RejectsMissingKind(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on a custom metric declared without a kind")
+		}
+	}()
+	c.Declare("media", DeclFromOptions("orders.placed", Unit("order"), Price(50_000)))
+}
+
+// TestMeter_RejectsConflictingKinds asserts passing both Counter and Gauge
+// panics — a metric has exactly one kind.
+func TestMeter_RejectsConflictingKinds(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when both Counter and Gauge are passed")
+		}
+	}()
+	c.Declare("media", DeclFromOptions("orders.placed", Counter, Gauge))
+}
+
+// TestMeter_ReservedPriceOnlyAccepted asserts a reserved infra.*/platform.*
+// metric declared with PRICE ONLY is accepted (a customer-passthrough override)
+// and lands in the registry with NO kind/unit (platform-owned), price set.
+func TestMeter_ReservedPriceOnlyAccepted(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	c.Declare("media", DeclFromOptions("infra.compute.ms", Price(0)))
+	c.mu.RLock()
+	got, ok := c.metrics["infra.compute.ms"]
+	c.mu.RUnlock()
+	if !ok {
+		t.Fatal("reserved price-override metric should be declared")
+	}
+	if got.KindSet || got.Kind != "" {
+		t.Errorf("reserved override should carry no kind, got %q (set=%v)", got.Kind, got.KindSet)
+	}
+	if got.UnitSet {
+		t.Error("reserved override should carry no unit")
+	}
+	if !got.PriceSet || got.Price != 0 {
+		t.Errorf("price = %d (set=%v), want 0 (set=true)", got.Price, got.PriceSet)
+	}
+}
+
+// TestMeter_ReservedWithKindOrUnitPanics asserts a reserved metric carrying a
+// kind or a unit option panics — those are platform-owned; a reserved name may
+// carry Price only.
+func TestMeter_ReservedWithKindOrUnitPanics(t *testing.T) {
+	t.Parallel()
+	cases := map[string][]MetricOption{
+		"kind": {Counter, Price(0)},
+		"unit": {Unit("ms"), Price(0)},
+	}
+	for label, opts := range cases {
+		t.Run(label, func(t *testing.T) {
+			c := newTestClient(t, &fakeLambda{})
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("expected panic on reserved metric with a %s option", label)
+				}
+			}()
+			c.Declare("media", DeclFromOptions("infra.compute.ms", opts...))
+		})
+	}
+}
+
+// TestMeter_ReservedWithoutPricePanics asserts a reserved metric declared with
+// NO options at all is rejected: its only legitimate purpose is to override the
+// customer passthrough via ms.Price, so a price-less reserved declaration is a
+// meaningless no-op that would otherwise pollute the manifest.
+func TestMeter_ReservedWithoutPricePanics(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &fakeLambda{})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on a reserved metric declared with no ms.Price")
+		}
+	}()
+	c.Declare("media", DeclFromOptions("infra.compute.ms"))
+}
+
+// TestRecord_RejectsReservedName asserts a module can DECLARE a reserved
+// price-override but can never self-report its value — ms.Record returns an
+// error and never reaches the transport (the platform meters infra itself).
+func TestRecord_RejectsReservedName(t *testing.T) {
+	t.Parallel()
+	fake := &fakeLambda{}
+	c := newTestClient(t, fake)
+	c.Declare("media", DeclFromOptions("infra.compute.ms", Price(0)))
+
+	err := c.Record(context.Background(), "infra.compute.ms", 1)
+	if err == nil || !strings.Contains(err.Error(), "platform-measured") {
+		t.Errorf("expected a platform-measured rejection, got %v", err)
+	}
+	if fake.invoked != 0 {
+		t.Errorf("reserved metric must not reach the transport; invoked=%d", fake.invoked)
 	}
 }
 
@@ -159,29 +280,29 @@ func TestMeter_DeclaresKindAndPriceIntoManifest(t *testing.T) {
 // carried verbatim (V==1).
 func TestRecord_NoKindOnWire(t *testing.T) {
 	t.Parallel()
-	for _, k := range []Kind{Counter, Gauge} {
+	for _, kindOpt := range []MetricOption{Counter, Gauge} {
 		fake := &fakeLambda{}
 		c := newTestClient(t, fake)
-		c.Declare("store", DeclFromOptions("myapp.items", k))
+		c.Declare("store", DeclFromOptions("myapp.items", kindOpt))
 		if err := c.Record(context.Background(), "myapp.items", 1); err != nil {
-			t.Fatalf("Record(%s): %v", k, err)
+			t.Fatalf("Record: %v", err)
 		}
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal(fake.lastIn.Payload, &raw); err != nil {
 			t.Fatalf("decode payload: %v", err)
 		}
 		if _, ok := raw["kind"]; ok {
-			t.Errorf("kind=%s: wire envelope must not carry a kind field, got keys %v", k, keys(raw))
+			t.Errorf("wire envelope must not carry a kind field, got keys %v", keys(raw))
 		}
 		var got Event
 		if err := json.Unmarshal(fake.lastIn.Payload, &got); err != nil {
 			t.Fatalf("decode event: %v", err)
 		}
 		if got.V != 1 {
-			t.Errorf("kind=%s: envelope version = %d, want 1", k, got.V)
+			t.Errorf("envelope version = %d, want 1", got.V)
 		}
 		if got.Value != 1 {
-			t.Errorf("kind=%s: value = %g, want 1", k, got.Value)
+			t.Errorf("value = %g, want 1", got.Value)
 		}
 	}
 }
@@ -289,10 +410,11 @@ func TestRecord_RejectsNegativeAndNonFinite(t *testing.T) {
 	}
 }
 
-// TestMeter_RejectsReservedPrefix asserts ms.Meter rejects the platform-owned
-// infra.*/platform.* namespaces (§3a build rule 3) so a module cannot declare a
-// platform-billable metric. Declaration is the enforcement point.
-func TestMeter_RejectsReservedPrefix(t *testing.T) {
+// TestMeter_ReservedKindOnAnyPrefixPanics asserts the platform-owned
+// infra.*/platform.* namespaces (§3a build rule 3) reject a KIND option across
+// every reserved prefix — a module may price-override a reserved metric but can
+// never declare its kind (that is platform-owned).
+func TestMeter_ReservedKindOnAnyPrefixPanics(t *testing.T) {
 	t.Parallel()
 	bad := []string{"infra.compute.ms", "infra.egress.bytes", "platform.storage.bytes", "platform.tokens"}
 	for _, name := range bad {
@@ -300,7 +422,7 @@ func TestMeter_RejectsReservedPrefix(t *testing.T) {
 			c := newTestClient(t, &fakeLambda{})
 			defer func() {
 				if r := recover(); r == nil {
-					t.Errorf("expected panic on reserved-prefix metric %q", name)
+					t.Errorf("expected panic on a kind option for reserved metric %q", name)
 				}
 			}()
 			c.Declare("media", DeclFromOptions(name, Counter))
@@ -332,7 +454,10 @@ func TestMeter_RejectsInvalidKind(t *testing.T) {
 			t.Error("expected panic on invalid kind")
 		}
 	}()
-	c.Declare("media", DeclFromOptions("x.y", Kind("histogram")))
+	// A Decl carrying an out-of-range kind (reachable only by constructing the
+	// Decl directly — the public Counter/Gauge options can't produce it) must
+	// still be rejected by Declare's IsValid guard.
+	c.Declare("media", Decl{Name: "x.y", Kind: Kind("histogram"), KindSet: true})
 }
 
 // TestMeter_RejectsDuplicateName asserts a metric declared twice panics — a

@@ -14,10 +14,11 @@ package main
 // external store size, active rows). Billing errors are logged but must not fail
 // the handler.
 //
-// Gauge metric names must be module-owned (e.g. "myapp.objects.bytes"). Do NOT
-// declare a platform-billable infra metric like "storage.bytes" — the platform
-// measures its own infra and reserves the infra.*/platform.* namespace (ms.Meter
-// panics on a reserved prefix).
+// Gauge metric names must be module-owned (e.g. "myapp.objects.bytes"). The
+// platform measures its own infra and reserves the infra.*/platform.* namespace:
+// you may declare a reserved metric with ms.Price ONLY to override what your
+// customer is billed for that infra (passing a kind or unit on it panics), but
+// you can never self-report its value via ms.Record — the platform meters it.
 
 import (
 	"log"
@@ -45,6 +46,15 @@ func registerMeter() {
 	// price here is illustrative — a real byte gauge with a per-byte price can
 	// produce large invoices, so pick the cadence + price deliberately.
 	ms.Meter("myapp.objects.bytes", ms.Gauge, ms.Unit("byte"), ms.Price(1))
+
+	// Reserved infra metric: PRICE-OVERRIDE only. Here we set the per-unit
+	// customer passthrough for platform compute to 0 — absorbing platform
+	// compute into our own pricing (we still owe the platform the measured COGS
+	// regardless; this only changes what OUR customer is billed). kind/unit are
+	// platform-owned, so we pass ms.Price alone — adding ms.Counter/ms.Gauge or
+	// ms.Unit here would panic, and ms.Record("infra.compute.ms", ...) is
+	// rejected (the platform meters compute at its own chokepoint).
+	ms.Meter("infra.compute.ms", ms.Price(0))
 
 	ms.Platform(func(r chi.Router) {
 		r.Post("/orders", func(w http.ResponseWriter, r *http.Request) {

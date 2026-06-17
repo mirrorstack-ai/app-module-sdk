@@ -78,12 +78,50 @@ func TestMeter_PanicsOnDuplicateName(t *testing.T) {
 	})
 }
 
-func TestMeter_PanicsOnReservedPrefix(t *testing.T) {
+func TestMeter_PanicsOnReservedPrefixWithKind(t *testing.T) {
 	m, _ := New(Config{ID: "media"})
 	for _, name := range []string{"infra.compute.ms", "platform.storage.bytes"} {
-		assertPanics(t, "expected panic on reserved-prefix Meter "+name, func() {
+		assertPanics(t, "expected panic on reserved-prefix Meter with a kind "+name, func() {
 			m.Meter(name, meter.Counter)
 		})
+	}
+}
+
+// TestMeter_ReservedPriceOverrideInManifest asserts a reserved infra.*
+// price-override (Price only) is accepted and surfaces in the manifest as a
+// price-only entry: NO kind/unit (platform-owned), price carried.
+func TestMeter_ReservedPriceOverrideInManifest(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	m.Meter("infra.compute.ms", meter.Price(0)) // absorb platform compute
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Metrics) != 1 {
+		t.Fatalf("metrics = %d, want 1: %+v", len(got.Metrics), got.Metrics)
+	}
+	d := got.Metrics[0]
+	if d.Name != "infra.compute.ms" {
+		t.Errorf("name = %q, want infra.compute.ms", d.Name)
+	}
+	if d.Kind != "" || d.Unit != "" {
+		t.Errorf("reserved override carried kind=%q unit=%q, want both empty (platform-owned)", d.Kind, d.Unit)
+	}
+	if d.Price == nil || *d.Price != 0 {
+		t.Errorf("price = %v, want explicit 0", d.Price)
+	}
+}
+
+// TestRecord_RejectsReservedName asserts a reserved metric — even when declared
+// as a price-override — can never be self-reported via ms.Record.
+func TestRecord_RejectsReservedName(t *testing.T) {
+	m, _ := New(Config{ID: "media"})
+	m.Meter("infra.compute.ms", meter.Price(0))
+
+	if err := m.Record(context.Background(), "infra.compute.ms", 1); err == nil {
+		t.Error("expected an error recording a reserved platform-measured metric")
 	}
 }
 

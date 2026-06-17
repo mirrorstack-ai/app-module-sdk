@@ -127,13 +127,16 @@ type OutboundContribution struct {
 // is authoritative for how a metric aggregates and is priced.
 //
 // Kind is "counter" (additive; SUM) or "gauge" (absolute level; MAX/integral).
+// For a custom metric Kind is always set; for a reserved infra.*/platform.*
+// PRICE-OVERRIDE entry Kind and Unit are EMPTY (omitempty) — the platform
+// catalog supplies the kind/unit, the module only overrides the customer price.
 // Unit is a display unit (e.g. "order", "byte"); empty when undeclared.
 // Price is the per-unit CUSTOMER price in micro-dollars and is omitempty: a
 // metric may be metered without a declared price (PriceSet distinguishes a
 // declared 0 from "no price", carried via the pointer being non-nil).
 type MetricDecl struct {
 	Name  string `json:"name"`
-	Kind  string `json:"kind"`
+	Kind  string `json:"kind,omitempty"`
 	Unit  string `json:"unit,omitempty"`
 	Price *int64 `json:"price,omitempty"`
 }

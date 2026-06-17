@@ -138,18 +138,21 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) { return core.Cach
 // Storage returns a scoped storage client on the default module.
 func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(ctx) }
 
-// Kind is a usage-metric's billing semantic: Counter (additive; SUM) or Gauge
-// (absolute level; MAX / time-weighted integral, never summed).
-type Kind = meter.Kind
+// MetricOption configures a metric at declaration. The KIND is itself an option
+// (Counter / Gauge), alongside Unit and Price.
+type MetricOption = meter.MetricOption
 
-// Counter and Gauge are the two metric kinds passed to Meter.
+// Counter and Gauge are the metric-kind options passed to Meter. Counter is
+// additive (the platform SUMs it); Gauge is an absolute level (MAX or a
+// time-weighted integral, never summed).
+//
+// They are CONSTANTS, not vars, so a third-party module cannot reassign
+// ms.Counter / ms.Gauge (the SDK is a trust boundary). The call site stays
+// parens-free: ms.Meter(name, ms.Counter, ...).
 const (
 	Counter = meter.Counter
 	Gauge   = meter.Gauge
 )
-
-// MetricOption configures a metric at declaration (Unit, Price).
-type MetricOption = meter.MetricOption
 
 // Unit sets a metric's display unit (e.g. "order", "byte"). Optional.
 func Unit(u string) MetricOption { return meter.Unit(u) }
@@ -161,21 +164,25 @@ func Price(microDollars int64) MetricOption { return meter.Price(microDollars) }
 
 // Meter DECLARES a usage metric on the default module. Call it ONCE per metric
 // in startup code (exactly like ms.Emits / ms.RegisterPermission) — it registers
-// the metric as a SIDE EFFECT and returns NOTHING. The declaration (name + kind
-// + unit + price) is recorded in the manifest so the platform's metric catalog
-// is authoritative before any event arrives.
+// the metric as a SIDE EFFECT and returns NOTHING. The declaration (kind + unit
+// + price) is recorded in the manifest so the platform's metric catalog is
+// authoritative before any event arrives.
 //
-// kind is ms.Counter (additive; platform SUMs) or ms.Gauge (absolute level;
-// platform takes MAX or a time-weighted integral). Emit at runtime BY NAME with
-// ms.Record(ctx, name, value) — mirroring ms.Emits/ms.Emit; the platform reads
-// the declared kind from the catalog, so a call site can never mislabel a metric.
+// The kind is an OPTION: pass ms.Counter (additive; platform SUMs) or ms.Gauge
+// (absolute level; platform takes MAX or a time-weighted integral). Emit at
+// runtime BY NAME with ms.Record(ctx, name, value) — mirroring ms.Emits/ms.Emit;
+// the platform reads the declared kind from the catalog, so a call site can
+// never mislabel a metric.
 //
-// Panics on a duplicate metric name, an invalid name, an unknown kind, or a
-// reserved infra.*/platform.* prefix.
+// A custom metric MUST pass exactly one kind option. A reserved
+// infra.*/platform.* metric is platform-measured: it may carry ms.Price ONLY
+// (to override the customer passthrough) — passing a kind or unit on it panics,
+// as does a duplicate name, an invalid name, or conflicting kinds.
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
-func Meter(name string, kind Kind, opts ...MetricOption) {
-	core.Meter(name, kind, opts...)
+//	ms.Meter("infra.compute.ms", ms.Price(0)) // absorb platform compute
+func Meter(name string, opts ...MetricOption) {
+	core.Meter(name, opts...)
 }
 
 // Record emits a usage event for the metric DECLARED (via ms.Meter) under name
