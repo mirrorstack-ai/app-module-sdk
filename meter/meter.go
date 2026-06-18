@@ -18,28 +18,36 @@
 package meter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"math"
-	"regexp"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/lambda"
-	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
-// arnPattern matches a valid Lambda function ARN. Validated at Client
-// construction so a typo in MS_METER_LAMBDA_ARN fails fast at startup
-// rather than at first Record call (silent revenue loss otherwise).
-var arnPattern = regexp.MustCompile(`^arn:aws:lambda:[a-z0-9-]+:[0-9]+:function:[a-zA-Z0-9_-]+$`)
+// devDispatchFallback is the platform-dispatch base used when MS_DISPATCH_URL is
+// unset. Modules run inside docker; the dispatch listens on the host at :8083,
+// reachable via host.docker.internal — the same convention ms.Call / ms.Emit
+// use (core.devDispatchFallback). The CLI sets MS_DISPATCH_URL explicitly in
+// dev and prod points it at the real dispatch; this default only keeps local
+// runs working. Restated here (not imported) because meter is a public package
+// and must not import internal/core.
+const devDispatchFallback = "http://host.docker.internal:8083"
+
+// meterTimeout bounds a single usage-POST to the dispatch. Matches the
+// inter-module call timeout (core.callTimeout); metering is best-effort and must
+// never hang a handler.
+const meterTimeout = 15 * time.Second
 
 // reservedPrefixes are the platform-owned metric namespaces. A module may not
 // declare or self-report a metric under these — they belong to platform-side
@@ -318,7 +326,12 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 // Declaration-first: if name was never declared via ms.Meter, Record returns an
 // error (fail fast in dev) — it never silently emits an unknown metric.
 //
-// Emitted via async Lambda invoke (production) or stderr log (dev mode).
+// Emitted by POSTing the Event envelope to the platform dispatch usage ingress
+// ({MS_DISPATCH_URL | dev fallback}/apps/{appID}/usage), exactly mirroring
+// ms.Emit. Dispatch re-derives the authoritative app/module/owner/recorded_at
+// and forwards to billing-engine; the SDK's Hint fields are untrusted. An empty
+// app id (no auth identity in ctx) is an error (no panic), like ms.Emit.
+//
 // Call sparingly — once per meaningful action, not per row processed. Errors
 // are returned, NOT panicked, and should be logged, not propagated: a billing
 // failure must never fail the handler.
@@ -327,9 +340,9 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 // a single bad value can't crash the handler. The metric name was already
 // validated at declaration.
 //
-// The EventID is minted ONCE per Record call and reused across any transport
-// retry within the call, so the platform's ON CONFLICT(event_id) dedupe holds
-// for a retried delivery (the retry loop lands with the transport rewrite).
+// The EventID is minted ONCE per Record call (and the built Event reused across
+// any transport retry of the same call) so the platform's ON CONFLICT(event_id)
+// dedupe holds and a retried delivery is not double-counted.
 func (c *Client) Record(ctx context.Context, name string, value float64) error {
 	c.mu.RLock()
 	decl, declared := c.metrics[name]
@@ -353,20 +366,15 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 	if a := auth.Get(ctx); a != nil {
 		appID = a.AppID
 	}
-
-	// Dev mode: log to stderr and return. appID may be empty if the context
-	// has no auth identity (internal route, test harness). A zero Client{} (or
-	// one built via NewFromARN before the logger is wired) may have a nil
-	// logger, so guard it — a missing dev sink must not panic the handler.
-	if c.lambdaClient == nil {
-		if c.logger != nil {
-			c.logger.Printf("meter: appID=%q moduleID=%q metric=%q value=%g", appID, moduleID, decl.Name, value)
-		}
-		return nil
+	// An empty app id means there is no app scope to attribute the usage to.
+	// Mirror ms.Emit: return an error (no panic), and do not reach the transport.
+	if appID == "" {
+		return fmt.Errorf("mirrorstack/meter: Record requires an app-scoped context (no AppID in auth identity)")
 	}
 
-	// Mint the EventID ONCE here so a retried delivery reuses it. NO kind on
-	// the wire — the manifest/catalog is authoritative.
+	// Mint the EventID ONCE here so a retried delivery reuses it and the
+	// platform's ON CONFLICT(event_id) dedupe holds. NO kind on the wire — the
+	// manifest/catalog is authoritative.
 	event := Event{
 		V:              envelopeVersion,
 		EventID:        ids.NewUUID(),
@@ -376,71 +384,98 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 		Value:          value,
 		RecordedAtHint: time.Now().UTC(),
 	}
-	return c.dispatch(ctx, event)
+	return c.dispatch(ctx, appID, event)
 }
 
-// dispatch delivers an already-built Event to the transport. The caller mints
-// the EventID once (in Record), so retrying dispatch with the same Event reuses
-// the same EventID and the platform deduplicates rather than double-counts.
-func (c *Client) dispatch(ctx context.Context, event Event) error {
+// resolveUsageURL builds the platform-dispatch usage-ingress URL the Event is
+// POSTed to:
+//
+//	{base}/apps/{appID}/usage
+//
+// base is MS_DISPATCH_URL (the container->dispatch base) with the
+// host.docker.internal:8083 dev fallback when unset — the same resolution
+// ms.Call / ms.Emit use. Dispatch re-derives the authoritative app/module from
+// the authenticated invoker; the appID in the path is the SDK's hint scope.
+//
+// DEV/DISPATCH TRANSPORT. The prod module->dispatch leg rides task #146 (the
+// same seam ms.Emit's resolveEventBusURL documents); the dispatch->billing leg
+// is already prod-ready. When #146 lands, swap the body of this function (and
+// only this function) to consult the prod transport; Record's
+// marshal/auth/error contract stays put.
+func resolveUsageURL(appID string) string {
+	base := os.Getenv("MS_DISPATCH_URL")
+	if base == "" {
+		base = devDispatchFallback
+	}
+	base = strings.TrimRight(base, "/")
+	return fmt.Sprintf("%s/apps/%s/usage", base, appID)
+}
+
+// dispatch delivers an already-built Event to the platform dispatch usage
+// ingress over HTTP, mirroring ms.Emit. The caller (Record) mints the EventID
+// once, so retrying dispatch with the same Event reuses the same EventID and the
+// platform deduplicates rather than double-counts. A non-2xx response is an
+// error with the body truncated to ~2 KB; the non-fatal contract (log, don't
+// propagate) is the caller's responsibility.
+func (c *Client) dispatch(ctx context.Context, appID string, event Event) error {
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)
 	}
-	_, err = c.lambdaClient.Invoke(ctx, &lambda.InvokeInput{
-		FunctionName:   &c.functionARN,
-		InvocationType: types.InvocationTypeEvent, // async fire-and-forget
-		Payload:        body,
-	})
+
+	u := resolveUsageURL(appID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("mirrorstack/meter: invoke %s: %w", c.functionARN, err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MS-App-ID", appID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("ms.Record %s -> %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
 
-// lambdaInvoker is the subset of lambda.Client used by Client. Makes the
-// Lambda invoke path mockable in unit tests.
-type lambdaInvoker interface {
-	Invoke(ctx context.Context, params *lambda.InvokeInput, optFns ...func(*lambda.Options)) (*lambda.InvokeOutput, error)
-}
-
 // Client is the module-level meter transport AND metric registry. Created
-// eagerly at ms.Init: a production client (MS_METER_LAMBDA_ARN set)
-// async-invokes the platform meter Lambda; a dev client logs to stderr.
-// Declared metrics live in its registry, keyed by name, so Record resolves a
-// metric by name (mirroring ms.Emits/ms.Emit).
+// eagerly at ms.Init: it POSTs each usage Event to the platform dispatch usage
+// ingress over HTTP (mirroring ms.Emit / ms.Call), in both dev and prod — there
+// is no separate dev sink. Declared metrics live in its registry, keyed by name,
+// so Record resolves a metric by name (mirroring ms.Emits/ms.Emit).
 //
-// The dispatch-HTTP transport rewrite is a follow-up (PR #2); this PR keeps
-// the existing MS_METER_LAMBDA_ARN / lambda.Invoke transport.
+// The transport is dispatch-HTTP: MS_DISPATCH_URL (or the dev fallback) routes
+// to the dispatch usage ingress, which re-derives the authoritative attribution
+// and forwards to billing-engine. The HTTP client is ALWAYS built (never nil) —
+// in dev it harmlessly targets the local dispatch, and a transport failure is
+// non-fatal (returned, then logged by the caller, not propagated).
 type Client struct {
-	lambdaClient lambdaInvoker
-	functionARN  string
-	logger       *log.Logger // dev-mode stderr sink when lambdaClient is nil
+	httpClient *http.Client
 
 	mu       sync.RWMutex
 	moduleID string          // emitting module's Config.ID, set at first Declare
 	metrics  map[string]Decl // declared metrics, keyed by name (Record resolves here)
 }
 
-// NewFromARN creates a production meter client for the given Lambda function
-// ARN. Validates ARN format against arnPattern. Uses the module's default
-// AWS IAM role (same pattern as internal/sqs/client.go).
-func NewFromARN(ctx context.Context, arn string) (*Client, error) {
-	if !arnPattern.MatchString(arn) {
-		return nil, fmt.Errorf("mirrorstack/meter: invalid ARN format %q (expected arn:aws:lambda:<region>:<account>:function:<name>)", arn)
+// New creates a meter client. The transport is dispatch-HTTP in both dev and
+// prod (the URL is resolved per-Record from MS_DISPATCH_URL with the dev
+// fallback), so there is a single constructor — no ARN/dev split. The HTTP
+// client is always built so Record never dereferences a nil transport.
+//
+// Fail-fast prod-base validation mirrors ms.Emit: if MS_DISPATCH_URL is set it
+// must be a parseable http(s) URL, so a typo fails at startup rather than at the
+// first (silently lost) Record call. An unset MS_DISPATCH_URL is valid (dev
+// fallback).
+func New() (*Client, error) {
+	if base := os.Getenv("MS_DISPATCH_URL"); base != "" {
+		if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("mirrorstack/meter: MS_DISPATCH_URL %q is not a valid http(s) base URL", base)
+		}
 	}
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("mirrorstack/meter: load aws config: %w", err)
-	}
-	return &Client{
-		lambdaClient: lambda.NewFromConfig(cfg),
-		functionARN:  arn,
-	}, nil
-}
-
-// NewDev creates a dev-mode meter client that logs Record calls to the given
-// logger (typically Module.logger writing to stderr).
-func NewDev(logger *log.Logger) *Client {
-	return &Client{logger: logger}
+	return &Client{httpClient: &http.Client{Timeout: meterTimeout}}, nil
 }

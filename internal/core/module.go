@@ -110,7 +110,7 @@ type Module struct {
 	// once" contract as internalAuth/proxyGuard — so every Platform()
 	// registration reuses one closure instead of re-reading env + re-allocating
 	// the closure (and its secret snapshot) on each call.
-	platformAuth func(http.Handler) http.Handler
+	platformAuth   func(http.Handler) http.Handler
 	poolCache      *db.PoolCache // production: per-app DB pools
 	devDBOnce      sync.Once     // dev mode: lazy DB init
 	devDB          *db.DB
@@ -125,7 +125,7 @@ type Module struct {
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
 	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
 	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
-	meterClient    *meter.Client        // prod (MS_METER_LAMBDA_ARN set) or dev-mode stderr
+	meterClient    *meter.Client        // dispatch-HTTP usage transport (dev + prod); never nil
 
 	// devMode is true under `mirrorstack dev` (HTTP serving + dev DB), false in
 	// Lambda/task-worker. It gates the dev-only per-app schema machinery:
@@ -266,18 +266,15 @@ func New(cfg Config) (*Module, error) {
 		m.sqsClient = sqsClient
 	}
 
-	// Meter client: production mode when MS_METER_LAMBDA_ARN is set (ARN is
-	// validated at construction so typos fail fast), dev-mode stderr sink
-	// otherwise. Never nil.
-	if meterARN := os.Getenv("MS_METER_LAMBDA_ARN"); meterARN != "" {
-		meterClient, err := meter.NewFromARN(context.Background(), meterARN)
-		if err != nil {
-			return nil, fmt.Errorf("mirrorstack: init meter client: %w", err)
-		}
-		m.meterClient = meterClient
-	} else {
-		m.meterClient = meter.NewDev(m.logger)
+	// Meter client: dispatch-HTTP transport in both dev and prod (Record POSTs
+	// each usage Event to the dispatch usage ingress, like ms.Emit). The HTTP
+	// client is always built (never nil); New fail-fast validates MS_DISPATCH_URL
+	// when set so a typo surfaces at startup rather than as silently lost usage.
+	meterClient, err := meter.New()
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack: init meter client: %w", err)
 	}
+	m.meterClient = meterClient
 
 	// A Config-provided description flows to the registry so it reaches the
 	// manifest like Name/Tags. Skip when empty to avoid a blank override.

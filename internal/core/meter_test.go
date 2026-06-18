@@ -3,11 +3,29 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
+
+// usageStub starts a dispatch usage-ingress stand-in (202), points
+// MS_DISPATCH_URL at it, and returns an app-scoped context. Record POSTs the
+// usage Event here (the transport is dispatch-HTTP in dev + prod, mirroring
+// ms.Emit), so a successful Record needs both an app-scoped ctx and a reachable
+// dispatch.
+func usageStub(t *testing.T) context.Context {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	return auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+}
 
 // TestMeter_DeclaresKindAndPriceIntoManifest asserts that ms.Meter records the
 // declared name + kind + unit + price into the manifest's metrics[] (the path
@@ -117,10 +135,11 @@ func TestMeter_ReservedPriceOverrideInManifest(t *testing.T) {
 // TestRecord_RejectsReservedName asserts a reserved metric — even when declared
 // as a price-override — can never be self-reported via ms.Record.
 func TestRecord_RejectsReservedName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("infra.compute.ms", meter.Price(0))
 
-	if err := m.Record(context.Background(), "infra.compute.ms", 1); err == nil {
+	if err := m.Record(ctx, "infra.compute.ms", 1); err == nil {
 		t.Error("expected an error recording a reserved platform-measured metric")
 	}
 }
@@ -136,10 +155,11 @@ func TestMeter_TopLevelPanicsBeforeInit(t *testing.T) {
 // for a DECLARED metric succeeds (dev client logs, returns nil), mirroring
 // ms.Emit's emit-by-name shape.
 func TestRecord_ResolvesDeclaredByName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("orders.placed", meter.Counter, meter.Unit("order"))
 
-	if err := m.Record(context.Background(), "orders.placed", 1); err != nil {
+	if err := m.Record(ctx, "orders.placed", 1); err != nil {
 		t.Fatalf("Record of a declared metric: %v", err)
 	}
 }
@@ -147,10 +167,11 @@ func TestRecord_ResolvesDeclaredByName(t *testing.T) {
 // TestRecord_RejectsUndeclaredName asserts declaration-first: ms.Record for a
 // name never declared via ms.Meter returns an error (no silent emit).
 func TestRecord_RejectsUndeclaredName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("orders.placed", meter.Counter)
 
-	if err := m.Record(context.Background(), "never.declared", 1); err == nil {
+	if err := m.Record(ctx, "never.declared", 1); err == nil {
 		t.Error("expected an error recording an undeclared metric name")
 	}
 }
