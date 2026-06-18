@@ -3,11 +3,31 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
+
+// usageStub starts a dispatch usage-ingress stand-in (202), points
+// MS_DISPATCH_URL at it, and returns an app-scoped context. Record POSTs the
+// usage Event here (the transport is dispatch-HTTP in dev + prod, mirroring
+// ms.Emit), so a successful Record needs both an app-scoped ctx and a reachable
+// dispatch.
+func usageStub(t *testing.T) context.Context {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	return auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+}
 
 // TestMeter_DeclaresKindAndPriceIntoManifest asserts that ms.Meter records the
 // declared name + kind + unit + price into the manifest's metrics[] (the path
@@ -117,10 +137,11 @@ func TestMeter_ReservedPriceOverrideInManifest(t *testing.T) {
 // TestRecord_RejectsReservedName asserts a reserved metric — even when declared
 // as a price-override — can never be self-reported via ms.Record.
 func TestRecord_RejectsReservedName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("infra.compute.ms", meter.Price(0))
 
-	if err := m.Record(context.Background(), "infra.compute.ms", 1); err == nil {
+	if err := m.Record(ctx, "infra.compute.ms", 1); err == nil {
 		t.Error("expected an error recording a reserved platform-measured metric")
 	}
 }
@@ -136,10 +157,11 @@ func TestMeter_TopLevelPanicsBeforeInit(t *testing.T) {
 // for a DECLARED metric succeeds (dev client logs, returns nil), mirroring
 // ms.Emit's emit-by-name shape.
 func TestRecord_ResolvesDeclaredByName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("orders.placed", meter.Counter, meter.Unit("order"))
 
-	if err := m.Record(context.Background(), "orders.placed", 1); err != nil {
+	if err := m.Record(ctx, "orders.placed", 1); err != nil {
 		t.Fatalf("Record of a declared metric: %v", err)
 	}
 }
@@ -147,10 +169,173 @@ func TestRecord_ResolvesDeclaredByName(t *testing.T) {
 // TestRecord_RejectsUndeclaredName asserts declaration-first: ms.Record for a
 // name never declared via ms.Meter returns an error (no silent emit).
 func TestRecord_RejectsUndeclaredName(t *testing.T) {
+	ctx := usageStub(t)
 	m, _ := New(Config{ID: "media"})
 	m.Meter("orders.placed", meter.Counter)
 
-	if err := m.Record(context.Background(), "never.declared", 1); err == nil {
+	if err := m.Record(ctx, "never.declared", 1); err == nil {
 		t.Error("expected an error recording an undeclared metric name")
+	}
+}
+
+// countingUsageStub starts a dispatch usage-ingress stand-in that counts POSTs
+// (and waits via the returned wait fn for an expected number to arrive), points
+// MS_DISPATCH_URL at it, and returns an app-scoped ctx + the hit accessor. Used
+// by the lifecycle-flush tests where sends may be asynchronous.
+func countingUsageStub(t *testing.T) (ctx context.Context, hits func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	ctx = auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	return ctx, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// TestWithMeterFlush_LambdaFlushesBeforeReturn asserts the Lambda-mode wrapper
+// (syncFlush=true) drains+sends every buffered event BEFORE the wrapped handler
+// returns — freeze-safe. Records happen inside the handler and are buffered; by
+// the time ServeHTTP returns, all POSTs must have landed.
+func TestWithMeterFlush_LambdaFlushesBeforeReturn(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	ctx, hits := countingUsageStub(t)
+	m.Meter("orders.placed", meter.Counter)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for range 3 {
+			if err := m.meterClient.Record(r.Context(), "orders.placed", 1); err != nil {
+				t.Errorf("Record: %v", err)
+			}
+		}
+		// Inside the handler, before flush, nothing has been POSTed (buffered).
+		if got := hits(); got != 0 {
+			t.Errorf("buffered Record POSTed inside handler: %d hits, want 0", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := m.withMeterFlush(inner, true /* syncFlush: Lambda */)
+	req := httptest.NewRequest("POST", "/x", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Synchronous flush: by the time ServeHTTP returns all 3 must be sent — no
+	// sleep/poll needed (that is exactly the freeze-safety guarantee).
+	if got := hits(); got != 3 {
+		t.Errorf("Lambda flush: %d ingress hits after ServeHTTP returned, want 3 (must be sync-before-return)", got)
+	}
+}
+
+// TestWithMeterFlush_BackgroundFlushOnLongRunning asserts the non-Lambda wrapper
+// (syncFlush=false) sends the buffered events AFTER the response — eventually,
+// from a background goroutine.
+func TestWithMeterFlush_BackgroundFlushOnLongRunning(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	ctx, hits := countingUsageStub(t)
+	m.Meter("orders.placed", meter.Counter)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for range 2 {
+			if err := m.meterClient.Record(r.Context(), "orders.placed", 1); err != nil {
+				t.Errorf("Record: %v", err)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := m.withMeterFlush(inner, false /* background flush */)
+	req := httptest.NewRequest("POST", "/x", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Background goroutine — poll briefly for the sends to land.
+	deadline := time.After(2 * time.Second)
+	for hits() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("background flush: %d ingress hits, want 2", hits())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// TestWithMeterFlush_NilClientIsNoop asserts the wrapper is a pass-through (no
+// panic, no buffer) when the meter client is nil.
+func TestWithMeterFlush_NilClientIsNoop(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	m.meterClient = nil
+
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := m.withMeterFlush(inner, true)
+	req := httptest.NewRequest("POST", "/x", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req) // must not panic
+
+	if !called {
+		t.Error("nil-client wrapper did not call the inner handler")
+	}
+}
+
+// TestTaskHandlerWithMeterFlush_FlushesAfterHandler asserts the task wrapper
+// buffers Records during the handler and flushes (synchronously) after it
+// returns, so events are delivered before the task is acknowledged.
+func TestTaskHandlerWithMeterFlush_FlushesAfterHandler(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	ctx, hits := countingUsageStub(t)
+	m.Meter("orders.placed", meter.Counter)
+
+	wrapped := m.taskHandlerWithMeterFlush(func(c context.Context, _ json.RawMessage) error {
+		for range 2 {
+			if err := m.meterClient.Record(c, "orders.placed", 1); err != nil {
+				t.Errorf("Record: %v", err)
+			}
+		}
+		if got := hits(); got != 0 {
+			t.Errorf("task buffered Record POSTed inside handler: %d hits, want 0", got)
+		}
+		return nil
+	})
+
+	if err := wrapped(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("wrapped task handler: %v", err)
+	}
+	// Synchronous flush after the handler returns.
+	if got := hits(); got != 2 {
+		t.Errorf("task flush: %d ingress hits, want 2 (sync after handler)", got)
+	}
+}
+
+// TestTaskHandlerWithMeterFlush_NilClientIsNoop asserts the task wrapper returns
+// the handler unwrapped (still runs, no panic) when the meter client is nil.
+func TestTaskHandlerWithMeterFlush_NilClientIsNoop(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	m.meterClient = nil
+
+	called := false
+	wrapped := m.taskHandlerWithMeterFlush(func(context.Context, json.RawMessage) error {
+		called = true
+		return nil
+	})
+	if err := wrapped(context.Background(), json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("wrapped: %v", err)
+	}
+	if !called {
+		t.Error("nil-client task wrapper did not call the inner handler")
 	}
 }

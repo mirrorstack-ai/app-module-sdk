@@ -110,7 +110,7 @@ type Module struct {
 	// once" contract as internalAuth/proxyGuard — so every Platform()
 	// registration reuses one closure instead of re-reading env + re-allocating
 	// the closure (and its secret snapshot) on each call.
-	platformAuth func(http.Handler) http.Handler
+	platformAuth   func(http.Handler) http.Handler
 	poolCache      *db.PoolCache // production: per-app DB pools
 	devDBOnce      sync.Once     // dev mode: lazy DB init
 	devDB          *db.DB
@@ -125,7 +125,7 @@ type Module struct {
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
 	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
 	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
-	meterClient    *meter.Client        // prod (MS_METER_LAMBDA_ARN set) or dev-mode stderr
+	meterClient    *meter.Client        // dispatch-HTTP usage transport (dev + prod); never nil
 
 	// devMode is true under `mirrorstack dev` (HTTP serving + dev DB), false in
 	// Lambda/task-worker. It gates the dev-only per-app schema machinery:
@@ -266,18 +266,15 @@ func New(cfg Config) (*Module, error) {
 		m.sqsClient = sqsClient
 	}
 
-	// Meter client: production mode when MS_METER_LAMBDA_ARN is set (ARN is
-	// validated at construction so typos fail fast), dev-mode stderr sink
-	// otherwise. Never nil.
-	if meterARN := os.Getenv("MS_METER_LAMBDA_ARN"); meterARN != "" {
-		meterClient, err := meter.NewFromARN(context.Background(), meterARN)
-		if err != nil {
-			return nil, fmt.Errorf("mirrorstack: init meter client: %w", err)
-		}
-		m.meterClient = meterClient
-	} else {
-		m.meterClient = meter.NewDev(m.logger)
+	// Meter client: dispatch-HTTP transport in both dev and prod (Record POSTs
+	// each usage Event to the dispatch usage ingress, like ms.Emit). The HTTP
+	// client is always built (never nil); New fail-fast validates MS_DISPATCH_URL
+	// when set so a typo surfaces at startup rather than as silently lost usage.
+	meterClient, err := meter.New()
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack: init meter client: %w", err)
 	}
+	m.meterClient = meterClient
 
 	// A Config-provided description flows to the registry so it reaches the
 	// manifest like Name/Tags. Skip when empty to avoid a blank override.
@@ -555,7 +552,7 @@ func (m *Module) Start() error {
 		if err := requireInternalSecret(); err != nil {
 			return err
 		}
-		handler := runtime.NewLambdaHandler(m.router)
+		handler := runtime.NewLambdaHandler(m.withMeterFlush(m.router, true /* syncFlush: Lambda freezes after return */))
 		lambda.Start(handler)
 		return nil
 	}
@@ -598,10 +595,74 @@ func (m *Module) Start() error {
 	}
 	addr := ":" + port
 	m.logger.Printf("%s module (%s) listening on %s", m.config.Name, m.config.ID, addr)
-	if err := http.ListenAndServe(addr, m.router); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := http.ListenAndServe(addr, m.withMeterFlush(m.router, false /* background flush: process is long-lived */)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// withMeterFlush wraps an http.Handler so each request gets a request-scoped
+// usage-meter buffer: ms.Record APPENDS to the buffer instead of POSTing inline,
+// and the buffered events are flushed (sent concurrently) once the handler
+// returns. This keeps a synchronous per-Record round-trip off the request hot
+// path.
+//
+// Mode-aware flush (syncFlush picks the mode; the caller passes
+// runtime.IsLambda()):
+//   - syncFlush=true (Lambda): flush SYNCHRONOUSLY before this handler returns.
+//     The Lambda execution environment FREEZES after the handler returns, so a
+//     detached background goroutine would be killed mid-send — the flush MUST
+//     complete within the invocation. Because NewLambdaHandler builds the
+//     LambdaResponse only after ServeHTTP returns, a synchronous flush here is
+//     guaranteed to finish before the response leaves the process.
+//   - syncFlush=false (long-running HTTP server): flush in a BACKGROUND
+//     goroutine after the response is written. The process is long-lived, so the
+//     sends outlive the request safely and the response is not delayed by the
+//     POSTs. A detached context is used so request cancellation (client
+//     disconnect) doesn't abort the billing sends.
+//
+// No-op safety: if the meter client is nil/unconfigured the wrapper installs no
+// buffer and returns the handler unchanged, so it never panics.
+func (m *Module) withMeterFlush(next http.Handler, syncFlush bool) http.Handler {
+	if m.meterClient == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, _ := meter.WithBuffer(r.Context())
+		r = r.WithContext(ctx)
+
+		if syncFlush {
+			// Freeze-safe: drain+send before returning (blocks the response).
+			next.ServeHTTP(w, r)
+			m.meterClient.Flush(ctx)
+			return
+		}
+
+		// Long-running runtime: respond first, send in the background. Detach
+		// from the request ctx so a client disconnect can't cancel the sends.
+		next.ServeHTTP(w, r)
+		flushCtx := context.WithoutCancel(ctx)
+		go m.meterClient.Flush(flushCtx)
+	})
+}
+
+// taskHandlerWithMeterFlush wraps a task handler so the task gets a
+// request-scoped usage-meter buffer (ms.Record buffers; events flush when the
+// handler returns). Unlike the HTTP server path the flush is SYNCHRONOUS: the
+// worker deletes the SQS message and drains in-flight handlers on SIGTERM, so a
+// detached goroutine could be cut off mid-send — flushing inline guarantees the
+// events are delivered before the task is acknowledged. If the meter client is
+// nil the handler is returned unwrapped (no-op).
+func (m *Module) taskHandlerWithMeterFlush(handler TaskHandler) runtime.TaskHandlerFunc {
+	if m.meterClient == nil {
+		return runtime.TaskHandlerFunc(handler)
+	}
+	return func(ctx context.Context, payload json.RawMessage) error {
+		ctx, _ = meter.WithBuffer(ctx)
+		err := handler(ctx, payload)
+		m.meterClient.Flush(ctx)
+		return err
+	}
 }
 
 // startTaskWorker runs the SQS poll loop. Spawns MS_TASK_CONCURRENCY
@@ -623,11 +684,17 @@ func (m *Module) startTaskWorker() error {
 		return err
 	}
 
-	// Build the handler map in the shape the worker loop expects.
+	// Build the handler map in the shape the worker loop expects. Each handler
+	// is wrapped so the task gets a request-scoped usage-meter buffer: ms.Record
+	// buffers, and the buffered events are flushed once the task handler returns.
+	// The flush is SYNCHRONOUS (not a detached goroutine) so the events are sent
+	// before the worker deletes the SQS message / drains on shutdown — a
+	// background goroutine could otherwise be cut off mid-send at SIGTERM.
 	handlers := make(map[string]runtime.TaskEntry, len(m.taskHandlers))
 	for name, entry := range m.taskHandlers {
+		handler := entry.handler
 		handlers[name] = runtime.TaskEntry{
-			Handler: runtime.TaskHandlerFunc(entry.handler),
+			Handler: m.taskHandlerWithMeterFlush(handler),
 			Timeout: entry.timeout,
 		}
 	}

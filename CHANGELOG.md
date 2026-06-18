@@ -7,6 +7,19 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.4] - 2026-06-17
+
+The usage-meter transport moves from an AWS Lambda invoke to a dispatch-HTTP POST, exactly mirroring `ms.Emit`. The public metering API (`ms.Meter` declaration, `ms.Record` emit-by-name, the v1 envelope with no kind on the wire, the reserved-namespace guards) is unchanged — only how a recorded event reaches the platform changes.
+
+### Changed
+- **Meter transport is now dispatch-HTTP, not Lambda.** `ms.Record` POSTs the usage `Event` envelope to the platform dispatch usage ingress at `{MS_DISPATCH_URL | dev fallback}/apps/{appID}/usage` (the same transport idiom as `ms.Emit` / `ms.Call`), in **both dev and prod** — there is no separate dev sink. Dispatch re-derives the authoritative app/module/owner/recorded_at and forwards to billing-engine; the SDK's `Hint` fields stay untrusted. The app id comes from the request context's auth identity (`auth.Get`), and an empty app id returns an error (no panic, no HTTP call), mirroring `ms.Emit`. The transport HTTP client is built once at `meter.New()` and is never nil. The non-fatal contract is unchanged: a transport failure is returned (then logged by the caller), never propagated to fail the handler. The `EventID` is still minted once per `Record` call and reused across any transport retry, so the platform's `ON CONFLICT(event_id)` dedupe holds.
+
+### Added
+- **Request-scoped batched flush keeps usage POSTs off the handler hot path.** Instead of POSTing inline on every `ms.Record` (one round-trip per call, up to the 15s timeout, in the request hot path), the SDK now buffers each request's recorded events and flushes them together — sent **concurrently** (bounded), one POST per event (the dispatch ingress contract is unchanged, still one event per POST). The flush is **mode-aware**: on AWS Lambda it runs **synchronously before the handler returns** (the execution environment freezes after return, so a detached send would be killed mid-flight); on long-running runtimes (the local HTTP server and the ECS task worker) it runs in the background after the response so the response is never delayed. The public API is unchanged (`ms.Meter` declaration + `ms.Record(ctx, name, value)`, the v1 envelope, the reserved/undeclared/finite/non-negative guards, once-per-`Record` `EventID`). A `Record` made **outside** a wrapped request (dev, cron, or any call with no buffer in context) falls back to the previous inline synchronous send. The non-fatal contract is unchanged: a flush send failure is logged and swallowed, never surfaced to the caller.
+
+### Removed
+- **`MS_METER_LAMBDA_ARN` and the AWS Lambda meter transport.** The `meter` package no longer invokes a Lambda: the `MS_METER_LAMBDA_ARN` environment variable is gone, along with `meter.NewFromARN` / `meter.NewDev` (replaced by a single `meter.New()`), the ARN-format validation, and the `github.com/aws/aws-sdk-go-v2/service/lambda` dependency. Usage transport is configured via **`MS_DISPATCH_URL`** (the same base `ms.Emit` / `ms.Call` use); `meter.New()` fail-fast validates it as a parseable http(s) base when set, so a typo surfaces at startup rather than as silently lost usage. An unset `MS_DISPATCH_URL` falls back to the local dispatch for dev.
+
 ## [v0.2.3] - 2026-06-17
 
 Metric kind moves from a positional argument to a declaration OPTION, and a module may now override the **customer** price of a platform-infra metric. The runtime emit (`ms.Record`) and the declaration-first contract are unchanged; only the `ms.Meter` shape and the reserved-namespace rules change.
