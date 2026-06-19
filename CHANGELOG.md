@@ -7,6 +7,13 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.5] - 2026-06-19
+
+A module can now mark one of its own tables **read-only eligible** for a depending module — the producer half of the cross-module data contract. v0.2.0's design notes deferred this in favor of `pg_class` introspection; an explicit declaration is clearer (the producer's intent is in source, not inferred) and keeps the GRANT surface auditable, while preserving the same trust model: the producer marks a table readable, the **app owner** decides who reads it.
+
+### Added
+- **`ms.ExposeTable(name string)`** — a zero-runtime DECLARATION that marks a table in the module's `mod_<id>` schema as SELECT-eligible for a depending module (the producer side of `ms.DependsOn`'s `n.Table`). It surfaces in the manifest under a new top-level `exposes` block — `"exposes": { "tables": [...] }` — a flat, **sorted, de-duplicated** list of table names. The platform catalog issues `GRANT SELECT` against a depending module's DB role only after the **app owner** approves that dependency. v1 is **TABLES ONLY, read-only**. There is intentionally **no per-consumer `readableBy` allowlist**: in a marketplace the consumers are third parties, so a publisher-controlled reader list is the wrong trust model — the producer opts a table *in* to being readable, the app owner (the trust root) decides *who* reads. Repeated/feature-flagged declarations of the same name compose safely (set union); an empty or non-identifier-shaped name (`^[a-z][a-z0-9_]{0,62}$`, the Postgres NAMEDATALEN ceiling) panics at startup. The manifest always carries `exposes` (an empty `tables` array when the module exposes nothing).
+
 ## [v0.2.4] - 2026-06-17
 
 The usage-meter transport moves from an AWS Lambda invoke to a dispatch-HTTP POST, exactly mirroring `ms.Emit`. The public metering API (`ms.Meter` declaration, `ms.Record` emit-by-name, the v1 envelope with no kind on the wire, the reserved-namespace guards) is unchanged — only how a recorded event reaches the platform changes.

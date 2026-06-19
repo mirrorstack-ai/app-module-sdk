@@ -280,6 +280,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 - [x] `ms.Describe()` — module description for agent discovery
 - [x] `ms.DependsOn()` — dependency declaration with auto-detected required/optional
+- [x] `ms.ExposeTable()` — mark a table read-only (SELECT) eligible for depending modules; app owner approves who reads (no producer allowlist)
 - [x] `ms.Resolve[T]()` — typed runtime lookup for optional deps (stub pending cross-module wiring)
 - [x] `ms.MCPTool()` — agent-callable tool with JSON Schema derivation
 - [x] `ms.MCPResource()` — agent-readable resource
