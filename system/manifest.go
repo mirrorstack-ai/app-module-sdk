@@ -29,6 +29,12 @@ type ManifestPayload struct {
 	Versions     map[string]MigrationVersions        `json:"versions"`
 	Routes       map[registry.Scope][]registry.Route `json:"routes"`
 	Events       ManifestEvents                      `json:"events"`
+	// Exposes lists the tables this module marks readable (SELECT-eligible)
+	// by a depending module (ms.ExposeTable). The platform catalog issues
+	// GRANT SELECT against the depending module's DB role after the app
+	// owner approves the dependency. Always present; tables is an empty
+	// array when nothing is exposed.
+	Exposes      ManifestExposes                     `json:"exposes"`
 	Schedules    []registry.Schedule                 `json:"schedules"`
 	Tasks        []registry.Task                     `json:"tasks"`
 	Permissions  []registry.Permission               `json:"permissions"`
@@ -94,6 +100,16 @@ type ManifestEvents struct {
 	Subscribes map[string]string `json:"subscribes"`
 }
 
+// ManifestExposes declares the read-only (SELECT) surface this module opens to
+// depending modules. Tables is a flat, sorted, de-duplicated list of table
+// NAMES (ms.ExposeTable) in the module's `mod_<id>` schema. There is no
+// per-consumer "readableBy" list: the producer only marks a table
+// SELECT-eligible; the app owner decides WHO reads it by approving a
+// dependency. v1 is TABLES ONLY.
+type ManifestExposes struct {
+	Tables []string `json:"tables"`
+}
+
 // buildManifestMCP projects the registry's MCP declarations into wire-safe
 // entries (Handler stripped). Uses the shared toolEntries/resourceEntries
 // helpers from mcp.go so list endpoints and manifest stay in lockstep.
@@ -154,6 +170,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Versions:      versions,
 			Routes:        reg.Routes(),
 			Events:        ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Exposes:       ManifestExposes{Tables: reg.ExposedTables()},
 			Schedules:     reg.Schedules(),
 			Tasks:         reg.Tasks(),
 			Permissions:   reg.Permissions(),

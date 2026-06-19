@@ -182,6 +182,7 @@ type Registry struct {
 	tasks                 []Task
 	permissions           []Permission
 	metrics               []MetricDecl
+	exposedTables         []string
 	description           string
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution

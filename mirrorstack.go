@@ -357,6 +357,21 @@ func Resolve[T any](id string) (T, bool) { return core.Resolve[T](id) }
 // after app-owner approval. Pair with ms.DependsOn(host). See core.ContributesTo.
 func ContributesTo(host, slot string, payload any) { core.ContributesTo(host, slot, payload) }
 
+// ExposeTable marks a table in this module's schema as read-only
+// SELECT-eligible for a depending module — the producer side of DependsOn's
+// n.Table. It is a zero-runtime DECLARATION that lands in the manifest under
+// exposes.tables; the platform issues GRANT SELECT after the app owner
+// approves a dependency.
+//
+// The producer only opts a table IN to being readable — it does NOT decide
+// WHO reads it. The app owner (not the producer) is the trust root and
+// chooses which installed modules may read by approving their dependency.
+// There is intentionally NO consumer allowlist: in a marketplace the
+// consumers are third parties, so a publisher-controlled reader list is the
+// wrong model. v1 is TABLES ONLY, read-only (SELECT). Panics on an empty or
+// invalid table identifier. Call from startup code.
+func ExposeTable(name string) { core.ExposeTable(name) }
+
 // --- UI surface ---
 
 // ModuleUI is the module's declared UI surface. Pass to ms.RegisterUI.

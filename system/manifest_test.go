@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -131,10 +132,34 @@ func TestManifest_EmptyEventsAndSchedules_NotNull(t *testing.T) {
 	// Note: "module" is omitempty on MigrationVersions and VersionEntry, so
 	// the empty manifest emits `"migration":{"app":""}` rather than
 	// `{"app":"","module":""}`. The "app" field is always present.
-	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`, `"permissions":[]`, `"migration":{"app":""}`} {
+	for _, want := range []string{`"emits":[]`, `"subscribes":{}`, `"schedules":[]`, `"versions":{}`, `"permissions":[]`, `"migration":{"app":""}`, `"exposes":{"tables":[]}`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("manifest body missing %q\nbody: %s", want, body)
 		}
+	}
+}
+
+func TestManifest_Exposes(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	// Declare out of order — the manifest must emit a sorted, de-duplicated list.
+	reg.AddExposedTable("orders")
+	reg.AddExposedTable("invoices")
+	reg.AddExposedTable("orders") // dup, dropped
+
+	got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, reg, nil))
+
+	if !slices.Equal(got.Exposes.Tables, []string{"invoices", "orders"}) {
+		t.Errorf("exposes.tables = %v, want sorted [invoices orders]", got.Exposes.Tables)
+	}
+
+	// Wire shape must be exactly {"exposes":{"tables":["invoices","orders"]}}.
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, reg, nil).ServeHTTP(rec, req)
+	if want := `"exposes":{"tables":["invoices","orders"]}`; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("manifest body missing %q\nbody: %s", want, rec.Body.String())
 	}
 }
 
