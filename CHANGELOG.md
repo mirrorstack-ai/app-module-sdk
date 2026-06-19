@@ -7,6 +7,13 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.6] - 2026-06-20
+
+Prepares the SDK for the production module transport. In production a module runs as a Lambda function invoked via the HTTP-shaped `LambdaRequest` envelope; this closes the one kernel gap on that receive path so a deployed module's internal/MCP auth works.
+
+### Changed
+- **`NewLambdaHandler` no longer strips the platform-auth secret headers.** The Lambda receive path strips spoofable `X-MS-*` identity *claims* (`X-MS-User-ID`, `X-MS-App-ID`, `X-MS-App-Role`) — trusted identity arrives via the typed `LambdaRequest` fields — but now **exempts the two platform-auth *secret* headers** (`X-MS-Internal-Secret`, `X-MS-Platform-Token`). Previously every `x-ms-*` header was dropped before the router ran, so a Lambda-invoked module's `InternalAuth` / `RequireProxy` middleware could never see the secret and rejected every internal/MCP call. The secrets are platform-injected credentials, not client-spoofable claims (the platform builds a fresh header set per invoke), so letting them through is safe and restores the documented `internalAuth` behavior on the Lambda path.
+
 ## [v0.2.5] - 2026-06-19
 
 A module can now mark one of its own tables **read-only eligible** for a depending module — the producer half of the cross-module data contract. v0.2.0's design notes deferred this in favor of `pg_class` introspection; an explicit declaration is clearer (the producer's intent is in source, not inferred) and keeps the GRANT surface auditable, while preserving the same trust model: the producer marks a table readable, the **app owner** decides who reads it.
