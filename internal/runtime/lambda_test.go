@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -171,6 +172,73 @@ func TestNewLambdaHandler_StripXMSHeaders(t *testing.T) {
 	}
 	if body["legit"] != "text/plain" {
 		t.Errorf("Content-Type should pass through, got %q", body["legit"])
+	}
+}
+
+// TestNewLambdaHandler_AuthSecretHeadersSurvive pins the prod-transport
+// contract (decisions/09 §4): the platform-auth SECRET headers must reach the
+// module router so internalAuth / RequireProxy can validate them on the Lambda
+// path, while identity-CLAIM headers stay stripped (identity rides typed fields).
+func TestNewLambdaHandler_AuthSecretHeadersSurvive(t *testing.T) {
+	r := chi.NewRouter()
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"internalSecret": r.Header.Get(auth.HeaderInternalSecret),
+			"platformToken":  r.Header.Get(auth.HeaderPlatformToken),
+			"userID":         r.Header.Get(auth.HeaderUserID),
+			"appID":          r.Header.Get(auth.HeaderAppID),
+			"appRole":        r.Header.Get(auth.HeaderAppRole),
+		})
+	})
+
+	handler := NewLambdaHandler(r)
+	payload := mustMarshal(t, LambdaRequest{
+		Method: "GET",
+		Path:   "/check",
+		Headers: map[string]string{
+			auth.HeaderInternalSecret: "platform-secret", // exempt — must survive
+			auth.HeaderPlatformToken:  "platform-token",   // exempt — must survive
+			auth.HeaderUserID:         "spoofed-user",      // claim — must be stripped
+			auth.HeaderAppID:          "spoofed-app",       // claim — must be stripped
+			auth.HeaderAppRole:        "admin",             // claim — must be stripped
+		},
+	})
+
+	resp, err := handler(context.Background(), payload)
+	requireNoErr(t, err)
+
+	var body map[string]string
+	if err := json.Unmarshal([]byte(resp.Body), &body); err != nil {
+		t.Fatalf("unmarshal handler response: %v", err)
+	}
+
+	if body["internalSecret"] != "platform-secret" {
+		t.Errorf("%s must survive the strip, got %q", auth.HeaderInternalSecret, body["internalSecret"])
+	}
+	if body["platformToken"] != "platform-token" {
+		t.Errorf("%s must survive the strip, got %q", auth.HeaderPlatformToken, body["platformToken"])
+	}
+	for _, claim := range []string{"userID", "appID", "appRole"} {
+		if body[claim] != "" {
+			t.Errorf("identity claim %q must be stripped, got %q", claim, body[claim])
+		}
+	}
+}
+
+// TestMsAuthSecretHeadersMatchConstants structurally pins the exempt-header map
+// to the auth package constants. The behavioral test above sends whatever the
+// constants say, so a rename of a constant WITHOUT updating the map would slip
+// past it; this test fails closed on that drift.
+func TestMsAuthSecretHeadersMatchConstants(t *testing.T) {
+	for _, h := range []string{auth.HeaderInternalSecret, auth.HeaderPlatformToken} {
+		if !msAuthSecretHeaders[strings.ToLower(h)] {
+			t.Errorf("auth secret header %q is missing from the msAuthSecretHeaders exempt set", h)
+		}
+	}
+	for _, h := range []string{auth.HeaderUserID, auth.HeaderAppID, auth.HeaderAppRole} {
+		if msAuthSecretHeaders[strings.ToLower(h)] {
+			t.Errorf("identity claim %q must NOT be exempt from the strip", h)
+		}
 	}
 }
 

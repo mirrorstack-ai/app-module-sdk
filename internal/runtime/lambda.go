@@ -58,6 +58,29 @@ func jsonError(code int, msg string) LambdaResponse {
 	}
 }
 
+// msAuthSecretHeaders are the platform-injected auth SECRET headers (lower-cased
+// for comparison). Unlike the spoofable identity-claim headers (x-ms-user-id,
+// x-ms-app-id, x-ms-app-role), these are credentials the platform sets and the
+// module's internalAuth / RequireProxy middleware must still validate — so they
+// survive the x-ms-* strip on the Lambda path, exactly as the dev tunnel injects
+// them. Kept in sync with auth.HeaderInternalSecret / auth.HeaderPlatformToken
+// (asserted in lambda_test.go). See decisions/09 §4 (prod module transport).
+var msAuthSecretHeaders = map[string]bool{
+	"x-ms-internal-secret": true,
+	"x-ms-platform-token":  true,
+}
+
+// isStrippedIdentityHeader reports whether an inbound header must be dropped
+// before the module router sees it: every x-ms-* header EXCEPT the platform-auth
+// secrets in msAuthSecretHeaders. Trusted identity arrives via the typed
+// LambdaRequest fields, so identity-claim headers are always stripped.
+func isStrippedIdentityHeader(k string) bool {
+	if len(k) < 5 || !strings.EqualFold(k[:5], "x-ms-") {
+		return false
+	}
+	return !msAuthSecretHeaders[strings.ToLower(k)]
+}
+
 // NewLambdaHandler wraps an http.Handler into a function compatible with
 // aws-lambda-go's lambda.Start().
 func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessage) (LambdaResponse, error) {
@@ -83,9 +106,15 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 			return jsonError(500, "failed to build request"), nil
 		}
 
-		// Copy headers but strip X-MS-* to prevent spoofing
+		// Copy headers, stripping spoofable X-MS-* identity CLAIMS (user/app/
+		// role) — trusted identity arrives via the typed LambdaRequest fields
+		// below, never from headers. The platform-auth SECRET headers are exempt
+		// (see msAuthSecretHeaders): they are credentials the module's
+		// internalAuth / RequireProxy middleware must still see. Safe because the
+		// platform builds a fresh header set per invoke — nothing client-supplied
+		// reaches here.
 		for k, v := range req.Headers {
-			if len(k) >= 5 && strings.EqualFold(k[:5], "x-ms-") {
+			if isStrippedIdentityHeader(k) {
 				continue
 			}
 			httpReq.Header.Set(k, v)
