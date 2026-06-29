@@ -255,6 +255,14 @@ func New(cfg Config) (*Module, error) {
 		m.router.Use(m.devAppSchemaMiddleware)
 	}
 
+	// Structured logging: JSON to stdout (captured by CloudWatch in prod and the
+	// `mirrorstack dev` runner in dev) + a per-request correlated logger (ms.Log)
+	// carrying the trusted app_id/request_id/module_id. Mounted after the dev
+	// schema middleware so the request's identity is already in context; runs on
+	// every request, both serving paths.
+	configureLogging()
+	m.router.Use(m.requestLogMiddleware)
+
 	// Eagerly initialize SQS client when queue URL is configured.
 	// LoadDefaultConfig may hit IMDS on first cold start in Lambda; acceptable
 	// since this runs once at process init, not per request.

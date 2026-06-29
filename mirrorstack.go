@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -265,6 +266,17 @@ func Emit(ctx context.Context, name string, payload any) error {
 // are caller-controlled and forgeable. ms.AppID is the trusted source.
 func AppID(ctx context.Context) string {
 	return core.AppID(ctx)
+}
+
+// Log returns the request's structured logger, pre-tagged with the trusted
+// app_id / request_id / module_id correlation fields so every line is
+// attributable in the platform Logcat. Prefer it over the standard library
+// `log` for all module logging. Outside a request it returns the process
+// default logger.
+//
+//	ms.Log(r.Context()).Info("user signed in", "provider", "google")
+func Log(ctx context.Context) *slog.Logger {
+	return core.LoggerFrom(ctx)
 }
 
 // WithAppID returns a context whose inter-module Call scope is the given app,
