@@ -80,3 +80,38 @@ func TestRequestLogMiddleware_TagsCorrelation(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestLogMiddleware_EmitsAccessLine(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	m := &Module{config: Config{ID: "oauthcore"}}
+	// A handler that sets a non-200 status and never calls ms.Log: the access
+	// line must still appear, with the status the handler wrote.
+	h := m.requestLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/public/start?state=secret", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	out := buf.String()
+	for _, want := range []string{
+		`"msg":"request"`,
+		`"method":"GET"`,
+		`"path":"/public/start"`,
+		`"status":403`,
+		`"duration_ms":`,
+		`"module_id":"oauthcore"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("access line missing %s\ngot: %s", want, out)
+		}
+	}
+	// the query string (which can carry tokens) must never be logged
+	if strings.Contains(out, "state=secret") {
+		t.Errorf("access line leaked query string\ngot: %s", out)
+	}
+}
