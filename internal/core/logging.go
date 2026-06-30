@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
@@ -41,10 +42,12 @@ func parseLogLevel(s string) slog.Level {
 
 // requestLogMiddleware attaches a per-request *slog.Logger to the context,
 // pre-tagged with the trusted correlation fields so every ms.Log(ctx) line is
-// attributable in the platform Logcat. It runs on BOTH serving paths (it only
-// READS context): identity is already established upstream — the Lambda shim's
-// InjectResources in prod, devAppSchemaMiddleware in dev — and app id is the
-// trusted, unspoofable value (never a request field).
+// attributable in the platform Logcat, and emits one access line per request so
+// the Logcat shows traffic out of the box — even for modules that never call
+// ms.Log themselves. It runs on BOTH serving paths (it only READS context):
+// identity is already established upstream — the Lambda shim's InjectResources
+// in prod, devAppSchemaMiddleware in dev — and app id is the trusted,
+// unspoofable value (never a request field).
 func (m *Module) requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -52,8 +55,39 @@ func (m *Module) requestLogMiddleware(next http.Handler) http.Handler {
 		if id := auth.Get(ctx); id != nil {
 			logger = logger.With("app_id", id.AppID, "user_id", id.UserID, "app_role", id.AppRole)
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, logCtxKey{}, logger)))
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r.WithContext(context.WithValue(ctx, logCtxKey{}, logger)))
+		// path only — a query string can carry OAuth state/tokens, which must
+		// never land in logs. status/duration give the Logcat a usable access
+		// trail without the module writing any log code of its own.
+		logger.LogAttrs(ctx, slog.LevelInfo, "request",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rec.status),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+		)
 	})
+}
+
+// statusRecorder captures the response status for the access line. It defaults
+// to 200 — what net/http assumes when a handler writes a body without an
+// explicit WriteHeader — and forwards Flush so wrapping never silently disables
+// a streaming (SSE) handler.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // requestID is the prod Lambda request id when present (so the module line shares
