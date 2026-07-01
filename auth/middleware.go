@@ -268,11 +268,16 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Lambda: headers already stripped + identity injected from payload
-			// (runtime.InjectResources). The payload is the trust boundary, so
-			// pass through WITHOUT promoting from headers — there are none to
-			// read, and the preset identity must not be touched.
-			if inLambda {
+			// Lambda / payload-trusted: headers already stripped + identity
+			// injected from the typed payload (runtime.InjectResources). The
+			// payload is the trust boundary, so pass through WITHOUT promoting
+			// from headers — there are none to read, and the preset identity
+			// must not be touched. The payload-trust mark is set only by
+			// runtime.NewLambdaHandler (real Lambda, or the dev lambda-invoke
+			// shim behind its envelope-secret gate), never from inbound
+			// request data — so honoring it here cannot be forged by a direct
+			// caller.
+			if inLambda || PayloadTrusted(r.Context()) {
 				next.ServeHTTP(w, r)
 				return
 			}
