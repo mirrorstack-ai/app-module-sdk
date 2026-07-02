@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -133,6 +134,12 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		if err != nil {
 			return jsonError(400, err.Error()), nil
 		}
+		// Payload-trust mark: RequireProxy passes a marked request through
+		// exactly like Lambda mode (the envelope never carries the per-session
+		// X-MS-Platform-Token). NewLambdaHandler must stay the ONLY writer —
+		// its callers are the real Lambda transport and the dev lambda-invoke
+		// shim, which gates on the envelope secret before invoking.
+		reqCtx = auth.WithPayloadTrust(reqCtx)
 		httpReq = httpReq.WithContext(reqCtx)
 
 		rec := httptest.NewRecorder()

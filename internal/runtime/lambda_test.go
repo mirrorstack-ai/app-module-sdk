@@ -242,6 +242,31 @@ func TestMsAuthSecretHeadersMatchConstants(t *testing.T) {
 	}
 }
 
+// TestNewLambdaHandler_MarksPayloadTrusted pins that NewLambdaHandler is the
+// writer of the payload-trust mark: every request it builds carries it, so
+// auth.RequireProxy passes shim-delivered requests the way it passes Lambda.
+func TestNewLambdaHandler_MarksPayloadTrusted(t *testing.T) {
+	r := chi.NewRouter()
+	var trusted bool
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		trusted = auth.PayloadTrusted(r.Context())
+	})
+
+	handler := NewLambdaHandler(r)
+	resp, err := handler(context.Background(), mustMarshal(t, LambdaRequest{
+		Method: "GET",
+		Path:   "/check",
+	}))
+	requireNoErr(t, err)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if !trusted {
+		t.Error("synthetic request context must carry the payload-trust mark")
+	}
+}
+
 func TestNewLambdaHandler_InvalidSchema(t *testing.T) {
 	handler := NewLambdaHandler(chi.NewRouter())
 	payload := mustMarshal(t, LambdaRequest{
