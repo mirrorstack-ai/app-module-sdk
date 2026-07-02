@@ -250,6 +250,46 @@ func Emit(ctx context.Context, name string, payload any) error {
 	return core.Emit(ctx, name, payload)
 }
 
+// Notification is the shape passed to Notify: an i18n Title (required) and
+// Body (optional) — Labels built from ms.Text / ms.T, resolved to per-locale
+// maps at send time so the platform picks the recipient's locale — plus an
+// optional Icon and in-app Link, and the target Audience (defaults to
+// NotifyAdmins when unset).
+type Notification = core.Notification
+
+// NotifyAudience selects WHO inside the app receives a notification:
+// NotifyAdmins (the default) or NotifyAllMembers.
+type NotifyAudience = core.NotifyAudience
+
+// NotifyAdmins and NotifyAllMembers are the notification audiences. They are
+// CONSTANTS, not vars, so a third-party module cannot reassign them (the SDK
+// is a trust boundary).
+const (
+	NotifyAdmins     = core.NotifyAdmins
+	NotifyAllMembers = core.NotifyAllMembers
+)
+
+// Notify sends an in-app notification to the current app's members, scoped to
+// the current app (app id read from ctx via the SDK's auth identity — callers
+// don't pass it). The SDK resolves the Notification's Labels, wraps them in
+// the notification envelope ({id, sentAt, sourceModuleID, title, body, icon,
+// link, audience}) and POSTs it to the platform dispatch notification ingress,
+// which re-derives the sender identity from the live session and writes the
+// notification into the app's feed. An empty app-scope context, an unset
+// Title, or an unknown Audience is an error (no panic).
+//
+//	ms.Notify(r.Context(), ms.Notification{
+//	    Title:    ms.T("notifications.order.placed"),
+//	    Link:     "/orders/42",
+//	    Audience: ms.NotifyAllMembers,
+//	})
+//
+// Dev/dispatch transport today; prod notification-ingress resolution is the
+// documented #146 seam (see core.resolveNotifyURL, mirroring core.resolveEventBusURL).
+func Notify(ctx context.Context, n Notification) error {
+	return core.Notify(ctx, n)
+}
+
 // AppID returns the current app id from the request context, or "" if no
 // identity is set. It is the inbound twin of WithAppID and the single
 // unspoofable way a handler reads its OWN app.
