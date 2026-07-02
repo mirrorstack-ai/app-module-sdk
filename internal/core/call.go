@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -43,12 +42,7 @@ var callHTTP = &http.Client{Timeout: callTimeout}
 // lands, swap the body of this function (and only this function) to consult
 // the catalog/Lambda resolver; Call's marshal/auth/error contract stays put.
 func resolveCallURL(targetModuleID, path string) string {
-	base := os.Getenv("MS_DISPATCH_URL")
-	if base == "" {
-		base = devDispatchFallback
-	}
-	base = strings.TrimRight(base, "/")
-	return fmt.Sprintf("%s/module/%s%s", base, targetModuleID, path)
+	return fmt.Sprintf("%s/module/%s%s", dispatchBase(), targetModuleID, path)
 }
 
 // Call makes one server-mediated module-to-module hop through the platform
