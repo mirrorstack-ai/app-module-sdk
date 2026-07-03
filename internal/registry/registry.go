@@ -15,6 +15,8 @@ import (
 	"maps"
 	"slices"
 	"sync"
+
+	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 )
 
 // Scope identifies which auth boundary a route belongs to. The three values
@@ -134,11 +136,22 @@ type OutboundContribution struct {
 // Price is the per-unit CUSTOMER price in micro-dollars and is omitempty: a
 // metric may be metered without a declared price (PriceSet distinguishes a
 // declared 0 from "no price", carried via the pointer being non-nil).
+// Labels are per-locale display strings (locale → text), resolved at
+// registration from the module's i18n catalogs (mirrors Permission.Labels).
+// omitempty: a metric that declares no label ships no key and the platform
+// falls back to the raw metric name.
+// UnitLabels are per-locale display strings for the metric's Unit (locale →
+// text), resolved the same way (mirrors Labels). omitempty: a metric that
+// declares no unit label ships no key and the platform falls back to the raw
+// Unit identifier. Distinct from Unit, which stays the untranslated billing
+// unit used for per-unit pricing aggregation.
 type MetricDecl struct {
-	Name  string `json:"name"`
-	Kind  string `json:"kind,omitempty"`
-	Unit  string `json:"unit,omitempty"`
-	Price *int64 `json:"price,omitempty"`
+	Name       string            `json:"name"`
+	Kind       string            `json:"kind,omitempty"`
+	Unit       string            `json:"unit,omitempty"`
+	Price      *int64            `json:"price,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	UnitLabels map[string]string `json:"unitLabels,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -184,6 +197,7 @@ type Registry struct {
 	metrics               []MetricDecl
 	exposedTables         []string
 	description           string
+	descriptionLabel      i18n.Label // per-locale description (ms.T/ms.Text), resolved at manifest build
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution
 	mcpTools              []MCPToolDecl
@@ -211,6 +225,36 @@ func (r *Registry) Description() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.description
+}
+
+// SetDescriptionLabel records the module's per-locale description Label (ms.Text
+// / ms.T), typically set once via DescriptionLabel on ms.Config. The Label is
+// stored OPAQUE and resolved LATER (at manifest build, via DescriptionLabels) —
+// the same lazy timing as ManifestDefaults.NameLabels — so it does not matter
+// whether RegisterMessages ran before or after the label was set, only that both
+// ran before the manifest is served. The plain Description string stays the
+// default/fallback; this rides ALONGSIDE it per locale. Last-write-wins.
+func (r *Registry) SetDescriptionLabel(l i18n.Label) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.descriptionLabel = l
+}
+
+// DescriptionLabels resolves the module's per-locale description display strings
+// (locale → text) against the catalogs loaded via RegisterMessages, or nil if no
+// DescriptionLabel was declared. nil so the manifest omits the key (omitempty)
+// and the platform falls back to Description. Mirrors Permission.Descriptions /
+// MetricDecl.Labels — a resolved map keyed per locale. The Label is copied out
+// under the lock and resolved AFTER releasing it, so Resolve's own i18n lock is
+// never taken while holding the registry lock.
+func (r *Registry) DescriptionLabels() map[string]string {
+	r.mu.RLock()
+	l := r.descriptionLabel
+	r.mu.RUnlock()
+	if l.IsZero() {
+		return nil
+	}
+	return l.Resolve()
 }
 
 // AddDependency records a dependency on another module. The Optional flag
@@ -562,6 +606,8 @@ func (r *Registry) AddMetric(d MetricDecl) bool {
 		p := *d.Price
 		d.Price = &p
 	}
+	d.Labels = maps.Clone(d.Labels)
+	d.UnitLabels = maps.Clone(d.UnitLabels)
 	r.metrics = append(r.metrics, d)
 	return true
 }
@@ -582,6 +628,8 @@ func (r *Registry) Metrics() []MetricDecl {
 			p := *d.Price
 			out[i].Price = &p
 		}
+		out[i].Labels = maps.Clone(d.Labels)
+		out[i].UnitLabels = maps.Clone(d.UnitLabels)
 	}
 	return out
 }
