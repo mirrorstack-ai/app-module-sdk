@@ -183,6 +183,17 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Payload-trusted: the request entered through runtime.NewLambdaHandler
+			// (real Lambda behind IAM, or the dev lambda-invoke shim behind its
+			// envelope-secret gate) — the envelope IS the platform authentication,
+			// and the deployed path has no per-session tunnel token to present.
+			// Mirrors RequireProxy: the mark is set only by the lambda entry,
+			// never from inbound request data, so a direct caller cannot forge it.
+			if PayloadTrusted(r.Context()) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			expected, header, configured := readSecret()
 
 			if expected == "" {

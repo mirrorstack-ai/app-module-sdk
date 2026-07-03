@@ -337,6 +337,162 @@ func TestInstallHandler_MalformedBody_400(t *testing.T) {
 	}
 }
 
+func TestUpgradeHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
+	// Not t.Parallel because t.Setenv on MS_LOCAL_DB_URL would race with
+	// concurrent tests reading the env base.
+
+	// Point the env base at a known URL so we can assert host/port/database
+	// come from the environment, not the body — the exact contract install
+	// already pins (see TestInstallHandler_BodyInjectsCredentialAndSchema).
+	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
+
+	var captured context.Context
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+
+	body := strings.NewReader(`{
+		"from":   "0000",
+		"to":     "0001",
+		"appId":  "6c8d1234-abcd-ef01-2345-6789abcdef00",
+		"schema": "app_6c8d1234_abcd_ef01_2345_6789abcdef00",
+		"credential": {
+			"username": "r_6c8d1234_oauth-core",
+			"token":    "secret-token"
+		}
+	}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — Apply short-circuited unexpectedly")
+	}
+	if got := db.SchemaFrom(captured); got != "app_6c8d1234_abcd_ef01_2345_6789abcdef00" {
+		t.Errorf("SchemaFrom = %q, want app_6c8d1234_...", got)
+	}
+	cred := db.CredentialFrom(captured)
+	if cred == nil {
+		t.Fatal("CredentialFrom returned nil; expected per-(app, module) credential")
+	}
+	if cred.Username != "r_6c8d1234_oauth-core" || cred.Token != "secret-token" {
+		t.Errorf("credential per-install = username=%q token=%q, want r_6c8d1234_oauth-core / secret-token", cred.Username, cred.Token)
+	}
+	if cred.Host != "db.platform.local" || cred.Port != 6543 || cred.Database != "platform_apps" {
+		t.Errorf("credential env-base = host=%q port=%d db=%q, want db.platform.local/6543/platform_apps", cred.Host, cred.Port, cred.Database)
+	}
+}
+
+func TestUpgradeHandler_FromToOnlyKeepsDevPath(t *testing.T) {
+	t.Parallel()
+
+	// The dev-tunnel path posts only {from, to}. The handler must succeed
+	// and leave ctx without schema or credential so resolvePoolFor falls
+	// back to the dev pool — pre-existing behavior, unchanged.
+	var captured context.Context
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	body := strings.NewReader(`{"from": "0000", "to": "0001"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — Apply short-circuited unexpectedly")
+	}
+	if got := db.SchemaFrom(captured); got != "" {
+		t.Errorf("SchemaFrom = %q, want empty for from/to-only body", got)
+	}
+	if db.CredentialFrom(captured) != nil {
+		t.Errorf("CredentialFrom = %+v, want nil for from/to-only body", db.CredentialFrom(captured))
+	}
+}
+
+func TestUpgradeHandler_MalformedCredential_400(t *testing.T) {
+	t.Parallel()
+
+	// A credential of the wrong JSON type must be a clean 400 from the body
+	// decoder — never a panic, never a silent env-pool fallback.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"credential wrong type", `{"from": "0000", "to": "0001", "credential": "nope"}`},
+		{"credential array", `{"from": "0000", "to": "0001", "credential": ["u", "t"]}`},
+		{"schema wrong type", `{"from": "0000", "to": "0001", "schema": 42}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for body %q", rec.Code, tc.body)
+			}
+		})
+	}
+}
+
+func TestUpgradeHandler_EmptyCredentialObjectFallsThrough(t *testing.T) {
+	t.Parallel()
+
+	// `"credential": {}` (shape compat) must behave like no credential at
+	// all — same rule injectInstallContext applies on install.
+	var captured context.Context
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	body := strings.NewReader(`{"from": "0000", "to": "0001", "credential": {}}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if db.CredentialFrom(captured) != nil {
+		t.Error("CredentialFrom should be nil for an empty credential object")
+	}
+}
+
+func TestDowngradeHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
+	// Not t.Parallel — t.Setenv (see the upgrade variant).
+
+	// Downgrade shares decodeUpgradeRequest + injectLifecycleContext with
+	// upgrade; pin that the credential context flows into ApplyDown too.
+	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
+
+	fsys := fstest.MapFS{
+		"sql/app/0001_init.up.sql":   &fstest.MapFile{Data: []byte("")},
+		"sql/app/0001_init.down.sql": &fstest.MapFile{Data: []byte("")},
+	}
+	var captured context.Context
+	h := DowngradeHandler(fsys, migration.ScopeApp, capturingTxRunner(t, &captured))
+	body := strings.NewReader(`{
+		"from":   "0001",
+		"to":     "0000",
+		"schema": "app_6c8d1234_abcd_ef01_2345_6789abcdef00",
+		"credential": {"username": "r_6c8d1234_oauth-core", "token": "secret-token"}
+	}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/downgrade", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — ApplyDown short-circuited unexpectedly")
+	}
+	if got := db.SchemaFrom(captured); got != "app_6c8d1234_abcd_ef01_2345_6789abcdef00" {
+		t.Errorf("SchemaFrom = %q, want app_6c8d1234_...", got)
+	}
+	cred := db.CredentialFrom(captured)
+	if cred == nil || cred.Username != "r_6c8d1234_oauth-core" || cred.Token != "secret-token" {
+		t.Errorf("CredentialFrom = %+v, want r_6c8d1234_oauth-core / secret-token", cred)
+	}
+}
+
 func TestInstallHandler_PartialBodyOmitsMissingFields(t *testing.T) {
 	t.Parallel()
 

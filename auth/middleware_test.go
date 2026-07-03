@@ -207,6 +207,33 @@ func TestInternalAuth_ValidSecret(t *testing.T) {
 	}
 }
 
+// A payload-trusted request (entered via runtime.NewLambdaHandler — real
+// Lambda or the dev shim behind its envelope-secret gate) passes internal
+// auth with NO header, even when a secret is configured: the deployed path
+// has no per-session tunnel token to present. Mirrors RequireProxy.
+func TestInternalAuth_PayloadTrusted_NoHeader_Passes(t *testing.T) {
+	t.Setenv("MS_PLATFORM_TOKEN", "tunnel-session-token")
+	handler := InternalAuth()(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/app/install", nil)
+	req = req.WithContext(WithPayloadTrust(req.Context()))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for payload-trusted request, got %d", rec.Code)
+	}
+
+	// The same request WITHOUT the trust mark must still be rejected —
+	// trust never comes from inbound request data.
+	untrusted := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/app/install", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, untrusted)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for untrusted request, got %d", rec2.Code)
+	}
+}
+
 func TestInternalAuth_NoSecret_NotLambda_Bypasses(t *testing.T) {
 	// Local dev with no secret configured: bypass auth so `mirrorstack dev`
 	// can serve /__mirrorstack/* directly without the developer exporting a
