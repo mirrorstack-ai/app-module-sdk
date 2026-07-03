@@ -54,6 +54,16 @@ type Config struct {
 	// Description is a short, plain-language summary shown in the catalog/agent discovery. Optional.
 	Description string
 
+	// DescriptionLabel is the optional per-locale form of Description, built from
+	// ms.Text (a literal) or ms.T (an i18n catalog key). When set it is resolved
+	// against the module's i18n catalogs at manifest build and folded into the
+	// manifest as descriptionLabels (locale → text) ALONGSIDE Description, so the
+	// platform can show a localized summary. Description stays the default /
+	// fallback; a zero Label is omitted entirely. Mirrors PermissionOpts.Description
+	// / meter.MetricLabel. Resolution is lazy (manifest build), so RegisterMessages
+	// may run before or after Init — only both-before-serve matters.
+	DescriptionLabel Label
+
 	// Tags are module-level category badges (e.g. "Auth", "Payments") shown in
 	// the platform's module catalog / settings. Surfaced via manifest defaults.
 	Tags []string
@@ -288,6 +298,13 @@ func New(cfg Config) (*Module, error) {
 	// manifest like Name/Tags. Skip when empty to avoid a blank override.
 	if cfg.Description != "" {
 		m.registry.SetDescription(cfg.Description)
+	}
+	// A DescriptionLabel rides ALONGSIDE the plain Description as a per-locale
+	// map in the manifest (mirroring permission/metric labels). Stored opaque
+	// and resolved lazily at manifest build, so catalog-load ordering is free.
+	// Skip a zero Label so plain-string modules ship no descriptionLabels key.
+	if !cfg.DescriptionLabel.IsZero() {
+		m.registry.SetDescriptionLabel(cfg.DescriptionLabel)
 	}
 
 	m.mountSystemRoutes()
