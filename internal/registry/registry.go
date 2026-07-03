@@ -138,12 +138,18 @@ type OutboundContribution struct {
 // registration from the module's i18n catalogs (mirrors Permission.Labels).
 // omitempty: a metric that declares no label ships no key and the platform
 // falls back to the raw metric name.
+// UnitLabels are per-locale display strings for the metric's Unit (locale →
+// text), resolved the same way (mirrors Labels). omitempty: a metric that
+// declares no unit label ships no key and the platform falls back to the raw
+// Unit identifier. Distinct from Unit, which stays the untranslated billing
+// unit used for per-unit pricing aggregation.
 type MetricDecl struct {
-	Name   string            `json:"name"`
-	Kind   string            `json:"kind,omitempty"`
-	Unit   string            `json:"unit,omitempty"`
-	Price  *int64            `json:"price,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
+	Name       string            `json:"name"`
+	Kind       string            `json:"kind,omitempty"`
+	Unit       string            `json:"unit,omitempty"`
+	Price      *int64            `json:"price,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	UnitLabels map[string]string `json:"unitLabels,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -568,6 +574,7 @@ func (r *Registry) AddMetric(d MetricDecl) bool {
 		d.Price = &p
 	}
 	d.Labels = maps.Clone(d.Labels)
+	d.UnitLabels = maps.Clone(d.UnitLabels)
 	r.metrics = append(r.metrics, d)
 	return true
 }
@@ -589,6 +596,7 @@ func (r *Registry) Metrics() []MetricDecl {
 			out[i].Price = &p
 		}
 		out[i].Labels = maps.Clone(d.Labels)
+		out[i].UnitLabels = maps.Clone(d.UnitLabels)
 	}
 	return out
 }
