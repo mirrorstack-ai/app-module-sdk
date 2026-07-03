@@ -7,6 +7,11 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+A module can now write into its app's notification feed. The design mirrors `ms.Emit` exactly — same context-derived app scope, same dispatch-HTTP transport, same #146 prod seam — so notifications inherit the trust model already proven for events: the module supplies content, the dispatch re-derives the sender identity from the live session and never trusts the envelope.
+
+### Added
+- **`ms.Notify(ctx, ms.Notification{...})`** — sends an in-app notification to the current app's members. `Notification` carries an i18n `Title` (required) and `Body` (optional) as `ms.Text`/`ms.T` Labels resolved to per-locale maps **at send time** (the platform picks each recipient's locale, the module never does), plus optional `Icon`/`Link` and an `Audience` (`ms.NotifyAdmins`, the default, or `ms.NotifyAllMembers`; anything else is an error). The SDK POSTs a `{id, sentAt, sourceModuleID, title, body, icon, link, audience}` envelope to the platform dispatch notification ingress at `{MS_DISPATCH_URL | dev fallback}/apps/{appID}/notifications` — the same transport idiom as `ms.Emit`/`ms.Call`, with the same error contract: an empty app-scope context, a Title that resolves to no message, or a non-2xx dispatch response (body truncated to ~2 KB) is a **returned error, never a panic**.
+
 ## [v0.2.6] - 2026-06-20
 
 Prepares the SDK for the production module transport. In production a module runs as a Lambda function invoked via the HTTP-shaped `LambdaRequest` envelope; this closes the one kernel gap on that receive path so a deployed module's internal/MCP auth works.

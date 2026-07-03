@@ -1,18 +1,10 @@
 package core
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"strings"
 	"time"
 
-	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
@@ -38,17 +30,11 @@ type eventEnvelope struct {
 // core.Call uses for inter-module hops.
 //
 // DEV/DISPATCH TRANSPORT. Prod event-bus endpoint resolution is task #146 —
-// this resolver is the seam where that plugs in, mirroring resolveCallURL. In
-// prod the event bus is not a single dev dispatch base; when #146 lands, swap
-// the body of this function (and only this function) to consult the prod
-// transport. Emit's marshal/auth/error contract stays put.
+// this resolver (path) and dispatchBase (base) are the seams where that plugs
+// in, mirroring resolveCallURL. Emit's marshal/auth/error contract
+// (dispatch_transport.go) stays put.
 func resolveEventBusURL(appID, name string) string {
-	base := os.Getenv("MS_DISPATCH_URL")
-	if base == "" {
-		base = devDispatchFallback
-	}
-	base = strings.TrimRight(base, "/")
-	return fmt.Sprintf("%s/apps/%s/events/%s", base, appID, name)
+	return fmt.Sprintf("%s/apps/%s/events/%s", dispatchBase(), appID, name)
 }
 
 // Emit publishes an event to every LIVE module that subscribes to name within
@@ -70,12 +56,9 @@ func resolveEventBusURL(appID, name string) string {
 //
 // DEV/DISPATCH TRANSPORT — see resolveEventBusURL for the prod (#146) seam.
 func (m *Module) Emit(ctx context.Context, name string, payload any) error {
-	appID := ""
-	if a := auth.Get(ctx); a != nil {
-		appID = a.AppID
-	}
-	if appID == "" {
-		return errors.New("mirrorstack: Emit requires an app-scoped context (no AppID in auth identity)")
+	appID, err := appIDFromContext(ctx, "Emit")
+	if err != nil {
+		return err
 	}
 
 	env := eventEnvelope{
@@ -85,29 +68,7 @@ func (m *Module) Emit(ctx context.Context, name string, payload any) error {
 		SentAt:         time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:        payload,
 	}
-	buf, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
-
-	u := resolveEventBusURL(appID, name)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-MS-App-ID", appID)
-
-	resp, err := callHTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("ms.Emit %s -> %d: %s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	return nil
+	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env)
 }
 
 // Emit publishes an event on the default module created by Init(). Panics
