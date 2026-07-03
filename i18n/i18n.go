@@ -199,6 +199,42 @@ func Lookup(key string) map[string]string {
 	return out
 }
 
+// LookupList resolves a catalog key whose per-locale value packs a LIST of
+// items into one delimited string, returning locale → []item. Each locale's
+// value is split on sep and every element is space-trimmed; empty elements are
+// dropped, and a locale that yields no items is omitted. Like Lookup (and
+// unlike Label.Resolve) it does NOT fall back to the raw key — an undeclared
+// key yields an empty map, so a caller (e.g. manifest defaults) can omit the
+// field and let a non-localized default win.
+//
+// It is the list counterpart of Lookup: Lookup(module.name)→NameLabels (one
+// display string per locale), LookupList(module.tags, ",")→TagLabels (a tag
+// LIST per locale). The delimited-string convention exists because message
+// catalogs are string-valued — flatten() ignores JSON array leaves — so an
+// author packs a tag list as e.g. en-US "Auth, Payments" / zh-TW "驗證, 付款".
+// The returned map is owned by the caller.
+func LookupList(key, sep string) map[string][]string {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := map[string][]string{}
+	for locale, flat := range registry {
+		raw, ok := flat[key]
+		if !ok {
+			continue
+		}
+		var list []string
+		for _, part := range strings.Split(raw, sep) {
+			if part = strings.TrimSpace(part); part != "" {
+				list = append(list, part)
+			}
+		}
+		if len(list) > 0 {
+			out[locale] = list
+		}
+	}
+	return out
+}
+
 // Locales returns the sorted list of locales currently loaded. Test/debug aid.
 func Locales() []string {
 	mu.RLock()

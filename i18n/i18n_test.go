@@ -82,6 +82,47 @@ func TestLabel_IsZero(t *testing.T) {
 	}
 }
 
+func TestLookupList_SplitsTrimsAndDropsEmpties(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	fsys := fstest.MapFS{
+		// en-US: multi-tag list with irregular spacing + a trailing empty slot.
+		"i18n/en-US.json": &fstest.MapFile{Data: []byte(`{"module":{"tags":"Auth,  Payments , "}}`)},
+		// zh-TW: single localized tag (no delimiter).
+		"i18n/zh-TW.json": &fstest.MapFile{Data: []byte(`{"module":{"tags":"驗證"}}`)},
+	}
+	if err := RegisterMessages(fsys, "i18n"); err != nil {
+		t.Fatalf("RegisterMessages: %v", err)
+	}
+
+	got := LookupList("module.tags", ",")
+	if want := []string{"Auth", "Payments"}; !equalStrings(got["en-US"], want) {
+		t.Errorf("en-US = %v, want %v (split, trimmed, empties dropped)", got["en-US"], want)
+	}
+	if want := []string{"驗證"}; !equalStrings(got["zh-TW"], want) {
+		t.Errorf("zh-TW = %v, want %v", got["zh-TW"], want)
+	}
+}
+
+func TestLookupList_MissingKeyYieldsEmptyMap(t *testing.T) {
+	loadFixture(t) // loads permissions.* only — no module.tags key anywhere.
+	if got := LookupList("module.tags", ","); len(got) != 0 {
+		t.Errorf("LookupList(missing) = %v, want empty map (no raw-key fallback)", got)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRegisterMessages_MissingDirErrors(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
