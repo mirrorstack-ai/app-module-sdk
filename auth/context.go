@@ -36,5 +36,24 @@ func Get(ctx context.Context) *Identity {
 	return id
 }
 
+const payloadTrustKey = contextKey("ms-payload-trust")
+
+// WithPayloadTrust marks ctx as carrying identity injected from the typed
+// Lambda payload — set ONLY by runtime.NewLambdaHandler (the real Lambda
+// invoke path, or the dev lambda-invoke shim after its envelope-secret gate).
+// RequireProxy gives a marked request the same pass-through it gives Lambda
+// mode: the payload IS the trust boundary, and the envelope never carries the
+// per-session X-MS-Platform-Token. The mark lives in context, so inbound
+// request data can never set it.
+func WithPayloadTrust(ctx context.Context) context.Context {
+	return context.WithValue(ctx, payloadTrustKey, true)
+}
+
+// PayloadTrusted reports whether WithPayloadTrust marked this context.
+func PayloadTrusted(ctx context.Context) bool {
+	trusted, _ := ctx.Value(payloadTrustKey).(bool)
+	return trusted
+}
+
 // Roles is a convenience constructor for role lists.
 func Roles(r ...string) []string { return r }

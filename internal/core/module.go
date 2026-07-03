@@ -736,6 +736,18 @@ func (m *Module) mountSystemRoutes() {
 	m.router.Route("/__mirrorstack", func(r chi.Router) {
 		r.Get("/health", system.Health) // intentionally public — no auth
 
+		// Dev-mode Lambda transport shim: dispatch's localHTTPInvoker POSTs
+		// LambdaRequest envelopes here when MS_MODULE_LAMBDA_DEV_URL points at
+		// this module (module_deploys simulation without real Lambda). Never
+		// mounted in Lambda mode — the real transport owns invocation there,
+		// and not mounting removes any prod re-entrancy surface. Auth is the
+		// handler's own envelope-secret gate (see lambdaInvokeShim):
+		// internalAuth would validate the wrong secret (the tunnel session
+		// token, not the lambda secret dispatch puts INSIDE the envelope).
+		if !runtime.IsLambda() {
+			r.Post("/lambda-invoke", m.lambdaInvokeShim())
+		}
+
 		// Public-scope static handler for the module's React bundle (the
 		// directory the author named in Config.WebDir). Browser-fetched
 		// from the platform's catch-all module page; CORS-permissive

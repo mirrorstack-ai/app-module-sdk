@@ -531,6 +531,25 @@ func TestRequireProxy_InLambda_PassThrough(t *testing.T) {
 	}
 }
 
+func TestRequireProxy_PayloadTrusted_PassThrough(t *testing.T) {
+	// Dev lambda-invoke shim path: identity was injected from the typed
+	// envelope behind the shim's secret gate and ctx carries the payload-trust
+	// mark. The guard must pass through exactly like Lambda mode — the
+	// envelope never carries the per-session X-MS-Platform-Token, so matching
+	// the header would 403 every shim-delivered request.
+	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
+	handler := requireProxy(false)(http.HandlerFunc(okHandler))
+
+	req := httptest.NewRequest("GET", "/public/me", nil) // no token header
+	req = req.WithContext(WithPayloadTrust(req.Context()))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (payload-trusted request passes the guard), got %d", rec.Code)
+	}
+}
+
 func TestRequireProxy_TokenConfigured_NoHeader_403NotProxied(t *testing.T) {
 	// HTTP dev/tunnel path with a token configured: a direct caller (no token)
 	// is rejected with 403 not_proxied.
