@@ -92,12 +92,30 @@ type MigrationVersions struct {
 // NameLabels carries per-locale display names (resolved from the module's
 // i18n catalog key "module.name"); empty when the module declared none, in
 // which case the platform falls back to Name.
+//
+// TagLabels carries per-locale localized tag LISTS (locale → []tag), the list
+// counterpart of NameLabels. It is resolved from the module's i18n catalog key
+// "module.tags", whose per-locale value packs the tag list into a single
+// comma-separated string (e.g. en-US "Auth, Payments", zh-TW "驗證, 付款"); the
+// manifest splits on "," and space-trims each tag. Empty when the module
+// declared no "module.tags" key, in which case the platform falls back to the
+// raw Tags list. Tags stays the default/fallback exactly as Name does.
 type ManifestDefaults struct {
-	Name       string            `json:"name"`
-	Icon       string            `json:"icon"`
-	Tags       []string          `json:"tags,omitempty"`
-	NameLabels map[string]string `json:"nameLabels,omitempty"`
+	Name       string              `json:"name"`
+	Icon       string              `json:"icon"`
+	Tags       []string            `json:"tags,omitempty"`
+	NameLabels map[string]string   `json:"nameLabels,omitempty"`
+	TagLabels  map[string][]string `json:"tagLabels,omitempty"`
 }
+
+// tagCatalogKey / tagLabelSep define the "module.tags" authoring convention:
+// one catalog key per locale holding a comma-separated tag list (see
+// ManifestDefaults.TagLabels). Kept next to the handler that reads them so the
+// wire convention lives in one place.
+const (
+	tagCatalogKey = "module.tags"
+	tagLabelSep   = ","
+)
 
 // ManifestEvents declares which events the module emits and which it subscribes to.
 type ManifestEvents struct {
@@ -168,7 +186,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
 			ID:                id,
 			Slug:              slug,
-			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
+			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
 			Description:       reg.Description(),
 			DescriptionLabels: reg.DescriptionLabels(),
 			Dependencies:      reg.Dependencies(),
