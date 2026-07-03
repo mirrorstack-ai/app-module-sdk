@@ -30,13 +30,29 @@ type LifecycleError struct {
 	Error string `json:"error"`
 }
 
-// VersionRequest is the body shape for upgrade and downgrade. Both fields
-// MUST be numeric migration numbers ("0008"), not semver strings ("v0.1.0").
-// The platform does semver→migration translation before calling the SDK, using
-// the Versions map exposed via the manifest endpoint.
+// VersionRequest is the migration window for upgrade and downgrade. Both
+// fields MUST be numeric migration numbers ("0008"), not semver strings
+// ("v0.1.0"). The platform does semver→migration translation before calling
+// the SDK, using the Versions map exposed via the manifest endpoint.
 type VersionRequest struct {
 	From string `json:"from"`
 	To   string `json:"to"`
+}
+
+// UpgradeRequest is the full body shape for upgrade and downgrade: the
+// migration window plus the same optional install context the platform sends
+// on install (appId, schema, credential). It mirrors api-platform's
+// upgradeRequest verbatim — the wire shape is the contract.
+//
+// A bare {from, to} body (the dev-tunnel path, where the module runs against
+// its own env DB) keeps the pre-existing behavior: no schema or credential is
+// injected and migrations run on the SDK's DATABASE_URL pool. When the
+// platform drives a DEPLOYED (non-tunnel) upgrade it populates Schema +
+// Credential so the (from, to] migrations run under the per-(app, module)
+// r_* role against the app schema — exactly like install.
+type UpgradeRequest struct {
+	VersionRequest
+	InstallRequest
 }
 
 // InstallRequest is the optional body for the install endpoint. The
@@ -119,14 +135,20 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 		if errors.Is(err, io.EOF) {
 			return ctx, true
 		}
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			httputil.JSON(w, http.StatusRequestEntityTooLarge, httputil.ErrorResponse{Error: "request body too large"})
-		} else {
-			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
-		}
+		writeBodyDecodeError(w, err)
 		return ctx, false
 	}
+	return injectLifecycleContext(w, ctx, req)
+}
+
+// injectLifecycleContext folds an already-decoded install context (Schema +
+// Credential) into ctx. It is the single implementation shared by install
+// (whole body) and upgrade/downgrade (embedded in UpgradeRequest) so the
+// credential semantics cannot drift between the lifecycle verbs.
+//
+// Returns ok=false after writing a 500 when the env DB base cannot be
+// resolved; callers must return without touching w again.
+func injectLifecycleContext(w http.ResponseWriter, ctx context.Context, req InstallRequest) (context.Context, bool) {
 	if req.Schema != "" {
 		ctx = db.WithSchema(ctx, req.Schema)
 	}
@@ -148,13 +170,33 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 	return ctx, true
 }
 
+// writeBodyDecodeError maps a JSON body decode failure onto the lifecycle
+// error contract: 413 when the MaxBytes cap tripped, 400 otherwise.
+func writeBodyDecodeError(w http.ResponseWriter, err error) {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		httputil.JSON(w, http.StatusRequestEntityTooLarge, httputil.ErrorResponse{Error: "request body too large"})
+		return
+	}
+	httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
+}
+
 // UpgradeHandler applies the migrations strictly between (req.From, req.To].
 // Both fields must be migration numbers; semver must be translated by the
 // platform before calling this endpoint (the platform reads the Versions map
 // from the manifest and uses the scope-matching field of MigrationVersions).
+//
+// When the body also carries Schema + Credential (the platform's non-tunnel
+// path), the migrations run under that per-(app, module) credential with
+// search_path = schema — identical to InstallHandler. A bare {from, to}
+// body keeps the dev-tunnel env-pool behavior.
 func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		req, ok := decodeVersionRequest(w, r)
+		req, ok := decodeUpgradeRequest(w, r)
+		if !ok {
+			return
+		}
+		ctx, ok := injectLifecycleContext(w, r.Context(), req.InstallRequest)
 		if !ok {
 			return
 		}
@@ -170,7 +212,7 @@ func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner
 			return
 		}
 
-		applied, err := migration.Apply(r.Context(), runTx, sqlFS, slice)
+		applied, err := migration.Apply(ctx, runTx, sqlFS, slice)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, LifecycleError{
 				LifecycleResult: LifecycleResult{Applied: applied},
@@ -185,9 +227,14 @@ func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner
 // DowngradeHandler reverts migrations between (req.To, req.From] in newest-first
 // order. Each migration must have a .down.sql or the request fails before any
 // SQL runs. Both fields must be migration numbers (see UpgradeHandler).
+// Schema + Credential in the body behave exactly as in UpgradeHandler.
 func DowngradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		req, ok := decodeVersionRequest(w, r)
+		req, ok := decodeUpgradeRequest(w, r)
+		if !ok {
+			return
+		}
+		ctx, ok := injectLifecycleContext(w, r.Context(), req.InstallRequest)
 		if !ok {
 			return
 		}
@@ -203,7 +250,7 @@ func DowngradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunn
 			return
 		}
 
-		reverted, err := migration.ApplyDown(r.Context(), runTx, sqlFS, slice)
+		reverted, err := migration.ApplyDown(ctx, runTx, sqlFS, slice)
 		if err != nil {
 			httputil.JSON(w, http.StatusInternalServerError, LifecycleError{
 				LifecycleResult: LifecycleResult{Reverted: reverted},
@@ -224,9 +271,10 @@ func UninstallHandler() http.HandlerFunc {
 	}
 }
 
-// decodeVersionRequest reads and validates the {from, to} body. Both fields
-// are required and must be numeric migration numbers (not semver) — the
-// platform does semver resolution before calling. Returns ok=false after
+// decodeUpgradeRequest reads and validates the upgrade/downgrade body. From
+// and To are required and must be numeric migration numbers (not semver) —
+// the platform does semver resolution before calling. AppID, Schema and
+// Credential are optional (see UpgradeRequest). Returns ok=false after
 // writing a 400 response if the body is missing, malformed, or contains
 // non-numeric version values.
 //
@@ -234,15 +282,10 @@ func UninstallHandler() http.HandlerFunc {
 // is intentional: rejecting semver at the boundary gives us a tailored error
 // message pointing at the platform-side translation step, and fast-fails
 // before we bother reading the sql/ directory.
-func decodeVersionRequest(w http.ResponseWriter, r *http.Request) (VersionRequest, bool) {
-	var req VersionRequest
+func decodeUpgradeRequest(w http.ResponseWriter, r *http.Request) (UpgradeRequest, bool) {
+	var req UpgradeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			httputil.JSON(w, http.StatusRequestEntityTooLarge, httputil.ErrorResponse{Error: "request body too large"})
-		} else {
-			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body: " + err.Error()})
-		}
+		writeBodyDecodeError(w, err)
 		return req, false
 	}
 	if req.From == "" || req.To == "" {
