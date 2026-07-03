@@ -163,6 +163,11 @@ func Unit(u string) MetricOption { return meter.Unit(u) }
 // quantity × this price with NO blanket markup for a module's custom metric.
 func Price(microDollars int64) MetricOption { return meter.Price(microDollars) }
 
+// MetricLabel sets a metric's per-locale display label, built from ms.Text
+// (literal) or ms.T (i18n catalog key), resolved against the module's i18n
+// catalogs at manifest build (mirrors PermissionOpts.Label). Optional.
+func MetricLabel(l Label) MetricOption { return meter.MetricLabel(l) }
+
 // Meter DECLARES a usage metric on the default module. Call it ONCE per metric
 // in startup code (exactly like ms.Emits / ms.RegisterPermission) — it registers
 // the metric as a SIDE EFFECT and returns NOTHING. The declaration (kind + unit

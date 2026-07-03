@@ -134,11 +134,16 @@ type OutboundContribution struct {
 // Price is the per-unit CUSTOMER price in micro-dollars and is omitempty: a
 // metric may be metered without a declared price (PriceSet distinguishes a
 // declared 0 from "no price", carried via the pointer being non-nil).
+// Labels are per-locale display strings (locale → text), resolved at
+// registration from the module's i18n catalogs (mirrors Permission.Labels).
+// omitempty: a metric that declares no label ships no key and the platform
+// falls back to the raw metric name.
 type MetricDecl struct {
-	Name  string `json:"name"`
-	Kind  string `json:"kind,omitempty"`
-	Unit  string `json:"unit,omitempty"`
-	Price *int64 `json:"price,omitempty"`
+	Name   string            `json:"name"`
+	Kind   string            `json:"kind,omitempty"`
+	Unit   string            `json:"unit,omitempty"`
+	Price  *int64            `json:"price,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic
@@ -562,6 +567,7 @@ func (r *Registry) AddMetric(d MetricDecl) bool {
 		p := *d.Price
 		d.Price = &p
 	}
+	d.Labels = maps.Clone(d.Labels)
 	r.metrics = append(r.metrics, d)
 	return true
 }
@@ -582,6 +588,7 @@ func (r *Registry) Metrics() []MetricDecl {
 			p := *d.Price
 			out[i].Price = &p
 		}
+		out[i].Labels = maps.Clone(d.Labels)
 	}
 	return out
 }

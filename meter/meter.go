@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
@@ -105,6 +106,7 @@ type metricOptions struct {
 	unitSet  bool
 	price    int64
 	priceSet bool
+	label    i18n.Label
 }
 
 // Counter / Gauge are CONSTANTS, not vars, so a third-party module cannot
@@ -166,6 +168,19 @@ func Price(microDollars int64) MetricOption {
 	})
 }
 
+// MetricLabel sets the metric's per-locale display label, built from ms.Text
+// (a literal) or ms.T (an i18n catalog key). It is resolved against the
+// module's i18n catalogs at manifest build (mirroring PermissionOpts.Label) and
+// folded into the manifest metric entry per-locale, so the platform's pricing /
+// usage UI can show a localized name instead of the raw metric key. Optional — a
+// zero Label is omitted entirely.
+//
+// Named MetricLabel (not Label) because ms.Label is already the exported label
+// TYPE; a top-level Label option would collide with it.
+func MetricLabel(l i18n.Label) MetricOption {
+	return metricOptionFunc(func(o *metricOptions) { o.label = l })
+}
+
 // DeclFromOptions applies the variadic options to produce a Decl. Used by core
 // (ms.Meter) to translate the public name + options into the declaration that
 // is both validated + registered (Declare) and registered into the manifest
@@ -189,6 +204,7 @@ func DeclFromOptions(name string, opts ...MetricOption) Decl {
 		UnitSet:  o.unitSet,
 		Price:    o.price,
 		PriceSet: o.priceSet,
+		Label:    o.label,
 	}
 }
 
@@ -214,6 +230,10 @@ type Decl struct {
 	UnitSet  bool
 	Price    int64
 	PriceSet bool
+	// Label is the metric's optional per-locale display label (ms.Text / ms.T),
+	// resolved into the manifest metric entry in core.Meter (mirroring the
+	// permission-label path). Zero when undeclared.
+	Label i18n.Label
 }
 
 // IsReserved reports whether name falls under a platform-owned namespace

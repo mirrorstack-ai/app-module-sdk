@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -173,5 +175,74 @@ func TestRecord_RejectsUndeclaredName(t *testing.T) {
 
 	if err := m.Record(ctx, "never.declared", 1); err == nil {
 		t.Error("expected an error recording an undeclared metric name")
+	}
+}
+
+// TestMeter_LabelSurfacesInManifest asserts that a metric declared with a
+// literal MetricLabel folds a per-locale labels map into the manifest metric
+// entry (mirroring the permission-label path: a literal resolves under the
+// default locale), while a metric declared WITHOUT a label ships no labels key
+// at all (omitempty).
+func TestMeter_LabelSurfacesInManifest(t *testing.T) {
+	m := newTestModuleWithSecret(t, "media")
+	m.Meter("orders.placed", meter.Counter, meter.MetricLabel(Text("Orders placed")))
+	m.Meter("sign.ins", meter.Counter) // no label
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Metrics) != 2 {
+		t.Fatalf("metrics = %d, want 2: %+v", len(got.Metrics), got.Metrics)
+	}
+	for _, d := range got.Metrics {
+		switch d.Name {
+		case "orders.placed":
+			if d.Labels[i18n.DefaultLocale] != "Orders placed" {
+				t.Errorf("orders.placed labels = %v, want %s=Orders placed", d.Labels, i18n.DefaultLocale)
+			}
+		case "sign.ins":
+			if d.Labels != nil {
+				t.Errorf("sign.ins labels = %v, want nil (no label declared)", d.Labels)
+			}
+		default:
+			t.Errorf("unexpected metric %q", d.Name)
+		}
+	}
+}
+
+// TestMeter_LabelResolvesCatalogPerLocale asserts a MetricLabel built from an
+// i18n catalog key (ms.T) resolves to every loaded locale at manifest build,
+// exactly like a permission Label — the catalog is registered via
+// RegisterMessages before the manifest is served.
+func TestMeter_LabelResolvesCatalogPerLocale(t *testing.T) {
+	i18n.Reset()
+	t.Cleanup(i18n.Reset)
+	fsys := fstest.MapFS{
+		"i18n/en-US.json": &fstest.MapFile{Data: []byte(`{"metrics":{"orders.placed":"Orders placed"}}`)},
+		"i18n/zh-TW.json": &fstest.MapFile{Data: []byte(`{"metrics":{"orders.placed":"訂單數"}}`)},
+	}
+	if err := i18n.RegisterMessages(fsys, "i18n"); err != nil {
+		t.Fatalf("RegisterMessages: %v", err)
+	}
+
+	m := newTestModuleWithSecret(t, "media")
+	m.Meter("orders.placed", meter.Counter, meter.MetricLabel(T("metrics.orders.placed")))
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Metrics) != 1 {
+		t.Fatalf("metrics = %d, want 1: %+v", len(got.Metrics), got.Metrics)
+	}
+	d := got.Metrics[0]
+	if d.Labels["en-US"] != "Orders placed" {
+		t.Errorf("en-US label = %q, want %q", d.Labels["en-US"], "Orders placed")
+	}
+	if d.Labels["zh-TW"] != "訂單數" {
+		t.Errorf("zh-TW label = %q, want %q", d.Labels["zh-TW"], "訂單數")
 	}
 }
