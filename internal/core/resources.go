@@ -109,6 +109,12 @@ func (m *Module) Meter(name string, opts ...meter.MetricOption) {
 		p := d.Price
 		decl.Price = &p
 	}
+	if !d.Label.IsZero() {
+		decl.Labels = d.Label.Resolve()
+	}
+	if !d.UnitLabel.IsZero() {
+		decl.UnitLabels = d.UnitLabel.Resolve()
+	}
 	m.registry.AddMetric(decl)
 }
 

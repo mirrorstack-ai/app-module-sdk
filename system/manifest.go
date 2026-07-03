@@ -21,23 +21,28 @@ type ManifestPayload struct {
 	// Slug is the catalog handle (e.g. "oauth"). Empty for dev/legacy
 	// modules that haven't been assigned a slug yet — the platform falls
 	// back to ID-based addressing in that case.
-	Slug         string                              `json:"slug,omitempty"`
-	Defaults     ManifestDefaults                    `json:"defaults"`
-	Description  string                              `json:"description,omitempty"`
-	Dependencies []registry.Dependency               `json:"dependencies"`
-	Migration    MigrationVersions                   `json:"migration"`
-	Versions     map[string]MigrationVersions        `json:"versions"`
-	Routes       map[registry.Scope][]registry.Route `json:"routes"`
-	Events       ManifestEvents                      `json:"events"`
+	Slug        string           `json:"slug,omitempty"`
+	Defaults    ManifestDefaults `json:"defaults"`
+	Description string           `json:"description,omitempty"`
+	// DescriptionLabels carries per-locale description display strings (locale →
+	// text), resolved from the module's i18n catalog (ms.Config.DescriptionLabel).
+	// Omitted when the module declared none, in which case the platform falls
+	// back to Description. Mirrors Permission.Descriptions / MetricDecl.Labels.
+	DescriptionLabels map[string]string                   `json:"descriptionLabels,omitempty"`
+	Dependencies      []registry.Dependency               `json:"dependencies"`
+	Migration         MigrationVersions                   `json:"migration"`
+	Versions          map[string]MigrationVersions        `json:"versions"`
+	Routes            map[registry.Scope][]registry.Route `json:"routes"`
+	Events            ManifestEvents                      `json:"events"`
 	// Exposes lists the tables this module marks readable (SELECT-eligible)
 	// by a depending module (ms.ExposeTable). The platform catalog issues
 	// GRANT SELECT against the depending module's DB role after the app
 	// owner approves the dependency. Always present; tables is an empty
 	// array when nothing is exposed.
-	Exposes      ManifestExposes                     `json:"exposes"`
-	Schedules    []registry.Schedule                 `json:"schedules"`
-	Tasks        []registry.Task                     `json:"tasks"`
-	Permissions  []registry.Permission               `json:"permissions"`
+	Exposes     ManifestExposes       `json:"exposes"`
+	Schedules   []registry.Schedule   `json:"schedules"`
+	Tasks       []registry.Task       `json:"tasks"`
+	Permissions []registry.Permission `json:"permissions"`
 	// Metrics lists the usage metrics this module declares (ms.Meter). The
 	// platform populates its metric_definitions catalog (kind/unit/price) from
 	// this at install/publish, so the catalog is authoritative before any usage
@@ -161,24 +166,25 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 		}
 
 		httputil.JSON(w, http.StatusOK, ManifestPayload{
-			ID:            id,
-			Slug:          slug,
-			Defaults:      ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
-			Description:   reg.Description(),
-			Dependencies:  reg.Dependencies(),
-			Migration:     MigrationVersions{App: appVersion, Module: moduleVersion},
-			Versions:      versions,
-			Routes:        reg.Routes(),
-			Events:        ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Exposes:       ManifestExposes{Tables: reg.ExposedTables()},
-			Schedules:     reg.Schedules(),
-			Tasks:         reg.Tasks(),
-			Permissions:   reg.Permissions(),
-			Metrics:       reg.Metrics(),
-			MCP:           buildManifestMCP(reg),
-			UI:            reg.UI(),
-			Provides:      contribSlots,
-			ContributesTo: reg.OutboundContributions(),
+			ID:                id,
+			Slug:              slug,
+			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name")},
+			Description:       reg.Description(),
+			DescriptionLabels: reg.DescriptionLabels(),
+			Dependencies:      reg.Dependencies(),
+			Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},
+			Versions:          versions,
+			Routes:            reg.Routes(),
+			Events:            ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+			Exposes:           ManifestExposes{Tables: reg.ExposedTables()},
+			Schedules:         reg.Schedules(),
+			Tasks:             reg.Tasks(),
+			Permissions:       reg.Permissions(),
+			Metrics:           reg.Metrics(),
+			MCP:               buildManifestMCP(reg),
+			UI:                reg.UI(),
+			Provides:          contribSlots,
+			ContributesTo:     reg.OutboundContributions(),
 		})
 	}
 }
