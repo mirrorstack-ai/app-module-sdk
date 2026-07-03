@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -72,9 +73,16 @@ func configurePoolDefaults(cfg *pgxpool.Config) {
 func createPool(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
 	// DSN intentionally excludes the password — any wrapped ParseConfig error
 	// would otherwise echo the full connection string into CloudWatch.
+	// sslmode defaults to require (prod: the RDS Proxy endpoint mandates TLS);
+	// a local dev-sim Postgres has no TLS, so the dev runner sets
+	// MS_MODULE_DB_SSLMODE=disable. Unset always resolves to the secure default.
+	sslmode := os.Getenv("MS_MODULE_DB_SSLMODE")
+	if sslmode == "" {
+		sslmode = "require"
+	}
 	connStr := fmt.Sprintf(
-		"host=%s port=%d dbname=%s user=%s sslmode=require",
-		cred.Host, cred.Port, cred.Database, cred.Username,
+		"host=%s port=%d dbname=%s user=%s sslmode=%s",
+		cred.Host, cred.Port, cred.Database, cred.Username, sslmode,
 	)
 	cfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
