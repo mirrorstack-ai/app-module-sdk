@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 )
 
 // depTestModule builds a module + app-scoped ctx wired at a fake dispatch.
@@ -418,4 +421,177 @@ func TestDependencyDB_PackageLevelPanicsBeforeInit(t *testing.T) {
 		}
 	}()
 	DependencyDB(context.Background(), "oauth-core")
+}
+
+// ---------------------------------------------------------------------------
+// Deployed plane (decision 18 §3): the inLambda branch reads the injected
+// manifest. These cover the §5 sentinel matrix cells that fail closed BEFORE
+// touching a pool (manifest-absent, ref-absent, table-absent) plus the
+// read-time SQLSTATE mapping. The happy-path read + live 42P01/42501 live in
+// dependency_db_deployed_integration_test.go (build tag `integration`).
+// ---------------------------------------------------------------------------
+
+// deployedCtx builds an app-scoped context carrying the given dependency
+// manifest, as the Lambda invoke shim would (db.WithSchema + db.WithDependencies).
+func deployedCtx(manifest []db.DependencyGrant) context.Context {
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-uuid-1", UserID: "u1", AppRole: auth.RoleAdmin})
+	ctx = db.WithSchema(ctx, "app_283e0ef9_1a2b_3c4d_5e6f_0123456789ab")
+	if manifest != nil {
+		ctx = db.WithDependencies(ctx, manifest)
+	}
+	return ctx
+}
+
+func TestDependencyDB_DeployedManifestAbsentIsRolloutGate(t *testing.T) {
+	m, err := New(Config{ID: "m1234abcd"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := deployedCtx(nil) // no db.WithDependencies → old-platform rollout gate
+
+	_, err = m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").result(ctx, true)
+	if err == nil || !strings.Contains(err.Error(), "dev-plane only") {
+		t.Errorf("err = %v, want the today's hard error containing \"dev-plane only\" (#31 stays 501)", err)
+	}
+	// Must carry no typed sentinel — #31 recognizes it only by the substring.
+	for _, s := range []error{ErrProducerNotFound, ErrNotExposed, ErrDependencyUnavailable, ErrDependencyUnauthorized} {
+		if errors.Is(err, s) {
+			t.Errorf("rollout-gate error matched sentinel %v; must be a plain error", s)
+		}
+	}
+}
+
+func TestDependencyDB_DeployedProducerNotInManifest(t *testing.T) {
+	m, _ := New(Config{ID: "m1234abcd"})
+	// Manifest present but keyed for a DIFFERENT producer → ref absent.
+	ctx := deployedCtx([]db.DependencyGrant{
+		{Ref: "some-other-mod", Tables: map[string]string{"widgets": "mdeadbeef_widgets"}},
+	})
+
+	_, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").result(ctx, true)
+	if !errors.Is(err, ErrProducerNotFound) {
+		t.Errorf("err = %v, want ErrProducerNotFound (ref absent from manifest)", err)
+	}
+}
+
+func TestDependencyDB_DeployedTableNotExposed(t *testing.T) {
+	m, _ := New(Config{ID: "m1234abcd"})
+	// Producer present, but the requested table is not in its exposed set.
+	ctx := deployedCtx([]db.DependencyGrant{
+		{Ref: "oauth-core", Tables: map[string]string{"sessions": "m81b3ac70_sessions"}},
+	})
+
+	_, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").result(ctx, true)
+	if !errors.Is(err, ErrNotExposed) {
+		t.Errorf("err = %v, want ErrNotExposed (table not in manifest .Tables)", err)
+	}
+}
+
+func TestMapDeployedReadError(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		want    error // sentinel it must errors.Is; nil = must NOT match any dep sentinel
+		matches bool
+	}{
+		{"42P01 undefined_table", &pgconn.PgError{Code: "42P01"}, ErrDependencyUnavailable, true},
+		{"42501 insufficient_privilege", &pgconn.PgError{Code: "42501"}, ErrDependencyUnavailable, true},
+		{"25006 read_only_write is generic", &pgconn.PgError{Code: "25006"}, ErrDependencyUnavailable, false},
+		{"non-pg error is generic", errors.New("boom"), ErrDependencyUnavailable, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapDeployedReadError(tc.err)
+			if got == nil {
+				t.Fatalf("mapDeployedReadError returned nil (never swallow a read error)")
+			}
+			if errors.Is(got, tc.want) != tc.matches {
+				t.Errorf("errors.Is(%v, ErrDependencyUnavailable) = %v, want %v", got, errors.Is(got, tc.want), tc.matches)
+			}
+		})
+	}
+}
+
+func TestFiltersToSelect_DeterministicSortedOrder(t *testing.T) {
+	// Map iteration is unordered; the SELECT's $n numbering must not be. Columns
+	// sort ascending; scalars become one-value equality, []any becomes IN.
+	got := filtersToSelect(map[string]any{
+		"status": "active",
+		"id":     []any{1, 2},
+		"email":  "a@b.c",
+	})
+	want := []SelectFilter{
+		{Column: "email", Values: []any{"a@b.c"}},
+		{Column: "id", Values: []any{1, 2}},
+		{Column: "status", Values: []any{"active"}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Column != want[i].Column {
+			t.Errorf("filter[%d].Column = %q, want %q (must be sorted)", i, got[i].Column, want[i].Column)
+		}
+	}
+}
+
+// TestPlatformRefKeyConformance is the second cross-repo conformance lock
+// (decision 18 §7 PR2): the manifest key the platform emits per producer must
+// equal the SDK's parseProducerRef normalization of any ref form the consumer
+// declares that producer by. The platform reverse-maps producerUUID →
+// (owner, slug) and keys by the normalized ref (decision 18 §3 step 6); a
+// consumer names the producer "@owner/slug[@constraint]" or bare "slug". If
+// these two normalizations drift, the SDK lookup fails closed
+// (ErrProducerNotFound) — never over-reads — but the read stops working, so we
+// freeze the agreement here.
+func TestPlatformRefKeyConformance(t *testing.T) {
+	// platformManifestKey models PR1's reconstruction: the manifest entry for a
+	// producer is keyed by the bare slug (what parseProducerRef yields for the
+	// "@owner/slug" a consumer declares). Modeled independently of
+	// parseProducerRef so a change to either surfaces here.
+	platformManifestKey := func(owner, slug string) string { return slug }
+
+	const owner, slug = "mirrorstack", "oauth-core"
+	key := platformManifestKey(owner, slug)
+
+	// Every slug-bearing consumer ref form must normalize to the platform key.
+	slugForms := []string{
+		"@" + owner + "/" + slug,           // canonical
+		"@" + owner + "/" + slug + "@^0.1", // + version constraint (the real #31 form)
+		slug,                               // bare slug
+		slug + "@^1",                       // bare + constraint
+	}
+	for _, ref := range slugForms {
+		got, err := parseProducerRef(ref)
+		if err != nil {
+			t.Errorf("parseProducerRef(%q): %v", ref, err)
+			continue
+		}
+		if got != key {
+			t.Errorf("parseProducerRef(%q) = %q, want platform key %q", ref, got, key)
+		}
+	}
+
+	// ID-form refs (m<hex>, dashed UUID) pass through unchanged: the platform
+	// only ever emits slug keys, so a consumer that declares its dependency by
+	// ID form fails closed (ErrProducerNotFound) against a slug-keyed manifest.
+	// Documented, not a match — locking the pass-through so it can't silently
+	// start rewriting IDs into something that spuriously collides with a slug.
+	idForms := map[string]string{
+		"m0e37bd82f0f5427a80549b6a5aebd3a8":    "m0e37bd82f0f5427a80549b6a5aebd3a8",
+		"0e37bd82-f0f5-427a-8054-9b6a5aebd3a8": "0e37bd82-f0f5-427a-8054-9b6a5aebd3a8",
+	}
+	for ref, want := range idForms {
+		got, err := parseProducerRef(ref)
+		if err != nil {
+			t.Errorf("parseProducerRef(%q): %v", ref, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("parseProducerRef(%q) = %q, want %q (unchanged pass-through)", ref, got, want)
+		}
+		if got == key {
+			t.Errorf("ID-form %q normalized to the slug key %q — must NOT collide", ref, key)
+		}
+	}
 }

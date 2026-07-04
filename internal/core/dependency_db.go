@@ -11,24 +11,37 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
 // ms.DependencyDB — the RESTRICTED consumer accessor for reading a producer
-// module's exposed tables (decision 17 §2, option (d): the SDK client of the
-// platform read proxy).
+// module's exposed tables. PLANE-TRANSPARENT: the same call works on both
+// planes and the switch lives entirely inside result(ctx, runtime.IsLambda()).
 //
 // A consumer that declared ms.DependsOn("@owner/producer", n.Table("users"))
-// reads those rows through the platform's read-exposed proxy — a STRUCTURED
-// read (table + projection + equality/IN filters, never raw SQL) that the
-// platform authorizes against the same consent+exposure catalog the
-// install-time grant walk uses and executes as the consumer's own
-// r_<app8>_<mod> role inside a READ ONLY transaction. There is deliberately
-// NO raw SQL surface and NO pool here: the dev plane holds no socket to the
-// platform DB, so a cross-plane SQL JOIN is structurally impossible —
-// fetch the exposed rows, then join in application code.
+// issues a STRUCTURED read (table + projection + equality/IN filters, never
+// raw SQL), authorized against the same consent+exposure catalog the
+// install-time grant walk uses and executed as the consumer's own
+// r_<app8>_<mod> role inside a READ ONLY transaction:
+//
+//   - DEV plane (decision 17 §2, option (d)): shipped over the platform's
+//     read-exposed proxy, authenticated by the live dev-tunnel session secret.
+//     The dev plane holds no socket to the platform DB, so a cross-plane SQL
+//     JOIN is structurally impossible — fetch, then join in app code.
+//   - DEPLOYED plane (decision 18 §3): the platform ships the authorized
+//     dependency set down the trusted Lambda envelope as a manifest; the SDK
+//     composes a sanitized dynamic SELECT against the platform-supplied
+//     physical relation name and runs it on mod.DB's already-vended
+//     consumer-role pool. Same fetch-then-join floor.
+//
+// Fetch-then-join-in-app-code is the PERMANENT contract on both planes.
 //
 //	rows, err := ms.DependencyDB(ctx, "@owner/oauth-core").
 //	    Select("users").
@@ -43,11 +56,10 @@ import (
 // ErrDependencyUnavailable / ErrProducerNotFound to branch on the
 // decision-17 failure modes.
 //
-// DEV-PLANE ONLY today: the proxy authenticates the LIVE dev-tunnel session
-// (the CLI-minted MS_INTERNAL_SECRET). A deployed consumer reads a
-// co-located producer directly via mod.DB (the GRANT SELECT path); wiring
-// DependencyDB for deployed consumers (envelope-vended proxy credentials) is
-// a documented follow-up.
+// Rollout gate: a deployed consumer running under a platform that does not yet
+// inject the dependency manifest keeps failing closed with the "dev-plane only"
+// error, so a consumer route stays fail-closed (e.g. 501) until both the
+// platform (decision 18 PR 1) and this SDK ship.
 
 // Sentinel errors mapping the read proxy's wire error codes onto the
 // decision-17 failure modes. Match with errors.Is; the returned errors wrap
@@ -92,10 +104,10 @@ var dependencySQLName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 // Construction never fails — a bad ref or missing app scope is carried
 // forward and surfaced by Rows/Result, keeping call sites chainable.
 type Dependency struct {
-	consumer string // this module's Config.ID — the proxy verifies it IS the caller
-	producer string // producer ref resolved within the same app (slug | UUID | m<hex>)
-	appID    string // trusted app scope from ctx (auth identity), never caller-supplied
-	err      error  // deferred construction error (bad ref, no app scope)
+	mod      *Module // owner module — its Config.ID IS the consumer; deployed branch reads its consumer-role pool
+	producer string  // producer ref resolved within the same app (slug | UUID | m<hex>)
+	appID    string  // trusted app scope from ctx (auth identity), never caller-supplied
+	err      error   // deferred construction error (bad ref, no app scope)
 }
 
 // DependencyDB returns a read handle on producerRef's exposed tables within
@@ -110,7 +122,7 @@ type Dependency struct {
 // WhereIn/Limit). It is not a *pgx pool and never will be — see the package
 // comment for why raw cross-plane SQL cannot exist.
 func (m *Module) DependencyDB(ctx context.Context, producerRef string) *Dependency {
-	d := &Dependency{consumer: m.config.ID}
+	d := &Dependency{mod: m}
 	appID, err := appIDFromContext(ctx, "DependencyDB")
 	if err != nil {
 		d.err = err
@@ -192,8 +204,10 @@ func (q *DependencyQuery) setErr(err error) *DependencyQuery {
 	return q
 }
 
-// Columns restricts the projection to the named columns (all visible
-// columns when never called). Accumulates across calls; at most 64 names.
+// Columns restricts the projection to the named columns. Accumulates across
+// calls; at most 64 names. On the dev plane an empty projection returns all
+// visible columns (the proxy resolves them); the deployed plane requires at
+// least one column — the blessed dynamic-SELECT builder never emits SELECT *.
 func (q *DependencyQuery) Columns(cols ...string) *DependencyQuery {
 	if q.err != nil {
 		return q
@@ -335,11 +349,7 @@ func (q *DependencyQuery) result(ctx context.Context, inLambda bool) (*Dependenc
 		return nil, q.err
 	}
 	if inLambda {
-		// The proxy authenticates a LIVE dev-tunnel session; a deployed
-		// consumer has none. Deployed->deployed reads use the direct GRANT
-		// via mod.DB (decision 17 resolution matrix); vending proxy
-		// credentials to deployed consumers is a documented follow-up.
-		return nil, errors.New("mirrorstack: DependencyDB is dev-plane only — a deployed module reads a co-located producer's exposed tables via mod.DB (GRANT SELECT); cross-plane deployed reads are not supported")
+		return q.resultDeployed(ctx)
 	}
 	// The proxy binds the caller to its live tunnel session by the session's
 	// InternalSecret — the exact value the CLI exports as MS_INTERNAL_SECRET
@@ -352,7 +362,7 @@ func (q *DependencyQuery) result(ctx context.Context, inLambda bool) (*Dependenc
 	}
 
 	payload := readExposedRequest{
-		Module:   q.dep.consumer,
+		Module:   q.dep.mod.config.ID,
 		Producer: q.dep.producer,
 		Table:    q.table,
 		Columns:  q.columns,
@@ -403,6 +413,137 @@ func (q *DependencyQuery) result(ctx context.Context, inLambda bool) (*Dependenc
 		out.Rows = []map[string]any{}
 	}
 	return &DependencyResult{Rows: out.Rows, Truncated: out.Truncated}, nil
+}
+
+// errDevPlaneOnly is the pre-decision-18 hard error. It is returned ONLY when
+// no dependency manifest is present in ctx — an old platform that does not yet
+// inject the manifest (the rollout gate: #31 stays 501 until BOTH sides ship).
+// #31's crossReadStatus recognizes the deployed rejection by the literal
+// "dev-plane only" substring, so that phrase MUST stay in the message.
+var errDevPlaneOnly = errors.New("mirrorstack: DependencyDB is dev-plane only — a deployed module reads a co-located producer's exposed tables via mod.DB (GRANT SELECT); cross-plane deployed reads are not supported")
+
+// resultDeployed is the deployed-plane branch (decision 18 §3): resolve the
+// producer + physical relation from the platform-injected manifest, then read
+// it AS the module's own consumer-role pool inside a READ ONLY tx. The manifest
+// is advisory routing only — Postgres enforces the install-time GRANT ceiling
+// on the vended connection, so a wrong/forged manifest name cannot over-read
+// (42501 → ErrDependencyUnavailable). Every degradation is a typed fail-closed
+// sentinel; none returns silent-empty.
+func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult, error) {
+	// Layer-1 fail-closed: manifest-absent + manifest-omission (decision 18 §5).
+	manifest := db.DependenciesFrom(ctx)
+	if manifest == nil {
+		// No manifest injected → old platform. Keep TODAY's hard error so #31
+		// stays 501 until PR 1 (platform) also ships. (decision 18 §3 read step 1)
+		return nil, errDevPlaneOnly
+	}
+	grant, ok := lookupDependency(manifest, q.dep.producer)
+	if !ok {
+		// Ref absent from the manifest: producer uninstalled/yanked or never a
+		// declared dependency. Collapses to one anti-probing verdict (§2 inv 10).
+		return nil, fmt.Errorf("%w: producer %q is not an available dependency of this module", ErrProducerNotFound, q.dep.producer)
+	}
+	physical, ok := grant.Tables[q.table]
+	if !ok {
+		// Table not in the grant: not exposed on the running version, exposure
+		// removed, or consent removed — deliberately indistinguishable (§5).
+		return nil, fmt.Errorf("%w: %q is not exposed to this module by %q on its running version", ErrNotExposed, q.table, q.dep.producer)
+	}
+
+	// Schema comes from the trusted envelope (SchemaFrom), never module input;
+	// the physical name comes only from the manifest. The shape-gate +
+	// Sanitize in buildDynamicSelect is the last-line defense on both.
+	ds := DynamicSelect{
+		Schema:  db.SchemaFrom(ctx),
+		Table:   physical,
+		Columns: q.columns,
+		Filters: filtersToSelect(q.filters),
+		Limit:   q.limit,
+	}
+
+	// mod.DB's consumer-role pool: db.CredentialFrom(ctx) → r_<app8>_<consumer>,
+	// the same role the install-time GRANT SELECT targets. resolvePool refcount-
+	// pins it until release.
+	pool, release, err := q.dep.mod.resolvePool(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack: DependencyDB: acquire consumer pool: %w", err)
+	}
+	defer release()
+
+	var rows []map[string]any
+	var truncated bool
+	err = db.TxReadOnly(ctx, pool, func(tx pgx.Tx) error {
+		var e error
+		rows, truncated, e = queryDynamicSelect(ctx, tx, ds)
+		return e
+	})
+	if err != nil {
+		// Layer-2 fail-closed: physical/grant state at read time (decision 18 §5).
+		return nil, mapDeployedReadError(err)
+	}
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+	return &DependencyResult{Rows: rows, Truncated: truncated}, nil
+}
+
+// lookupDependency finds the manifest entry for a producer ref. The manifest is
+// keyed by the SAME normalized form parseProducerRef yields (the bare slug the
+// platform reconstructs from owner/slug — decision 18 §3 step 6), and
+// q.dep.producer is already that normalized form. A miss fails closed
+// (ErrProducerNotFound), never over-reads — the conformance test locks this
+// key contract against drift.
+func lookupDependency(manifest []db.DependencyGrant, producer string) (db.DependencyGrant, bool) {
+	for _, g := range manifest {
+		if g.Ref == producer {
+			return g, true
+		}
+	}
+	return db.DependencyGrant{}, false
+}
+
+// filtersToSelect converts the builder's column→value map into the ordered
+// SelectFilter slice the dynamic SELECT composes. Columns are sorted so the
+// generated SQL text + $n numbering are deterministic (AND-order is
+// semantically irrelevant); a scalar becomes a one-value equality, an []any a
+// multi-value IN.
+func filtersToSelect(filters map[string]any) []SelectFilter {
+	if len(filters) == 0 {
+		return nil
+	}
+	cols := make([]string, 0, len(filters))
+	for c := range filters {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	out := make([]SelectFilter, 0, len(cols))
+	for _, c := range cols {
+		if vs, ok := filters[c].([]any); ok { // WhereIn stored the []any as-is
+			out = append(out, SelectFilter{Column: c, Values: vs})
+			continue
+		}
+		out = append(out, SelectFilter{Column: c, Values: []any{filters[c]}}) // Where scalar
+	}
+	return out
+}
+
+// mapDeployedReadError maps the READ ONLY tx's Postgres errors onto the typed
+// sentinels (decision 18 §5 layer 2). 42P01 (producer dropped/renamed the
+// relation) and 42501 (GRANT revoked) both mean the dependency is not readable
+// right now → ErrDependencyUnavailable, never silent-empty. Anything else
+// (incl. 25006, a builder-bug write on the read-only tx) wraps generically —
+// still an error, still fail-closed.
+func mapDeployedReadError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "42P01": // undefined_table
+			return fmt.Errorf("%w: producer relation is not present (SQLSTATE %s)", ErrDependencyUnavailable, pgErr.Code)
+		case "42501": // insufficient_privilege
+			return fmt.Errorf("%w: read privilege was revoked (SQLSTATE %s)", ErrDependencyUnavailable, pgErr.Code)
+		}
+	}
+	return fmt.Errorf("mirrorstack: DependencyDB: deployed read failed: %w", err)
 }
 
 // mapReadExposedError translates the proxy's error envelope

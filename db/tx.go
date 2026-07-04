@@ -71,3 +71,64 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(q Querier) error) error
 	// to roll back, which is silent data loss from the caller's perspective.
 	return tx.Commit(context.Background())
 }
+
+// TxReadOnly runs fn inside a READ ONLY transaction (pgx.TxOptions with
+// AccessMode: pgx.ReadOnly). Postgres rejects any write attempted inside fn
+// with SQLSTATE 25006 regardless of what the connecting role is granted — the
+// doubled enforcement the deployed cross-module read runs under (decision 18
+// §2 invariant 2: consumer-role connection + READ ONLY tx). The read executes
+// AS whatever role owns pool, so the install-time GRANT is the ceiling.
+//
+// Unlike Tx, fn receives the raw pgx.Tx: the dynamic-SELECT executor needs
+// tx.Query + pgx.CollectRows, which the Querier interface does not expose. The
+// app schema (search_path + ms.app_id) is pinned transaction-local from ctx
+// (WithSchema) via the shared applyScope so SET LOCAL auto-clears on
+// COMMIT/ROLLBACK and RLS on the producer's exposed relation resolves to this
+// tenant — SET LOCAL is legal in a read-only tx. The pool's AfterRelease hook
+// is the defense-in-depth backstop.
+//
+// Acquire-a-conn (like Tx) rather than pool.BeginTx so the tenant-scoping SQL
+// routes through the single applyScope seam (one batched round trip, one place
+// the ms.app_id RLS GUC is composed) instead of a divergent second copy.
+func TxReadOnly(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("mirrorstack/db: failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("mirrorstack/db: failed to begin read-only transaction: %w", err)
+	}
+
+	// Panic recovery must be deferred BEFORE applyScope so a panic during
+	// applyScope (or anywhere after Begin) still rolls back. safeRollback
+	// swallows a rollback failure so it cannot mask the original panic.
+	defer func() {
+		if p := recover(); p != nil {
+			safeRollback(tx)
+			panic(p)
+		}
+	}()
+
+	schema := SchemaFrom(ctx)
+	if schema != "" {
+		// local=true: search_path and ms.app_id auto-clear on COMMIT/ROLLBACK.
+		// Same seam Tx uses — SET LOCAL is legal in a read-only tx.
+		if err := applyScope(ctx, conn, schema, true); err != nil {
+			safeRollback(tx)
+			return err
+		}
+	}
+
+	if err := fn(tx); err != nil {
+		safeRollback(tx)
+		return err
+	}
+
+	// Read-only tx: nothing to persist, but Commit still ends the tx cleanly
+	// and returns the connection to the pool. Background ctx so a canceled
+	// request ctx cannot turn the clean finish into a spurious error.
+	return tx.Commit(context.Background())
+}

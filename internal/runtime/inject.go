@@ -14,11 +14,12 @@ import (
 // Used by both the Lambda handler and the task worker — any change here
 // applies to both paths automatically.
 type InjectParams struct {
-	Resources *Resources
-	UserID    string
-	AppID     string
-	AppRole   string
-	AppSchema string
+	Resources    *Resources
+	Dependencies []DependencyGrant
+	UserID       string
+	AppID        string
+	AppRole      string
+	AppSchema    string
 }
 
 // validRoles is the set of platform roles the SDK recognizes. Messages
@@ -57,6 +58,12 @@ func InjectResources(ctx context.Context, p InjectParams) (context.Context, erro
 	}
 	if p.AppSchema != "" {
 		ctx = db.WithSchema(ctx, p.AppSchema)
+	}
+	// Stash the deployed cross-module read manifest parallel to the schema /
+	// credential seams. omitempty means an old platform sends no field → nil →
+	// the deployed DependencyDB branch fails closed to its dev-plane-only error.
+	if len(p.Dependencies) > 0 {
+		ctx = db.WithDependencies(ctx, p.Dependencies)
 	}
 	if p.UserID != "" || p.AppID != "" || p.AppRole != "" {
 		ctx = auth.Set(ctx, auth.Identity{
