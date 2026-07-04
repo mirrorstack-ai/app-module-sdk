@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"crypto/subtle"
 	"log"
 	"net/http"
@@ -240,7 +239,7 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 			// CRITICAL ORDERING: this MUST stay below the constant-time check —
 			// promoting on the local bypass or any rejection branch would trust
 			// spoofable headers from an unauthenticated caller.
-			next.ServeHTTP(w, r.WithContext(promoteForwarderIdentity(r)))
+			next.ServeHTTP(w, promoteForwarderIdentity(r))
 		})
 	}
 }
@@ -353,7 +352,7 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			//
 			// CRITICAL ORDERING: this MUST run only after the token check above
 			// passes. Promoting before validation would trust spoofable headers.
-			next.ServeHTTP(w, r.WithContext(promoteForwarderIdentity(r)))
+			next.ServeHTTP(w, promoteForwarderIdentity(r))
 		})
 	}
 }
@@ -369,13 +368,16 @@ func rejectNotProxied(w http.ResponseWriter) {
 	})
 }
 
-// promoteForwarderIdentity returns r's context with the forwarder-injected
-// X-MS-User-ID / X-MS-App-ID / X-MS-App-Role headers promoted to
-// auth.Identity. It is the single header-ingestion mechanism shared by the
-// two secret-validated HTTP paths (requireProxy and internalAuth) and MUST
-// only be called on a success path, AFTER the platform token / internal
-// secret passed its constant-time check — the validated secret is the proof
-// that the headers came from dispatch, not a direct caller.
+// promoteForwarderIdentity returns the request to serve onward, with the
+// forwarder-injected X-MS-User-ID / X-MS-App-ID / X-MS-App-Role headers
+// promoted to auth.Identity on its context. It is the header-ingestion
+// mechanism shared by the two secret-validated HTTP paths that admit partial
+// identity (requireProxy and internalAuth); platformAuth step 4 deliberately
+// hand-rolls a STRICTER variant (all-three-required, rejecting otherwise) and
+// so does not route through here. It MUST only be called on a success path,
+// AFTER the platform token / internal secret passed its constant-time check —
+// the validated secret is the proof that the headers came from dispatch, not a
+// direct caller.
 //
 // Two guards, mirroring the deployed path's precedents:
 //
@@ -388,13 +390,14 @@ func rejectNotProxied(w http.ResponseWriter) {
 //     request leaves auth.Get(ctx) == nil rather than planting an
 //     all-empty Identity.
 //
-// Unlike platformAuth step 4 there is no all-three-required rejection here:
-// internal system calls legitimately carry no user (events, crons), and on
-// this plane dispatch always injects app id + app role.
-func promoteForwarderIdentity(r *http.Request) context.Context {
+// Both no-op branches return r UNCHANGED so the caller skips the
+// http.Request clone that r.WithContext always makes — a headerless
+// system-to-system internal call (events, crons) stays zero-allocation on its
+// hot path.
+func promoteForwarderIdentity(r *http.Request) *http.Request {
 	ctx := r.Context()
 	if Get(ctx) != nil {
-		return ctx
+		return r
 	}
 	id := Identity{
 		UserID:  r.Header.Get(HeaderUserID),
@@ -402,9 +405,9 @@ func promoteForwarderIdentity(r *http.Request) context.Context {
 		AppRole: r.Header.Get(HeaderAppRole),
 	}
 	if id == (Identity{}) {
-		return ctx
+		return r
 	}
-	return Set(ctx, id)
+	return r.WithContext(Set(ctx, id))
 }
 
 // secretReader returns the current secret, which header carries it, and
