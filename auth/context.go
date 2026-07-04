@@ -1,4 +1,9 @@
 // Package auth provides authentication context and middleware for MirrorStack modules.
+//
+// Module code reads the request identity from the CONTEXT — ms.UserID /
+// ms.AppID / ms.AppRole (or auth.Get) — never from the X-MS-* Header*
+// constants, which are the internal platform-to-SDK wire; see the Header*
+// docs for why header reads silently break deployed.
 package auth
 
 import "context"

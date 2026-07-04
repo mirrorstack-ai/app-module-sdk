@@ -61,10 +61,7 @@ func resolveCallURL(targetModuleID, path string) string {
 //
 // DEV/DISPATCH TRANSPORT — see resolveCallURL for the prod (#146) seam.
 func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
-	appID := ""
-	if a := auth.Get(ctx); a != nil {
-		appID = a.AppID
-	}
+	appID := AppID(ctx)
 
 	var reader io.Reader
 	if body != nil {
@@ -129,6 +126,15 @@ func CallPost(ctx context.Context, targetModuleID, path string, body, out any) e
 	return mustDefault("CallPost").CallPost(ctx, targetModuleID, path, body, out)
 }
 
+// identity returns the context's auth identity, or the zero Identity when
+// none is set, so field reads on it degrade to "".
+func identity(ctx context.Context) auth.Identity {
+	if a := auth.Get(ctx); a != nil {
+		return *a
+	}
+	return auth.Identity{}
+}
+
 // AppID returns the app id from the request context's auth identity, or "" if
 // no identity is set. It is the inbound twin of WithAppID and the single
 // unspoofable way a handler reads its own app: the SDK promotes the trusted,
@@ -139,8 +145,21 @@ func CallPost(ctx context.Context, targetModuleID, path string, body, out any) e
 // Not module-bound (no *Module receiver) — identity lives on the context, so
 // this works before Init and in tests.
 func AppID(ctx context.Context) string {
-	if a := auth.Get(ctx); a != nil {
-		return a.AppID
-	}
-	return ""
+	return identity(ctx).AppID
+}
+
+// UserID returns the user id from the request context's auth identity, or ""
+// if no identity is set. Same promotion paths and context-not-module shape as
+// AppID; "" is legitimate on surfaces with no user (internal/system/cron/task
+// invocations, anonymous Public requests).
+func UserID(ctx context.Context) string {
+	return identity(ctx).UserID
+}
+
+// AppRole returns the app role from the request context's auth identity, or
+// "" if no identity is set. Same promotion paths and context-not-module shape
+// as AppID; "" is legitimate on surfaces with no user (internal/system/cron/
+// task invocations, anonymous Public requests).
+func AppRole(ctx context.Context) string {
+	return identity(ctx).AppRole
 }

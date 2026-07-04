@@ -315,9 +315,53 @@ func Notify(ctx context.Context, n Notification) error {
 //	appID := ms.AppID(r.Context())
 //
 // Do NOT read the app id from request data (query string, body, path) — those
-// are caller-controlled and forgeable. ms.AppID is the trusted source.
+// are caller-controlled and forgeable — and do NOT read the auth.HeaderAppID
+// header: the deployed Lambda shim strips it, so header reads silently break
+// deployed (ms-app-modules#30; see the auth.Header* docs). ms.AppID is the
+// trusted source on every path.
 func AppID(ctx context.Context) string {
 	return core.AppID(ctx)
+}
+
+// UserID returns the current user id from the request context, or "" if no
+// identity is set. Together with ms.AppID and ms.AppRole (or auth.Get, which
+// returns the full Identity in one read) it is the ONLY correct way for
+// module code to read the request's identity: always the context, never the
+// auth.HeaderUserID (X-MS-User-ID) header — the deployed Lambda shim strips
+// it, so header reads work under the dev tunnel and silently break deployed
+// (ms-app-modules#30; see the auth.Header* docs).
+//
+// On every guarded surface the SDK promotes the platform's trusted, dispatch-
+// injected user id into the context identity BEFORE the handler runs — Platform
+// via PlatformAuth, Public via the proxy guard's validated-token path, and
+// Lambda via the typed invoke payload (runtime.InjectResources). So a handler
+// reads the requesting user with:
+//
+//	userID := ms.UserID(r.Context())
+//
+// "" is a legitimate value, not only an unauthenticated-middleware artifact:
+// internal/system/cron/task invocations carry no user, and an anonymous Public
+// request may carry an identity whose user id is empty. Under the local-dev
+// bypass (no secret configured) it returns the synthetic "local-dev-user".
+func UserID(ctx context.Context) string {
+	return core.UserID(ctx)
+}
+
+// AppRole returns the current user's role in the app from the request context
+// ("admin", "member", or "viewer" — compare against auth.RoleAdmin /
+// auth.RoleMember / auth.RoleViewer), or "" if no identity is set. Identity
+// promotion and the always-the-context-never-the-X-MS-*-headers rule are
+// exactly as documented on ms.UserID. Note: ms.AppRole is a read of WHO the
+// platform says the caller is — for gating routes by role, prefer the
+// declarative RequirePermission middleware:
+//
+//	if ms.AppRole(r.Context()) == auth.RoleAdmin { ... }
+//
+// "" is a legitimate value: internal/system/cron/task invocations carry no
+// user role. Under the local-dev bypass (no secret configured) it returns the
+// synthetic auth.RoleAdmin.
+func AppRole(ctx context.Context) string {
+	return core.AppRole(ctx)
 }
 
 // Log returns the request's structured logger, pre-tagged with the trusted
