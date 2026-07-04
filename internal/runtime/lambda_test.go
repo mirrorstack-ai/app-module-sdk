@@ -197,10 +197,10 @@ func TestNewLambdaHandler_AuthSecretHeadersSurvive(t *testing.T) {
 		Path:   "/check",
 		Headers: map[string]string{
 			auth.HeaderInternalSecret: "platform-secret", // exempt — must survive
-			auth.HeaderPlatformToken:  "platform-token",   // exempt — must survive
-			auth.HeaderUserID:         "spoofed-user",      // claim — must be stripped
-			auth.HeaderAppID:          "spoofed-app",       // claim — must be stripped
-			auth.HeaderAppRole:        "admin",             // claim — must be stripped
+			auth.HeaderPlatformToken:  "platform-token",  // exempt — must survive
+			auth.HeaderUserID:         "spoofed-user",    // claim — must be stripped
+			auth.HeaderAppID:          "spoofed-app",     // claim — must be stripped
+			auth.HeaderAppRole:        "admin",           // claim — must be stripped
 		},
 	})
 

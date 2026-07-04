@@ -11,10 +11,19 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
-// Trusted-forwarder identity-injection headers. A caller proves it's a
-// trusted forwarder (the platform or its dispatch) by sending a valid
-// X-MS-Internal-Secret; if proven, PlatformAuth trusts the user identity
-// those callers assert via these headers.
+// Trusted-forwarder identity-injection headers — the INTERNAL wire between
+// the platform (dispatch/tunnel) and this SDK's middleware, NOT a module
+// identity API. A caller proves it's a trusted forwarder (the platform or its
+// dispatch) by sending a valid X-MS-Internal-Secret; if proven, PlatformAuth
+// trusts the user identity those callers assert via these headers.
+//
+// Module code must NEVER read the identity-claim headers (HeaderUserID /
+// HeaderAppID / HeaderAppRole) directly: the deployed Lambda shim strips
+// every client-settable X-MS-* identity header before the router runs
+// (trusted identity rides the typed invoke payload instead), so a header
+// read works under the dev tunnel and silently breaks deployed — the exact
+// bug shipped in ms-app-modules#30. Read identity via ms.UserID / ms.AppID /
+// ms.AppRole (or auth.Get), which resolve on every ingestion path.
 const (
 	HeaderInternalSecret = "X-MS-Internal-Secret"
 	HeaderPlatformToken  = "X-MS-Platform-Token"

@@ -3,7 +3,6 @@ package core
 import (
 	"net/http"
 
-
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 

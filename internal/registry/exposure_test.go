@@ -83,13 +83,13 @@ func TestAddExposedTable_PanicsOnInvalidName(t *testing.T) {
 	t.Parallel()
 
 	bad := []string{
-		"",            // empty
-		"Orders",      // uppercase
-		"1orders",     // leading digit
-		"my orders",   // whitespace
+		"",             // empty
+		"Orders",       // uppercase
+		"1orders",      // leading digit
+		"my orders",    // whitespace
 		"orders-table", // hyphen (not a Postgres-safe bare identifier)
-		"mod.orders",  // dot / schema-qualified
-		"../etc",      // path traversal shape
+		"mod.orders",   // dot / schema-qualified
+		"../etc",       // path traversal shape
 	}
 	for _, name := range bad {
 		name := name

@@ -144,3 +144,33 @@ func AppID(ctx context.Context) string {
 	}
 	return ""
 }
+
+// UserID returns the user id from the request context's auth identity, or ""
+// if no identity is set. Same promotion paths as AppID (Platform via
+// PlatformAuth, Public via the proxy guard's success path; Lambda via
+// runtime.InjectResources). "" is a legitimate value on surfaces with no user
+// (internal/system/cron/task invocations, anonymous Public requests).
+//
+// Not module-bound (no *Module receiver) — identity lives on the context, so
+// this works before Init and in tests.
+func UserID(ctx context.Context) string {
+	if a := auth.Get(ctx); a != nil {
+		return a.UserID
+	}
+	return ""
+}
+
+// AppRole returns the app role from the request context's auth identity, or
+// "" if no identity is set. Same promotion paths as AppID (Platform via
+// PlatformAuth, Public via the proxy guard's success path; Lambda via
+// runtime.InjectResources). "" is a legitimate value on surfaces with no user
+// (internal/system/cron/task invocations, anonymous Public requests).
+//
+// Not module-bound (no *Module receiver) — identity lives on the context, so
+// this works before Init and in tests.
+func AppRole(ctx context.Context) string {
+	if a := auth.Get(ctx); a != nil {
+		return a.AppRole
+	}
+	return ""
+}
