@@ -17,13 +17,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
-	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
 // ms.DependencyDB — the RESTRICTED consumer accessor for reading a producer
 // module's exposed tables. PLANE-TRANSPARENT: the same call works on both
-// planes and the switch lives entirely inside result(ctx, runtime.IsLambda()).
+// planes and the switch lives entirely inside result(ctx, deployed) — where
+// `deployed` is the PER-REQUEST deployed-envelope signal (auth.PayloadTrusted),
+// NOT the process-global runtime.IsLambda(). The envelope signal is set for
+// every deployed invoke on BOTH the real Lambda entrypoint and the local dev
+// lambda-invoke shim, so the deployed read fires in the shim too — not only in
+// real Lambda (where IsLambda would be true).
 //
 // A consumer that declared ms.DependsOn("@owner/producer", n.Table("users"))
 // issues a STRUCTURED read (table + projection + equality/IN filters, never
@@ -329,7 +334,15 @@ func (q *DependencyQuery) Rows(ctx context.Context) ([]map[string]any, error) {
 // Failure modes are typed and fail-closed (never silently empty) — see the
 // Err* sentinels.
 func (q *DependencyQuery) Result(ctx context.Context) (*DependencyResult, error) {
-	return q.result(ctx, runtime.IsLambda())
+	// The plane is a PER-REQUEST property: did THIS invoke arrive through the
+	// deployed Lambda envelope? auth.PayloadTrusted is that signal — set by
+	// runtime.NewLambdaHandler for both real Lambda AND the dev lambda-invoke
+	// shim, and never for a dev-tunnel HTTP request. Deliberately NOT the
+	// process-global runtime.IsLambda(): the local deploy-sim shim serves
+	// deployed invokes over HTTP with IsLambda==false (it cannot set
+	// AWS_LAMBDA_FUNCTION_NAME without lambda.Start() hijacking the process), so
+	// keying on IsLambda would wrongly divert the shim to the dev-tunnel proxy.
+	return q.result(ctx, auth.PayloadTrusted(ctx))
 }
 
 // readExposedRequest mirrors the dispatch read-exposed wire envelope.
@@ -342,13 +355,17 @@ type readExposedRequest struct {
 	Limit    int            `json:"limit,omitempty"`
 }
 
-// result is the test seam behind Result (inLambda injected so tests don't
-// depend on process env captured at package init).
-func (q *DependencyQuery) result(ctx context.Context, inLambda bool) (*DependencyResult, error) {
+// result is the test seam behind Result. deployed is TRUE when the invoke
+// arrived through the deployed Lambda envelope (auth.PayloadTrusted, set by
+// runtime.NewLambdaHandler for BOTH real Lambda and the dev lambda-invoke
+// shim) — a PER-REQUEST property, injected here so the plane choice is testable
+// and never keys on the process-global runtime.IsLambda() (which is false
+// inside the local shim's HTTP server). deployed=false is the dev-tunnel path.
+func (q *DependencyQuery) result(ctx context.Context, deployed bool) (*DependencyResult, error) {
 	if q.err != nil {
 		return nil, q.err
 	}
-	if inLambda {
+	if deployed {
 		return q.resultDeployed(ctx)
 	}
 	// The proxy binds the caller to its live tunnel session by the session's

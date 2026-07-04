@@ -56,7 +56,7 @@ func TestDependencyDB_DeployedRead_Integration(t *testing.T) {
 		Select("users").
 		Columns("id", "email", "deleted_at").
 		Limit(1).
-		result(readCtx, true /* inLambda */)
+		result(readCtx, true /* deployed */)
 	if err != nil {
 		t.Fatalf("deployed read: %v", err)
 	}
