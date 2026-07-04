@@ -104,8 +104,7 @@ var dependencySQLName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 // Construction never fails — a bad ref or missing app scope is carried
 // forward and surfaced by Rows/Result, keeping call sites chainable.
 type Dependency struct {
-	mod      *Module // owner module — the deployed branch reads its consumer-role pool
-	consumer string  // this module's Config.ID — the proxy verifies it IS the caller
+	mod      *Module // owner module — its Config.ID IS the consumer; deployed branch reads its consumer-role pool
 	producer string  // producer ref resolved within the same app (slug | UUID | m<hex>)
 	appID    string  // trusted app scope from ctx (auth identity), never caller-supplied
 	err      error   // deferred construction error (bad ref, no app scope)
@@ -123,7 +122,7 @@ type Dependency struct {
 // WhereIn/Limit). It is not a *pgx pool and never will be — see the package
 // comment for why raw cross-plane SQL cannot exist.
 func (m *Module) DependencyDB(ctx context.Context, producerRef string) *Dependency {
-	d := &Dependency{mod: m, consumer: m.config.ID}
+	d := &Dependency{mod: m}
 	appID, err := appIDFromContext(ctx, "DependencyDB")
 	if err != nil {
 		d.err = err
@@ -363,7 +362,7 @@ func (q *DependencyQuery) result(ctx context.Context, inLambda bool) (*Dependenc
 	}
 
 	payload := readExposedRequest{
-		Module:   q.dep.consumer,
+		Module:   q.dep.mod.config.ID,
 		Producer: q.dep.producer,
 		Table:    q.table,
 		Columns:  q.columns,
