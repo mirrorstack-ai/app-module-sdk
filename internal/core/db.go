@@ -12,7 +12,10 @@ import (
 // DB returns a scoped database connection.
 //
 // Production: uses per-app credentials injected by the platform via Lambda payload.
-// Dev: uses DATABASE_URL env var with localhost fallback.
+// Dev: uses DATABASE_URL env var with localhost fallback. Dev connections are
+// wrapped with the cross-module fail-fast guard (db_guard.go): a raw query
+// against another module's tables errors immediately instead of silently
+// succeeding in the shared dev database — use ms.DependencyDB for that.
 //
 //	conn, release, err := mod.DB(r.Context())
 //	if err != nil { ... }
@@ -28,7 +31,7 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 		releasePool()
 		return nil, nil, err
 	}
-	return querier, func() {
+	return m.devGuardFor(ctx, querier, db.CredentialFrom), func() {
 		releaseConn()
 		releasePool()
 	}, nil
@@ -51,7 +54,9 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 		return err
 	}
 	defer releasePool()
-	return db.Tx(ctx, pool, fn)
+	return db.Tx(ctx, pool, func(q db.Querier) error {
+		return fn(m.devGuardFor(ctx, q, db.CredentialFrom))
+	})
 }
 
 // resolvePool returns the per-app credential pool (production) or the dev
@@ -111,7 +116,7 @@ func (m *Module) ModuleDB(ctx context.Context) (db.Querier, func(), error) {
 		releasePool()
 		return nil, nil, err
 	}
-	return querier, func() {
+	return m.devGuardFor(ctx, querier, db.ModuleCredentialFrom), func() {
 		releaseConn()
 		releasePool()
 	}, nil
@@ -134,7 +139,9 @@ func (m *Module) ModuleTx(ctx context.Context, fn func(q db.Querier) error) erro
 	}
 	defer releasePool()
 	moduleCtx := db.WithSchema(ctx, m.moduleSchemaFor(ctx))
-	return db.Tx(moduleCtx, pool, fn)
+	return db.Tx(moduleCtx, pool, func(q db.Querier) error {
+		return fn(m.devGuardFor(ctx, q, db.ModuleCredentialFrom))
+	})
 }
 
 // resolveModulePool reads the per-module credential instead of the per-app
