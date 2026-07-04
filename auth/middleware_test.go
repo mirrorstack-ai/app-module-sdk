@@ -827,3 +827,178 @@ func TestRequireProxy_PresetIdentity_NotClobbered(t *testing.T) {
 		t.Errorf("preset identity must win over headers; got %+v", seen)
 	}
 }
+
+// --- InternalAuth identity promotion (Internal-scope trusted forwarder identity) ---
+
+func TestInternalAuth_ValidSecret_PromotesForwarderIdentity(t *testing.T) {
+	// REGRESSION PIN for the tunnel-Internal 401: on the dev/tunnel plane,
+	// dispatch strips-then-injects X-MS-User-ID / X-MS-App-ID / X-MS-App-Role
+	// on Internal-scope forwards, but internalAuth only validated the secret
+	// and never promoted those headers into ctx — so any Internal handler
+	// reading ms.AppID(r.Context()) got "" and 401'd. Bit twice:
+	// ms-app-modules#30 (oauth-google platformCallback reads ctx identity —
+	// correct when deployed, latently broken when tunnel-served) and
+	// ms-app-modules#31 (cross-read route hit the same wall, blocking the
+	// dev-to-dev / dev-to-deployed E2Es). After the secret validates, the
+	// headers are dispatch-injected (strip-then-inject) and must be promoted
+	// — the same trust signal requireProxy promotes on.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	var seen *Identity
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil)
+	req.Header.Set(HeaderInternalSecret, "real-secret")
+	req.Header.Set(HeaderUserID, "u-owner-1")
+	req.Header.Set(HeaderAppID, "a-int-2")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid internal request, got %d", rec.Code)
+	}
+	if seen == nil {
+		t.Fatal("expected promoted Identity on the context; got nil")
+	}
+	if seen.AppID != "a-int-2" {
+		t.Errorf("AppID = %q, want a-int-2 (the trusted, dispatch-injected app id)", seen.AppID)
+	}
+	if seen.UserID != "u-owner-1" || seen.AppRole != RoleAdmin {
+		t.Errorf("identity mismatch: got %+v", seen)
+	}
+}
+
+func TestInternalAuth_RejectedRequest_NeverPromotes(t *testing.T) {
+	// A request rejected by internalAuth (wrong secret) must NEVER reach the
+	// handler, so no identity is ever promoted from its (spoofable) headers.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	reached := false
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		reached = true
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil)
+	req.Header.Set(HeaderInternalSecret, "wrong")
+	req.Header.Set(HeaderAppID, "spoofed-app")
+	req.Header.Set(HeaderUserID, "spoofed-user")
+	req.Header.Set(HeaderAppRole, RoleAdmin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+	if reached {
+		t.Error("handler must not run on a rejected request — promotion would trust spoofed headers")
+	}
+}
+
+func TestInternalAuth_LocalBypass_DoesNotPromote(t *testing.T) {
+	// Local dev with NO secret configured: the bypass passes the request
+	// through, but the transport is unauthenticated — nothing proved the
+	// X-MS-* headers came from dispatch, so they must NOT be promoted.
+	// Identity promotion only ever follows a validated secret (fail closed).
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
+	t.Setenv("MS_PLATFORM_TOKEN", "")
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	var seen *Identity
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil)
+	req.Header.Set(HeaderAppID, "spoofed-app")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (local bypass), got %d", rec.Code)
+	}
+	if seen != nil {
+		t.Errorf("bypass must not promote unvalidated headers; got identity %+v", seen)
+	}
+}
+
+func TestInternalAuth_PayloadTrusted_EnvelopeIdentitySurvives(t *testing.T) {
+	// Deployed simulation: runtime.NewLambdaHandler strips X-MS-* identity
+	// headers, InjectResources sets Identity from the typed envelope, and the
+	// payload-trust mark short-circuits internalAuth BEFORE any header read.
+	// The envelope identity must reach the handler untouched — with no
+	// headers on the request, promotion must neither clobber nor blank it.
+	t.Setenv("MS_PLATFORM_TOKEN", "tunnel-session-token")
+	var seen *Identity
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil) // no headers (stripped)
+	ctx := WithPayloadTrust(Set(req.Context(), Identity{
+		UserID:  "envelope-user",
+		AppID:   "envelope-app",
+		AppRole: RoleAdmin,
+	}))
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for payload-trusted request, got %d", rec.Code)
+	}
+	if seen == nil || seen.AppID != "envelope-app" {
+		t.Errorf("envelope identity must survive untouched; got %+v", seen)
+	}
+}
+
+func TestInternalAuth_ValidSecret_EmptyHeaders_NoIdentityMinted(t *testing.T) {
+	// A secret-validated request with NO identity headers must not mint an
+	// all-empty Identity — auth.Get stays nil (same rule InjectResources
+	// applies to an all-empty envelope).
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	var seen *Identity
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil)
+	req.Header.Set(HeaderInternalSecret, "real-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seen != nil {
+		t.Errorf("empty headers must not mint an identity; got %+v", seen)
+	}
+}
+
+func TestInternalAuth_ValidSecret_PresetIdentity_NotClobbered(t *testing.T) {
+	// If an upstream layer already attached an identity, the promotion must
+	// not overwrite it with header values — mirrors
+	// TestRequireProxy_PresetIdentity_NotClobbered.
+	t.Setenv("MS_INTERNAL_SECRET", "real-secret")
+	var seen *Identity
+	handler := internalAuth(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = Get(r.Context())
+	}))
+
+	req := httptest.NewRequest("POST", "/internal/crossread", nil)
+	req.Header.Set(HeaderInternalSecret, "real-secret")
+	req.Header.Set(HeaderAppID, "header-app")
+	req = req.WithContext(Set(req.Context(), Identity{
+		UserID:  "preset-user",
+		AppID:   "preset-app",
+		AppRole: RoleAdmin,
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if seen == nil || seen.AppID != "preset-app" {
+		t.Errorf("preset identity must win over headers; got %+v", seen)
+	}
+}

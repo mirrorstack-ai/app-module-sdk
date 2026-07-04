@@ -180,6 +180,15 @@ func InternalAuth() func(http.Handler) http.Handler {
 // while still preventing tunnel mode from accidentally accepting
 // unauthenticated traffic forwarded by dispatch (the CLI sets the secret
 // when tunneling).
+//
+// On the secret-validated success path, the forwarder-injected X-MS-User-ID /
+// X-MS-App-ID / X-MS-App-Role headers are promoted to auth.Identity (see
+// promoteForwarderIdentity) — the same trust signal RequireProxy uses on the
+// public surface, and the same identity triple InjectResources sets on the
+// deployed path. Without this, an Internal handler served over the dev tunnel
+// reads ms.AppID(ctx) == "" even though dispatch injected the headers.
+// Promotion NEVER happens on the local bypass (unauthenticated transport) or
+// on any rejection branch.
 func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 	readSecret := platformSecretReader()
 	if _, _, configured := readSecret(); !configured {
@@ -226,7 +235,20 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 				httputil.JSON(w, http.StatusUnauthorized, httputil.ErrorResponse{Error: "internal authentication required"})
 				return
 			}
-			next.ServeHTTP(w, r)
+
+			// SUCCESS PATH ONLY. The secret validated, which proves the request
+			// came off the platform wire (dispatch / dev tunnel proxy) — the
+			// same trust signal RequireProxy relies on — so the X-MS-* identity
+			// headers it injected are now trusted. Promote them so an Internal
+			// handler can read ms.AppID(ctx) on the dev/tunnel plane just like
+			// on the deployed plane (where InjectResources populates ctx from
+			// the typed envelope and the PayloadTrusted early-return above
+			// keeps that identity authoritative).
+			//
+			// CRITICAL ORDERING: this MUST stay below the constant-time check —
+			// promoting on the local bypass or any rejection branch would trust
+			// spoofable headers from an unauthenticated caller.
+			next.ServeHTTP(w, promoteForwarderIdentity(r))
 		})
 	}
 }
@@ -339,19 +361,7 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			//
 			// CRITICAL ORDERING: this MUST run only after the token check above
 			// passes. Promoting before validation would trust spoofable headers.
-			//
-			// Don't clobber an identity already on the context: if something
-			// upstream (e.g. PlatformAuth on the platform surface, or a future
-			// authorizer) already set one, that wins.
-			ctx := r.Context()
-			if Get(ctx) == nil {
-				ctx = Set(ctx, Identity{
-					UserID:  r.Header.Get(HeaderUserID),
-					AppID:   r.Header.Get(HeaderAppID),
-					AppRole: r.Header.Get(HeaderAppRole),
-				})
-			}
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, promoteForwarderIdentity(r))
 		})
 	}
 }
@@ -365,6 +375,48 @@ func rejectNotProxied(w http.ResponseWriter) {
 		Error: "request did not come through the platform proxy",
 		Code:  CodeNotProxied,
 	})
+}
+
+// promoteForwarderIdentity returns the request to serve onward, with the
+// forwarder-injected X-MS-User-ID / X-MS-App-ID / X-MS-App-Role headers
+// promoted to auth.Identity on its context. It is the header-ingestion
+// mechanism shared by the two secret-validated HTTP paths that admit partial
+// identity (requireProxy and internalAuth); platformAuth step 4 deliberately
+// hand-rolls a STRICTER variant (all-three-required, rejecting otherwise) and
+// so does not route through here. It MUST only be called on a success path,
+// AFTER the platform token / internal secret passed its constant-time check —
+// the validated secret is the proof that the headers came from dispatch, not a
+// direct caller.
+//
+// Two guards, mirroring the deployed path's precedents:
+//
+//   - Don't clobber an identity already on the context (Lambda's
+//     InjectResources — or an upstream middleware — set it from a source at
+//     least as trusted as these headers; requireProxy pins this via
+//     TestRequireProxy_PresetIdentity_NotClobbered).
+//   - Empty headers never mint an identity (same rule InjectResources
+//     applies to an all-empty envelope): a headerless-but-authenticated
+//     request leaves auth.Get(ctx) == nil rather than planting an
+//     all-empty Identity.
+//
+// Both no-op branches return r UNCHANGED so the caller skips the
+// http.Request clone that r.WithContext always makes — a headerless
+// system-to-system internal call (events, crons) stays zero-allocation on its
+// hot path.
+func promoteForwarderIdentity(r *http.Request) *http.Request {
+	ctx := r.Context()
+	if Get(ctx) != nil {
+		return r
+	}
+	id := Identity{
+		UserID:  r.Header.Get(HeaderUserID),
+		AppID:   r.Header.Get(HeaderAppID),
+		AppRole: r.Header.Get(HeaderAppRole),
+	}
+	if id == (Identity{}) {
+		return r
+	}
+	return r.WithContext(Set(ctx, id))
 }
 
 // secretReader returns the current secret, which header carries it, and
