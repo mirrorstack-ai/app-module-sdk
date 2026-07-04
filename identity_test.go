@@ -12,59 +12,45 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
-func TestUserID(t *testing.T) {
-	t.Run("returns empty string when no identity is set", func(t *testing.T) {
-		if got := ms.UserID(context.Background()); got != "" {
-			t.Errorf("UserID = %q, want empty string", got)
-		}
-	})
-
-	t.Run("reads the user id from the context identity", func(t *testing.T) {
-		ctx := auth.Set(context.Background(), auth.Identity{
-			UserID:  "u-1",
-			AppID:   "app-7",
-			AppRole: auth.RoleAdmin,
+// TestIdentityAccessors_ContextReads pins the unit contract of ms.UserID and
+// ms.AppRole against each identity state a context can carry.
+func TestIdentityAccessors_ContextReads(t *testing.T) {
+	cases := []struct {
+		name               string
+		ctx                context.Context
+		wantUser, wantRole string
+	}{
+		{
+			name: "no identity set returns empty strings",
+			ctx:  context.Background(),
+		},
+		{
+			name: "reads the fields from the context identity",
+			ctx: auth.Set(context.Background(), auth.Identity{
+				UserID:  "u-1",
+				AppID:   "app-7",
+				AppRole: auth.RoleAdmin,
+			}),
+			wantUser: "u-1",
+			wantRole: auth.RoleAdmin,
+		},
+		{
+			// Anonymous Public requests and internal/system/cron/task calls
+			// carry an identity with no user — a valid state, not an error.
+			name: "empty fields inside a set identity are legitimate",
+			ctx:  auth.Set(context.Background(), auth.Identity{AppID: "app-7"}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ms.UserID(tc.ctx); got != tc.wantUser {
+				t.Errorf("UserID = %q, want %q", got, tc.wantUser)
+			}
+			if got := ms.AppRole(tc.ctx); got != tc.wantRole {
+				t.Errorf("AppRole = %q, want %q", got, tc.wantRole)
+			}
 		})
-		if got := ms.UserID(ctx); got != "u-1" {
-			t.Errorf("UserID = %q, want u-1", got)
-		}
-	})
-
-	t.Run("empty user id inside a set identity is legitimate", func(t *testing.T) {
-		// Anonymous Public requests and internal/system calls carry an
-		// identity with no user — that is a valid state, not an error.
-		ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-7"})
-		if got := ms.UserID(ctx); got != "" {
-			t.Errorf("UserID = %q, want empty string", got)
-		}
-	})
-}
-
-func TestAppRole(t *testing.T) {
-	t.Run("returns empty string when no identity is set", func(t *testing.T) {
-		if got := ms.AppRole(context.Background()); got != "" {
-			t.Errorf("AppRole = %q, want empty string", got)
-		}
-	})
-
-	t.Run("reads the app role from the context identity", func(t *testing.T) {
-		ctx := auth.Set(context.Background(), auth.Identity{
-			UserID:  "u-1",
-			AppID:   "app-7",
-			AppRole: auth.RoleAdmin,
-		})
-		if got := ms.AppRole(ctx); got != auth.RoleAdmin {
-			t.Errorf("AppRole = %q, want %q", got, auth.RoleAdmin)
-		}
-	})
-
-	t.Run("empty role inside a set identity is legitimate", func(t *testing.T) {
-		// Internal/system/cron/task invocations carry no user role.
-		ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-7"})
-		if got := ms.AppRole(ctx); got != "" {
-			t.Errorf("AppRole = %q, want empty string", got)
-		}
-	})
+	}
 }
 
 // TestIdentityAccessors_EnvelopeInjectPath pins that all three accessors
@@ -91,65 +77,70 @@ func TestIdentityAccessors_EnvelopeInjectPath(t *testing.T) {
 	}
 }
 
-// TestIdentityAccessors_PlatformAuthHeaderPath pins that all three accessors
-// resolve identity the PLATFORM surface ingests from validated trusted-
-// forwarder headers (the dev tunnel / dispatch path).
-func TestIdentityAccessors_PlatformAuthHeaderPath(t *testing.T) {
-	t.Setenv("MS_PLATFORM_TOKEN", "")
-	t.Setenv("MS_INTERNAL_SECRET", "test-secret")
-
-	var gotUser, gotApp, gotRole string
-	handler := auth.PlatformAuth()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		gotUser = ms.UserID(r.Context())
-		gotApp = ms.AppID(r.Context())
-		gotRole = ms.AppRole(r.Context())
-	}))
-
-	req := httptest.NewRequest("GET", "/platform/users", nil)
-	req.Header.Set(auth.HeaderInternalSecret, "test-secret")
-	req.Header.Set(auth.HeaderUserID, "u-tunnel")
-	req.Header.Set(auth.HeaderAppID, "app-tunnel")
-	req.Header.Set(auth.HeaderAppRole, auth.RoleViewer)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
+// TestIdentityAccessors_GuardHeaderPaths pins that all three accessors
+// resolve identity ingested from validated trusted-forwarder headers (the dev
+// tunnel / dispatch path) on both HTTP guard surfaces: Platform via
+// PlatformAuth and Public via the proxy guard's validated-token path.
+func TestIdentityAccessors_GuardHeaderPaths(t *testing.T) {
+	cases := []struct {
+		name           string
+		internalSecret string // MS_INTERNAL_SECRET (empty avoids ambient cross-talk)
+		platformToken  string // MS_PLATFORM_TOKEN (empty avoids ambient cross-talk)
+		guard          func() func(http.Handler) http.Handler
+		proofHeader    string // header proving trusted-forwarder status
+		proofValue     string
+		path           string
+		user, app      string
+	}{
+		{
+			name:           "platform surface via PlatformAuth",
+			internalSecret: "test-secret",
+			guard:          auth.PlatformAuth,
+			proofHeader:    auth.HeaderInternalSecret,
+			proofValue:     "test-secret",
+			path:           "/platform/users",
+			user:           "u-tunnel",
+			app:            "app-tunnel",
+		},
+		{
+			name:          "public surface via RequireProxy validated-token path",
+			platformToken: "test-token",
+			guard:         auth.RequireProxy,
+			proofHeader:   auth.HeaderPlatformToken,
+			proofValue:    "test-token",
+			path:          "/public/me",
+			user:          "u-pub",
+			app:           "app-pub",
+		},
 	}
-	if gotUser != "u-tunnel" || gotApp != "app-tunnel" || gotRole != auth.RoleViewer {
-		t.Errorf("accessors = %q/%q/%q, want u-tunnel/app-tunnel/%q",
-			gotUser, gotApp, gotRole, auth.RoleViewer)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MS_INTERNAL_SECRET", tc.internalSecret)
+			t.Setenv("MS_PLATFORM_TOKEN", tc.platformToken)
 
-// TestIdentityAccessors_RequireProxyHeaderPath pins that all three accessors
-// resolve identity the PUBLIC surface ingests on the proxy guard's
-// validated-token path (the dev tunnel / dispatch path).
-func TestIdentityAccessors_RequireProxyHeaderPath(t *testing.T) {
-	t.Setenv("MS_INTERNAL_SECRET", "") // avoid ambient env cross-talk
-	t.Setenv("MS_PLATFORM_TOKEN", "test-token")
+			var gotUser, gotApp, gotRole string
+			handler := tc.guard()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				gotUser = ms.UserID(r.Context())
+				gotApp = ms.AppID(r.Context())
+				gotRole = ms.AppRole(r.Context())
+			}))
 
-	var gotUser, gotApp, gotRole string
-	handler := auth.RequireProxy()(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		gotUser = ms.UserID(r.Context())
-		gotApp = ms.AppID(r.Context())
-		gotRole = ms.AppRole(r.Context())
-	}))
+			req := httptest.NewRequest("GET", tc.path, nil)
+			req.Header.Set(tc.proofHeader, tc.proofValue)
+			req.Header.Set(auth.HeaderUserID, tc.user)
+			req.Header.Set(auth.HeaderAppID, tc.app)
+			req.Header.Set(auth.HeaderAppRole, auth.RoleViewer)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
 
-	req := httptest.NewRequest("GET", "/public/me", nil)
-	req.Header.Set(auth.HeaderPlatformToken, "test-token")
-	req.Header.Set(auth.HeaderUserID, "u-pub")
-	req.Header.Set(auth.HeaderAppID, "app-pub")
-	req.Header.Set(auth.HeaderAppRole, auth.RoleViewer)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	if gotUser != "u-pub" || gotApp != "app-pub" || gotRole != auth.RoleViewer {
-		t.Errorf("accessors = %q/%q/%q, want u-pub/app-pub/%q",
-			gotUser, gotApp, gotRole, auth.RoleViewer)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			if gotUser != tc.user || gotApp != tc.app || gotRole != auth.RoleViewer {
+				t.Errorf("accessors = %q/%q/%q, want %s/%s/%s",
+					gotUser, gotApp, gotRole, tc.user, tc.app, auth.RoleViewer)
+			}
+		})
 	}
 }
 

@@ -315,12 +315,10 @@ func Notify(ctx context.Context, n Notification) error {
 //	appID := ms.AppID(r.Context())
 //
 // Do NOT read the app id from request data (query string, body, path) — those
-// are caller-controlled and forgeable. And do NOT read it from the
-// auth.HeaderAppID header: the deployed Lambda shim STRIPS every client-
-// settable X-MS-* identity header before the router runs (identity rides the
-// typed invoke payload instead), so a header read works under the dev tunnel
-// and silently breaks deployed — the exact bug shipped in ms-app-modules#30.
-// ms.AppID is the trusted source on every path.
+// are caller-controlled and forgeable — and do NOT read the auth.HeaderAppID
+// header: the deployed Lambda shim strips it, so header reads silently break
+// deployed (ms-app-modules#30; see the auth.Header* docs). ms.AppID is the
+// trusted source on every path.
 func AppID(ctx context.Context) string {
 	return core.AppID(ctx)
 }
@@ -329,7 +327,9 @@ func AppID(ctx context.Context) string {
 // identity is set. Together with ms.AppID and ms.AppRole (or auth.Get, which
 // returns the full Identity in one read) it is the ONLY correct way for
 // module code to read the request's identity: always the context, never the
-// X-MS-* headers.
+// auth.HeaderUserID (X-MS-User-ID) header — the deployed Lambda shim strips
+// it, so header reads work under the dev tunnel and silently break deployed
+// (ms-app-modules#30; see the auth.Header* docs).
 //
 // On every guarded surface the SDK promotes the platform's trusted, dispatch-
 // injected user id into the context identity BEFORE the handler runs — Platform
@@ -338,13 +338,6 @@ func AppID(ctx context.Context) string {
 // reads the requesting user with:
 //
 //	userID := ms.UserID(r.Context())
-//
-// Do NOT read the auth.HeaderUserID (X-MS-User-ID) header instead: the
-// deployed Lambda shim STRIPS every client-settable X-MS-* identity header
-// before the router runs, so a header read works under the dev tunnel and
-// silently breaks deployed (empty value / rejected request) — the exact bug
-// class shipped in ms-app-modules#30. Those headers are the platform-to-SDK
-// wire, not a module identity API.
 //
 // "" is a legitimate value, not only an unauthenticated-middleware artifact:
 // internal/system/cron/task invocations carry no user, and an anonymous Public
@@ -356,27 +349,13 @@ func UserID(ctx context.Context) string {
 
 // AppRole returns the current user's role in the app from the request context
 // ("admin", "member", or "viewer" — compare against auth.RoleAdmin /
-// auth.RoleMember / auth.RoleViewer), or "" if no identity is set. Together
-// with ms.AppID and ms.UserID (or auth.Get, which returns the full Identity
-// in one read) it is the ONLY correct way for module code to read the
-// request's identity: always the context, never the X-MS-* headers. Note:
-// ms.AppRole is a read of WHO the platform says the caller is — for gating
-// routes by role, prefer the declarative RequirePermission middleware.
-//
-// On every guarded surface the SDK promotes the platform's trusted, dispatch-
-// injected role into the context identity BEFORE the handler runs — Platform
-// via PlatformAuth, Public via the proxy guard's validated-token path, and
-// Lambda via the typed invoke payload (runtime.InjectResources). So a handler
-// reads the caller's role with:
+// auth.RoleMember / auth.RoleViewer), or "" if no identity is set. Identity
+// promotion and the always-the-context-never-the-X-MS-*-headers rule are
+// exactly as documented on ms.UserID. Note: ms.AppRole is a read of WHO the
+// platform says the caller is — for gating routes by role, prefer the
+// declarative RequirePermission middleware:
 //
 //	if ms.AppRole(r.Context()) == auth.RoleAdmin { ... }
-//
-// Do NOT read the auth.HeaderAppRole (X-MS-App-Role) header instead: the
-// deployed Lambda shim STRIPS every client-settable X-MS-* identity header
-// before the router runs, so a header read works under the dev tunnel and
-// silently breaks deployed (empty value / rejected request) — the exact bug
-// class shipped in ms-app-modules#30. Those headers are the platform-to-SDK
-// wire, not a module identity API.
 //
 // "" is a legitimate value: internal/system/cron/task invocations carry no
 // user role. Under the local-dev bypass (no secret configured) it returns the
