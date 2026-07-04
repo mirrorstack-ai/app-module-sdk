@@ -436,6 +436,68 @@ func ContributesTo(host, slot string, payload any) { core.ContributesTo(host, sl
 // invalid table identifier. Call from startup code.
 func ExposeTable(name string) { core.ExposeTable(name) }
 
+// --- Dependency reads (exposed tables, via the platform read proxy) ---
+
+// Dependency is the read handle DependencyDB returns — the consumer side of
+// ExposeTable at runtime. It builds STRUCTURED reads only (never raw SQL,
+// never a pool): Select(table).Columns(...).Where(...).WhereIn(...).Limit(n).
+type Dependency = core.Dependency
+
+// DependencyQuery is the structured read builder started by
+// Dependency.Select. Builder methods validate eagerly and latch the first
+// error; Rows/Result surface it without touching the network.
+type DependencyQuery = core.DependencyQuery
+
+// DependencyResult is one executed dependency read: decoded rows (never nil)
+// plus whether the read was cut at the limit (more rows exist).
+type DependencyResult = core.DependencyResult
+
+// Typed failure modes for dependency reads — match with errors.Is. All
+// fail-closed: a dependency read NEVER silently returns empty rows for an
+// authorization or availability failure.
+var (
+	// ErrDependencyUnauthorized — the platform could not authenticate the
+	// read (no live dev-tunnel session / wrong service secret / module not
+	// in the app). Re-establish the tunnel session.
+	ErrDependencyUnauthorized = core.ErrDependencyUnauthorized
+	// ErrNotExposed — the table is not exposed to this module by the version
+	// the producer actually runs, or the app owner never consented.
+	ErrNotExposed = core.ErrNotExposed
+	// ErrDependencyUnavailable — authorized, but the producer's relation is
+	// not readable right now (yanked/rolled back), or the platform's read
+	// proxy is disabled.
+	ErrDependencyUnavailable = core.ErrDependencyUnavailable
+	// ErrProducerNotFound — the producer ref does not resolve to an install
+	// in this app.
+	ErrProducerNotFound = core.ErrProducerNotFound
+)
+
+// DependencyDB returns a read-only handle on a producer module's exposed
+// tables within the current app — the runtime counterpart of
+// ms.DependsOn(..., n.Table(...)). producerRef takes the same forms as
+// DependsOn specs: "@owner/slug", bare "slug", the m<hex> module ID, or a
+// dashed UUID (a trailing @<constraint> is ignored — reads target the
+// version the producer actually runs). The app scope is read from ctx via
+// the SDK's auth identity.
+//
+//	rows, err := ms.DependencyDB(ctx, "@owner/oauth-core").
+//	    Select("users").
+//	    Columns("id", "email").
+//	    WhereIn("id", 1, 2, 3).
+//	    Rows(ctx)
+//
+// The read executes on the PLATFORM as this module's own per-app DB role in
+// a READ ONLY transaction, authorized against the consent+exposure catalog.
+// There is no cross-plane SQL JOIN — fetch the exposed rows here, read your
+// own tables via mod.DB, and join in application code.
+//
+// Dev-plane (`mirrorstack dev --tunnel`) only today; a deployed module reads
+// a co-located producer directly via mod.DB (GRANT SELECT). Panics before
+// Init — matching Platform/Public/Internal.
+func DependencyDB(ctx context.Context, producerRef string) *Dependency {
+	return core.DependencyDB(ctx, producerRef)
+}
+
 // --- UI surface ---
 
 // ModuleUI is the module's declared UI surface. Pass to ms.RegisterUI.
