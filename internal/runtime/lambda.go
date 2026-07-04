@@ -29,6 +29,12 @@ type Resources struct {
 	Storage *storage.Credential `json:"storage,omitempty"`
 }
 
+// DependencyGrant is the deployed cross-module read manifest entry ridden down
+// the envelope (decision 18 §3). Aliased to db.DependencyGrant so the ctx seam
+// (db.WithDependencies) stores the canonical type without an import cycle
+// (db must not import runtime); the wire tags live on db.DependencyGrant.
+type DependencyGrant = db.DependencyGrant
+
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
 type LambdaRequest struct {
 	Method    string            `json:"method"`
@@ -36,6 +42,13 @@ type LambdaRequest struct {
 	Headers   map[string]string `json:"headers"`
 	Body      string            `json:"body"`
 	Resources *Resources        `json:"resources,omitempty"`
+	// Dependencies is the platform-resolved cross-module read manifest — one
+	// entry per installed declared producer, holding only exposed+consented
+	// tables at the running version (decision 18 §3). Advisory routing only;
+	// the install-time GRANT is the authorizer. omitempty keeps old-SDK
+	// backward-compat and old-platform absence (nil → deployed reads stay
+	// dev-plane-only, the rollout gate).
+	Dependencies []DependencyGrant `json:"dependencies,omitempty"`
 	// Trusted fields — injected by platform, not from user headers
 	UserID    string `json:"userId,omitempty"`
 	AppID     string `json:"appId,omitempty"`
@@ -125,11 +138,12 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		// InjectResources is the shared injection function used by both
 		// Lambda and task worker paths — see inject.go.
 		reqCtx, err := InjectResources(httpReq.Context(), InjectParams{
-			Resources: req.Resources,
-			UserID:    req.UserID,
-			AppID:     req.AppID,
-			AppRole:   req.AppRole,
-			AppSchema: req.AppSchema,
+			Resources:    req.Resources,
+			Dependencies: req.Dependencies,
+			UserID:       req.UserID,
+			AppID:        req.AppID,
+			AppRole:      req.AppRole,
+			AppSchema:    req.AppSchema,
 		})
 		if err != nil {
 			return jsonError(400, err.Error()), nil
