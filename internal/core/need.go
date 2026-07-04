@@ -10,11 +10,12 @@ type Need struct {
 	events []string
 }
 
-// Table records a relation name from the dep's `mod_<id>` schema as a
-// SELECT request. The catalog validates the name against the dep's
-// schema at install time (introspecting `pg_class`); after app-owner
-// approval, the platform issues GRANT SELECT against this consumer's
-// per-app DB role.
+// Table records a bare relation name from the dep's per-app tables as a
+// SELECT request — the physical target is app_<id>."<prefix><table>" in
+// the shared app tenant schema, not a cross-app mod_<id> schema. The
+// catalog validates the name against the dep's exposed tables at install
+// time; after app-owner approval, the platform issues GRANT SELECT
+// against this consumer's per-app DB role.
 //
 //	ms.DependsOn("@anna/oauth@^0.4.0", func(n *ms.Need) {
 //	    n.Table("oauth_users")
