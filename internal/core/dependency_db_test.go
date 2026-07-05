@@ -399,12 +399,12 @@ func TestDependencyDB_RequiresTunnelSecret(t *testing.T) {
 	}
 }
 
-func TestDependencyDB_LambdaModeFailsFast(t *testing.T) {
+func TestDependencyDB_DeployedSeamFailsFastWithoutManifest(t *testing.T) {
 	srv, _, _ := fakeReadExposed(t, http.StatusOK, `{"rows":[],"truncated":false}`)
 	m, ctx := depTestModule(t, srv.URL)
 
 	q := m.DependencyDB(ctx, "oauth-core").Select("users")
-	_, err := q.result(ctx, true /* inLambda */)
+	_, err := q.result(ctx, true /* deployed */)
 	if err == nil || !strings.Contains(err.Error(), "dev-plane only") {
 		t.Errorf("err = %v, want dev-plane-only fail-fast", err)
 	}
@@ -424,7 +424,7 @@ func TestDependencyDB_PackageLevelPanicsBeforeInit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Deployed plane (decision 18 §3): the inLambda branch reads the injected
+// Deployed plane (decision 18 §3): the deployed branch reads the injected
 // manifest. These cover the §5 sentinel matrix cells that fail closed BEFORE
 // touching a pool (manifest-absent, ref-absent, table-absent) plus the
 // read-time SQLSTATE mapping. The happy-path read + live 42P01/42501 live in
@@ -433,6 +433,9 @@ func TestDependencyDB_PackageLevelPanicsBeforeInit(t *testing.T) {
 
 // deployedCtx builds an app-scoped context carrying the given dependency
 // manifest, as the Lambda invoke shim would (db.WithSchema + db.WithDependencies).
+// It does NOT set auth.WithPayloadTrust — the seam tests drive the plane via the
+// result() bool directly; the public-API plane tests wrap it in WithPayloadTrust
+// to model the envelope-arrival signal runtime.NewLambdaHandler sets.
 func deployedCtx(manifest []db.DependencyGrant) context.Context {
 	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-uuid-1", UserID: "u1", AppRole: auth.RoleAdmin})
 	ctx = db.WithSchema(ctx, "app_283e0ef9_1a2b_3c4d_5e6f_0123456789ab")
@@ -485,6 +488,91 @@ func TestDependencyDB_DeployedTableNotExposed(t *testing.T) {
 	if !errors.Is(err, ErrNotExposed) {
 		t.Errorf("err = %v, want ErrNotExposed (table not in manifest .Tables)", err)
 	}
+}
+
+// TestDependencyDB_Result_DeployedFiresInLocalShimNotOnlyRealLambda is the
+// regression pin for the plane-gate bug: the deployed cross-read must be
+// selected by the PER-REQUEST deployed-envelope signal (auth.PayloadTrusted,
+// which runtime.NewLambdaHandler sets for BOTH the real Lambda entrypoint AND
+// the local dev lambda-invoke shim), NOT by the process-global
+// runtime.IsLambda(). Before the fix the local deploy-sim shim served deployed
+// invokes over HTTP with IsLambda==false — because the process cannot set
+// AWS_LAMBDA_FUNCTION_NAME without lambda.Start() hijacking the HTTP server — so
+// the gate wrongly took the dev-tunnel proxy branch and failed with
+// ErrDependencyUnauthorized ("MS_INTERNAL_SECRET unset") instead of reading the
+// injected manifest.
+//
+// Every case uses the SAME ctx data (a manifest that resolves the producer but
+// does NOT expose "users"); ONLY the per-request envelope mark differs. A
+// deployed selection fails closed with ErrNotExposed BEFORE any pool/network; a
+// proxy selection instead POSTs to dispatch. The whole test process has
+// IsLambda==false, so the branch each case lands on proves the gate reads the
+// per-request envelope, not the process flag.
+func TestDependencyDB_Result_DeployedFiresInLocalShimNotOnlyRealLambda(t *testing.T) {
+	manifest := []db.DependencyGrant{
+		{Ref: "oauth-core", Tables: map[string]string{"sessions": "m81b3ac70_sessions"}},
+	}
+
+	// (a) dev-sim shim: deployed envelope present, process IsLambda==false. This
+	// is the exact scenario the bug blocked. No tunnel secret, so a WRONG proxy
+	// selection would surface ErrDependencyUnauthorized — the pre-fix failure.
+	t.Run("dev-sim shim deployed invoke (envelope set, IsLambda false) -> resultDeployed", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "")
+		m, err := New(Config{ID: "m1234abcd"})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := auth.WithPayloadTrust(deployedCtx(manifest)) // exactly what the shim's NewLambdaHandler sets
+		_, err = m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").Result(ctx)
+		if !errors.Is(err, ErrNotExposed) {
+			t.Fatalf("err = %v, want ErrNotExposed (deployed branch selected by the per-request envelope)", err)
+		}
+		if errors.Is(err, ErrDependencyUnauthorized) {
+			t.Errorf("routed to the dev-tunnel PROXY branch despite the deployed envelope — the local shim (IsLambda false) must still read deployed")
+		}
+	})
+
+	// (c) real Lambda enters via the SAME runtime.NewLambdaHandler, so it carries
+	// the identical payload-trust mark. The fixed gate is per-request, so real
+	// Lambda and the shim route identically — the process IsLambda flag (true
+	// only in real Lambda) is deliberately not consulted. That identity IS the fix.
+	t.Run("real-lambda deployed invoke (same envelope mark) -> resultDeployed", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "")
+		m, err := New(Config{ID: "m1234abcd"})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := auth.WithPayloadTrust(deployedCtx(manifest))
+		_, err = m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").Result(ctx)
+		if !errors.Is(err, ErrNotExposed) {
+			t.Fatalf("err = %v, want ErrNotExposed (deployed branch)", err)
+		}
+	})
+
+	// (b) dev-tunnel request: NO envelope mark (PayloadTrusted==false), so the
+	// gate takes the read-exposed PROXY — it ignores the manifest and POSTs to
+	// dispatch. A fake server proves the proxy branch ran end to end. Scenario
+	// 1/2 is preserved unchanged.
+	t.Run("dev-tunnel request (no envelope) -> read-exposed PROXY", func(t *testing.T) {
+		srv, gotReq, _ := fakeReadExposed(t, http.StatusOK, `{"rows":[{"id":1}],"truncated":false}`)
+		t.Setenv("MS_DISPATCH_URL", srv.URL)
+		t.Setenv("MS_INTERNAL_SECRET", "sess-secret-1")
+		m, err := New(Config{ID: "m1234abcd"})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := deployedCtx(manifest) // manifest present but NO auth.WithPayloadTrust
+		res, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").Result(ctx)
+		if err != nil {
+			t.Fatalf("proxy read: %v (want a successful dev-tunnel proxy read)", err)
+		}
+		if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+			t.Errorf("path = %q, want the read-exposed proxy path (proxy branch taken)", gotReq.URL.Path)
+		}
+		if len(res.Rows) != 1 {
+			t.Errorf("rows = %d, want 1 from the proxied server", len(res.Rows))
+		}
+	})
 }
 
 func TestMapDeployedReadError(t *testing.T) {
