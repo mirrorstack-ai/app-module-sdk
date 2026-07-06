@@ -148,18 +148,14 @@ type Module struct {
 	devProvision sync.Map
 }
 
-// devAppSchemaName derives the per-app Postgres schema from an app id, matching
-// the platform's ids.AppSchemaName convention (app_<uuid-with-underscores>).
-// It validates against the same pattern the production Lambda shim uses
-// (runtime.AppSchemaPattern) so dev and prod agree on the shape;
-// pgx.Identifier.Sanitize is the second line of defense before SQL. Returns
-// ok=false if the result is not a valid schema identifier.
+// devAppSchemaName derives the per-app Postgres schema from an app id,
+// delegating to runtime.AppSchemaName so this package and system.SeedHandler
+// (which derives the same schema from the dev-mount seed contract's bare
+// appId) can never drift on the shape. pgx.Identifier.Sanitize is the second
+// line of defense before SQL. Returns ok=false if the result is not a valid
+// schema identifier.
 func devAppSchemaName(appID string) (string, bool) {
-	schema := "app_" + strings.ReplaceAll(strings.ToLower(appID), "-", "_")
-	if !runtime.AppSchemaPattern.MatchString(schema) {
-		return "", false
-	}
-	return schema, true
+	return runtime.AppSchemaName(appID)
 }
 
 // devAppSchemaMiddleware is the dev analog of the Lambda shim's per-request
@@ -793,9 +789,25 @@ func (m *Module) mountSystemRoutes() {
 		})
 
 		r.Route("/platform", func(r chi.Router) {
-			r.Use(httputil.MaxBytes(64 * 1024)) // 64 KB — lifecycle bodies are tiny
 			r.Use(m.internalAuth)
-			r.Get("/manifest", system.ManifestHandler(
+			// 8 MB group-wide backstop. Defense-in-depth only: every route
+			// below applies its own tighter cap (64 KB via smallBody, or
+			// seed's own 2 MB reader — see system/lifecycle.go's
+			// seedMaxBodyBytes), and nesting http.MaxBytesReader wraps only
+			// ever shrinks the effective limit to the smallest one in the
+			// chain, so this never fights those. It exists so a FUTURE route
+			// added here without remembering its own cap still gets bounded
+			// instead of silently inheriting an unlimited body.
+			r.Use(httputil.MaxBytes(8 << 20))
+			// 64 KB — manifest + lifecycle install/upgrade/downgrade/uninstall
+			// bodies are tiny. Applied per-route via .With() rather than
+			// folded into the group backstop above so the seed route below
+			// (COPY-text chunks up to 2MB) can enforce its own larger cap
+			// instead of inheriting this smaller one — nesting two
+			// http.MaxBytesReader wraps only ever shrinks the effective limit
+			// to the smaller of the two.
+			smallBody := httputil.MaxBytes(64 * 1024)
+			r.With(smallBody).Get("/manifest", system.ManifestHandler(
 				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon, m.config.Tags,
 				m.config.SQL, m.config.Versions, m.registry, m.contribReg,
 			))
@@ -807,10 +819,29 @@ func (m *Module) mountSystemRoutes() {
 				for _, scope := range migration.AllScopes() {
 					runTx := m.lifecycleTxRunner(scope)
 					r.Route("/"+string(scope), func(r chi.Router) {
-						r.Post("/install", system.InstallHandler(m.config.SQL, scope, runTx))
-						r.Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, runTx))
-						r.Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, runTx))
-						r.Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
+						r.With(smallBody).Post("/install", system.InstallHandler(m.config.SQL, scope, runTx))
+						r.With(smallBody).Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, runTx))
+						r.With(smallBody).Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, runTx))
+						r.With(smallBody).Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
+
+						if scope == migration.ScopeApp && !runtime.IsLambda() {
+							// Dev-mount seed (F2 of the transient-overlay
+							// work): api-platform's devseed.Seeder POSTs one
+							// Postgres COPY-text chunk per call into this
+							// app's schema. App-scope only — there is no
+							// module-scope seed. SeedHandler enforces its own
+							// 2MB http.MaxBytesReader (system/lifecycle.go),
+							// so it deliberately does NOT get smallBody.
+							//
+							// !runtime.IsLambda() mirrors the lambda-invoke shim
+							// gate above (mountSystemRoutes, ~line 760): SeedHandler
+							// executes req.CreateSQL as raw request-body SQL, a
+							// surface the rest of the lifecycle deliberately
+							// withholds in prod. Dev/tunnel only.
+							r.Post("/seed", system.SeedHandler(func(ctx context.Context) (system.SeedConn, func(), error) {
+								return m.seedConn(ctx)
+							}))
+						}
 					})
 				}
 			})

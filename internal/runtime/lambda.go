@@ -22,6 +22,24 @@ import (
 // validates it identically — keeping dev and prod from drifting on the shape.
 var AppSchemaPattern = regexp.MustCompile(`^app_[a-z0-9_]+$`)
 
+// AppSchemaName derives the per-app Postgres schema from an app id, matching
+// the platform's ids.AppSchemaName convention (app_<uuid-with-underscores>).
+// Returns ok=false if the result does not match AppSchemaPattern (e.g. appID
+// is empty or contains characters outside [a-zA-Z0-9-]).
+//
+// Shared by every caller that must derive app_<id> from a bare app id rather
+// than receive the schema pre-resolved: the dev per-request schema middleware
+// (core.devAppSchemaMiddleware, via its devAppSchemaName wrapper) and the
+// dev-mount seed endpoint (system.SeedHandler), whose wire contract carries
+// only appId — see api-platform's devseed.Seeder.
+func AppSchemaName(appID string) (string, bool) {
+	schema := "app_" + strings.ReplaceAll(strings.ToLower(appID), "-", "_")
+	if !AppSchemaPattern.MatchString(schema) {
+		return "", false
+	}
+	return schema, true
+}
+
 // Resources holds per-invocation credentials for all platform services.
 type Resources struct {
 	DB      *db.Credential      `json:"db,omitempty"`

@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
 // LifecycleResult is the JSON response for install/upgrade/downgrade. Install
@@ -301,4 +306,152 @@ func decodeUpgradeRequest(w http.ResponseWriter, r *http.Request) (UpgradeReques
 		return req, false
 	}
 	return req, true
+}
+
+// seedMaxBodyBytes caps one seed POST's body. The platform's devseed.Seeder
+// batches each COPY-text chunk to <=1MB (seedBatchBytes there); 2MB leaves
+// headroom for the JSON envelope + column list without ever being the
+// binding constraint on a well-behaved caller.
+const seedMaxBodyBytes = 2 << 20
+
+// SeedRequest is the platform->SDK wire shape for the dev-mount seed endpoint
+// (devseed.Seeder on the api-platform side — a cross-repo contract; keep
+// field tags byte-for-byte in sync with that package's seedRequest). One
+// POST carries one Postgres COPY-text chunk for one table.
+type SeedRequest struct {
+	AppID     string   `json:"appId"`
+	Table     string   `json:"table"`   // physical m<uuid-hex>_* relation name
+	Columns   []string `json:"columns"` // explicit COPY column list, ordinal order
+	CreateSQL string   `json:"createSql,omitempty"`
+	Data      string   `json:"data"`  // Postgres COPY text rows
+	First     bool     `json:"first"` // first chunk for this table
+}
+
+// SeedResponse is the SDK's per-chunk answer.
+type SeedResponse struct {
+	Skipped bool `json:"skipped,omitempty"`
+}
+
+// SeedConn is the connection seam SeedHandler needs: the db.Querier surface
+// for CreateSQL and the if-empty guard, plus the raw driver connection COPY
+// FROM STDIN requires (db.Querier exposes neither PgConn() nor the
+// low-level copy protocol). *pgxpool.Conn satisfies this directly — its
+// Conn() method returns the *pgx.Conn that PgConn() rides on.
+type SeedConn interface {
+	db.Querier
+	Conn() *pgx.Conn
+}
+
+// SeedConnAcquirer resolves a SeedConn scoped to ctx's app schema for one
+// request. Implementations must NOT route this through a cross-module dev
+// guard the way Module.DB/Tx do: the seed endpoint legitimately writes into
+// another module's exposure-anchored dependency tables, a grant the platform
+// already enforced before it ever sent the chunk.
+type SeedConnAcquirer func(ctx context.Context) (SeedConn, func(), error)
+
+// SeedHandler returns an http.HandlerFunc for the dev-mount seed endpoint:
+// api-platform's devseed.Seeder POSTs one Postgres COPY-text chunk per call,
+// targeting either the module's own table or an exposure-anchored producer
+// dependency table (see package devseed on the platform side for the full
+// design). This is the only lifecycle verb scoped to "app" alone — there is
+// no module-scope seed, so the caller mounts it only under that scope's
+// route (see internal/core/module.go's mountSystemRoutes).
+//
+// acquire resolves the connection for each request; it is responsible for
+// putting ctx's app schema on search_path (via db.WithSchema + a scoped
+// acquire, e.g. Module.seedConn) — SeedHandler itself only derives the
+// schema NAME from RequestBody.AppID and injects it into ctx.
+//
+// First=true chunks run the create-then-if-empty sequence: CreateSQL (when
+// non-empty) materializes a table the dev DB never migrated — a dependency
+// table belonging to a producer module — then an if-empty check on Table
+// decides whether to proceed. A non-empty table means the developer already
+// has local data for it: the SDK answers {skipped:true} and does NOT touch
+// the table, so a developer's local writes are never clobbered by a
+// re-seed. First=false chunks (a continuation for a table already accepted
+// on its first chunk) skip both steps and append unconditionally — the
+// seeder stops sending further chunks the moment it sees {skipped:true} on
+// the first one.
+//
+// Table and every entry of Columns are quoted via pgx.Identifier.Sanitize
+// before use in any SQL. The platform derives them from its own pg_catalog
+// read (see devseed.Seeder.columns), but the SDK quotes defensively rather
+// than trust the wire.
+func SeedHandler(acquire SeedConnAcquirer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, seedMaxBodyBytes)
+
+		var req SeedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeBodyDecodeError(w, err)
+			return
+		}
+		if req.Table == "" || len(req.Columns) == 0 {
+			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "table and columns are required"})
+			return
+		}
+		schema, ok := runtime.AppSchemaName(req.AppID)
+		if !ok {
+			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid appId"})
+			return
+		}
+
+		ctx := db.WithSchema(r.Context(), schema)
+		conn, release, err := acquire(ctx)
+		if err != nil {
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "acquire db connection: " + err.Error()})
+			return
+		}
+		defer release()
+
+		quotedTable := pgx.Identifier{req.Table}.Sanitize()
+
+		if req.First {
+			if req.CreateSQL != "" {
+				if _, err := conn.Exec(ctx, req.CreateSQL); err != nil {
+					httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "create table: " + err.Error()})
+					return
+				}
+			}
+			empty, err := seedTableIsEmpty(ctx, conn, quotedTable)
+			if err != nil {
+				httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "check table empty: " + err.Error()})
+				return
+			}
+			if !empty {
+				// The developer's own local writes win — drop this and every
+				// remaining chunk for the table (the seeder stops sending on
+				// {skipped:true}) without touching a single row.
+				httputil.JSON(w, http.StatusOK, SeedResponse{Skipped: true})
+				return
+			}
+		}
+
+		if req.Data != "" {
+			quotedCols := make([]string, len(req.Columns))
+			for i, c := range req.Columns {
+				quotedCols[i] = pgx.Identifier{c}.Sanitize()
+			}
+			copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quotedTable, strings.Join(quotedCols, ", "))
+			if _, err := conn.Conn().PgConn().CopyFrom(ctx, strings.NewReader(req.Data), copySQL); err != nil {
+				httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "copy data: " + err.Error()})
+				return
+			}
+		}
+		// Data == "" is valid: a First chunk that only needed CreateSQL to
+		// materialize an empty dependency table (see devseed.Seeder.seedTable
+		// on the platform side, the tail case for an empty own-table skip).
+
+		httputil.JSON(w, http.StatusOK, SeedResponse{})
+	}
+}
+
+// seedTableIsEmpty reports whether quotedTable (already identifier-quoted)
+// has any row, scoped by conn's current search_path.
+func seedTableIsEmpty(ctx context.Context, conn SeedConn, quotedTable string) (bool, error) {
+	var exists bool
+	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM "+quotedTable+" LIMIT 1)").Scan(&exists); err != nil {
+		return false, err
+	}
+	return !exists, nil
 }

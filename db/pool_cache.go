@@ -129,6 +129,15 @@ func afterReleaseReset(conn *pgx.Conn) bool {
 // it uses session-scoped SET / set_config(_, _, false). The Tx() function uses
 // transaction-local SET LOCAL inside its BEGIN block.
 func AcquireScoped(ctx context.Context, pool *pgxpool.Pool) (Querier, func(), error) {
+	return AcquireScopedConn(ctx, pool)
+}
+
+// AcquireScopedConn is AcquireScoped but returns the concrete *pgxpool.Conn
+// instead of the narrower Querier interface. Callers that need the raw driver
+// connection underneath — e.g. COPY FROM STDIN via conn.Conn().PgConn(),
+// which db.Querier does not expose — use this; everything else should keep
+// using AcquireScoped.
+func AcquireScopedConn(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("mirrorstack/db: failed to acquire connection: %w", err)

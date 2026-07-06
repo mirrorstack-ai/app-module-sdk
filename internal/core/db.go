@@ -65,6 +65,35 @@ func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error)
 	return m.resolvePoolFor(ctx, db.CredentialFrom)
 }
 
+// seedConn resolves an app-schema-scoped connection for system.SeedHandler
+// (the dev-mount seed endpoint) WITHOUT the cross-module dev guard that
+// Module.DB/Tx apply. The seed endpoint legitimately COPYs into another
+// module's exposure-anchored dependency table — the platform already
+// enforced that exposure-anchor grant before it ever sent the chunk (see
+// devseed.Seeder.dependencyTables on the platform side) — so routing it
+// through devGuardFor would reject every dependency-table seed in dev mode
+// with a false-positive cross-module error.
+//
+// Also unlike Module.DB, this returns the concrete *pgxpool.Conn (via
+// db.AcquireScopedConn) rather than the narrower db.Querier: COPY FROM STDIN
+// needs the raw driver connection's PgConn(), which db.Querier does not
+// expose.
+func (m *Module) seedConn(ctx context.Context) (*pgxpool.Conn, func(), error) {
+	pool, releasePool, err := m.resolvePool(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, releaseConn, err := db.AcquireScopedConn(ctx, pool)
+	if err != nil {
+		releasePool()
+		return nil, nil, err
+	}
+	return conn, func() {
+		releaseConn()
+		releasePool()
+	}, nil
+}
+
 // resolvePoolFor is the shared implementation behind resolvePool and
 // resolveModulePool. Production reads a credential from the context via
 // getCred (different context key per scope) and pulls a refcount-pinned

@@ -809,6 +809,59 @@ func TestLifecycle_ScopeTxRunnerWiring(t *testing.T) {
 	}
 }
 
+// TestSeed_RouteRequiresInternalSecret covers the dev-mount seed route's two
+// gates: (1) it inherits internalAuth like every other /platform route, and
+// (2) it is mounted only outside Lambda mode (mountSystemRoutes gates it with
+// !runtime.IsLambda(), mirroring the lambda-invoke shim a few lines above it).
+//
+// The Lambda-mode branch (route absent entirely) can't be driven from this
+// package the way TestLambdaInvokeShim_MountedPostOnly notes for the shim:
+// runtime.IsLambda() reads an unexported package-level var evaluated once at
+// process init from AWS_LAMBDA_FUNCTION_NAME, so a test in package core has
+// no supported way to flip it mid-run. This test instead asserts the route is
+// present (and secret-gated) in the non-Lambda/dev mount — the half the
+// !runtime.IsLambda() guard in mountSystemRoutes is the reviewed line for.
+func TestSeed_RouteRequiresInternalSecret(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+	route := "/__mirrorstack/platform/lifecycle/app/seed"
+
+	// Without secret → 401, proving the route inherits internalAuth.
+	rec := doRequest(t, m.Router(), "POST", route)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status without secret = %d, want 401", rec.Code)
+	}
+
+	// With secret, in this (non-Lambda) test process, the route must be
+	// mounted — i.e. not 404. The handler itself will fail past auth (no
+	// real DB, malformed body) but that is out of scope for this test.
+	rec = doRequestWithSecret(t, m.Router(), "POST", route, "secret")
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("status with secret = 404, want route to be mounted outside Lambda mode")
+	}
+}
+
+// TestSeedRoute_MaxBytesLimit guards the /platform group's defense-in-depth
+// backstop (mountSystemRoutes: r.Use(httputil.MaxBytes(8 << 20))) against
+// regressing seed's own tighter cap. A body over seed's 2 MB reader
+// (system/lifecycle.go's seedMaxBodyBytes) but well under the group's 8 MB
+// backstop must still trip 413 from seed's own reader — proving nested
+// http.MaxBytesReader wraps shrink to the smallest cap in the chain rather
+// than the group backstop silently widening the effective limit to 8 MB.
+func TestSeedRoute_MaxBytesLimit(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+
+	huge := strings.Repeat("a", 2*1024*1024+1024)
+	body := `{"appId":"seedtest","table":"items","columns":["id"],"data":"` + huge + `","first":true}`
+	req := httptest.NewRequest("POST", "/__mirrorstack/platform/lifecycle/app/seed", strings.NewReader(body))
+	req.Header.Set("X-MS-Internal-Secret", "secret")
+	rec := httptest.NewRecorder()
+	m.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 for body over seed's 2MB cap, nested under the group's 8MB backstop", rec.Code)
+	}
+}
+
 func TestManifest_RegisteredScopesStillRouteCorrectly(t *testing.T) {
 	// Verify that the chi.Walk + re-register approach in scopedRoutes preserves
 	// the original routing behavior. Routes registered via Platform/Public/Internal
