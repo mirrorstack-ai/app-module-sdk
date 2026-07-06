@@ -1,6 +1,8 @@
 package system
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -366,6 +368,105 @@ func TestManifest_UIPopulatedWhenRegistered(t *testing.T) {
 	}
 	if len(got.UI.DefaultPages) != 2 {
 		t.Errorf("manifest.ui.defaultPages len = %d, want 2", len(got.UI.DefaultPages))
+	}
+}
+
+// manifestResponse serves the handler once and returns the recorder so tests
+// can inspect both the X-MS-Manifest-Hash header and the exact body bytes.
+func manifestResponse(t *testing.T, h http.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/__mirrorstack/platform/manifest", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	return rec
+}
+
+func TestManifest_HashHeaderMatchesBody(t *testing.T) {
+	t.Parallel()
+
+	rec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil))
+
+	got := rec.Header().Get("X-MS-Manifest-Hash")
+	if len(got) != 64 {
+		t.Fatalf("X-MS-Manifest-Hash = %q, want 64-char hex", got)
+	}
+	if got != strings.ToLower(got) {
+		t.Errorf("X-MS-Manifest-Hash = %q, want lowercase hex", got)
+	}
+
+	// The header MUST be sha256 over the EXACT served body bytes (including the
+	// json.Encoder trailing newline), never a separate re-encode.
+	sum := sha256.Sum256(rec.Body.Bytes())
+	if want := hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("X-MS-Manifest-Hash = %q, want %q (sha256 of served body)", got, want)
+	}
+
+	// Body contract is unchanged: still valid JSON carrying id/slug fields.
+	var payload ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if payload.ID != "media" {
+		t.Errorf("body id = %q, want media", payload.ID)
+	}
+}
+
+func TestManifest_HashStableAcrossCalls(t *testing.T) {
+	t.Parallel()
+
+	// Same id/slug/registry/versions → identical body → identical hash. The
+	// header is the single source of truth, so two serves must never diverge.
+	newHandler := func() http.HandlerFunc {
+		reg := registry.New()
+		reg.AddPermission("media.view", []string{"admin"})
+		reg.AddSchedule("cleanup", "0 3 * * *", "/crons/cleanup")
+		return ManifestHandler("media", "media", "Media", "perm_media", nil, nil, nil, reg, nil)
+	}
+	first := manifestResponse(t, newHandler()).Header().Get("X-MS-Manifest-Hash")
+	second := manifestResponse(t, newHandler()).Header().Get("X-MS-Manifest-Hash")
+	if first == "" {
+		t.Fatal("X-MS-Manifest-Hash missing")
+	}
+	if first != second {
+		t.Errorf("hash not stable: %q != %q", first, second)
+	}
+}
+
+func TestManifest_HashChangesWithDeclaration(t *testing.T) {
+	t.Parallel()
+
+	base := registry.New()
+	baseHash := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, base, nil)).
+		Header().Get("X-MS-Manifest-Hash")
+
+	// Adding a declared permission changes the served surface → new hash.
+	withPerm := registry.New()
+	withPerm.AddPermission("media.view", []string{"admin"})
+	permHash := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withPerm, nil)).
+		Header().Get("X-MS-Manifest-Hash")
+	if baseHash == permHash {
+		t.Errorf("hash unchanged after adding a permission: %q", baseHash)
+	}
+
+	// Adding a schedule likewise moves the hash.
+	withSched := registry.New()
+	withSched.AddSchedule("cleanup", "0 3 * * *", "/crons/cleanup")
+	schedHash := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withSched, nil)).
+		Header().Get("X-MS-Manifest-Hash")
+	if baseHash == schedHash {
+		t.Errorf("hash unchanged after adding a schedule: %q", baseHash)
+	}
+}
+
+func TestManifest_ContentTypeJSON(t *testing.T) {
+	t.Parallel()
+
+	rec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil))
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
 }
 

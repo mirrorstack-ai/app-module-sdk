@@ -1,6 +1,10 @@
 package system
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
@@ -11,6 +15,14 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
+
+// manifestHashHeader carries hex(sha256(exact served manifest body bytes)).
+// The platform and CLI READ this header rather than recomputing the hash, so
+// they can never disagree with the module about its declared surface. The hash
+// covers the Go-declared manifest (id/slug/pages/permissions/schedules/
+// migrations/...) and is stable across esbuild JS rebuilds, because the
+// manifest body carries no JS.
+const manifestHashHeader = "X-MS-Manifest-Hash"
 
 // ManifestPayload is the JSON shape returned by GET /__mirrorstack/platform/manifest.
 // The platform reads this on deploy to discover module identity, capabilities,
@@ -183,7 +195,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			contribSlots = []contributions.SlotInfo{}
 		}
 
-		httputil.JSON(w, http.StatusOK, ManifestPayload{
+		payload := ManifestPayload{
 			ID:                id,
 			Slug:              slug,
 			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
@@ -203,6 +215,26 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			UI:                reg.UI(),
 			Provides:          contribSlots,
 			ContributesTo:     reg.OutboundContributions(),
-		})
+		}
+
+		// Marshal the body ONCE, hash exactly those bytes, advertise the hash
+		// in X-MS-Manifest-Hash, then write the SAME bytes. Encoding must be
+		// byte-identical to httputil.JSON (json.Encoder: HTML escaping + a
+		// trailing newline) so the served body is unchanged and the hash the
+		// platform/CLI read matches sha256 over what they actually receive.
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+			log.Printf("mirrorstack: manifest marshal error: %v", err)
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "manifest unavailable"})
+			return
+		}
+		body := buf.Bytes()
+		sum := sha256.Sum256(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(manifestHashHeader, hex.EncodeToString(sum[:]))
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(body); err != nil {
+			log.Printf("mirrorstack: manifest write error: %v", err)
+		}
 	}
 }
