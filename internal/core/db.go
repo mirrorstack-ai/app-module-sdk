@@ -31,7 +31,7 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 		releasePool()
 		return nil, nil, err
 	}
-	return m.devGuardFor(ctx, querier, db.CredentialFrom), func() {
+	return m.devGuardFor(ctx, m.withModuleID(querier), db.CredentialFrom), func() {
 		releaseConn()
 		releasePool()
 	}, nil
@@ -55,7 +55,7 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	}
 	defer releasePool()
 	return db.Tx(ctx, pool, func(q db.Querier) error {
-		return fn(m.devGuardFor(ctx, q, db.CredentialFrom))
+		return fn(m.devGuardFor(ctx, m.withModuleID(q), db.CredentialFrom))
 	})
 }
 
