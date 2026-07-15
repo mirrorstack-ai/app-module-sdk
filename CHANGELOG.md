@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.2.7] - 2026-07-15
+
 A module can now write into its app's notification feed. The design mirrors `ms.Emit` exactly — same context-derived app scope, same dispatch-HTTP transport, same #146 prod seam — so notifications inherit the trust model already proven for events: the module supplies content, the dispatch re-derives the sender identity from the live session and never trusts the envelope.
 
 ### Added
