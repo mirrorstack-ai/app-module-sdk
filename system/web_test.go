@@ -80,6 +80,30 @@ func TestWebHandler_PathTraversal_Blocked(t *testing.T) {
 	}
 }
 
+func TestWebHandler_SymlinkEscape_Blocked(t *testing.T) {
+	parent := t.TempDir()
+	writeFile(t, parent, "secret.txt", "should-not-be-readable")
+	dir := filepath.Join(parent, "dist")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink("../secret.txt", filepath.Join(dir, "leak.js")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	h := WebHandler(dir)
+	req := httptest.NewRequest(http.MethodGet, "/__mirrorstack/web/leak.js", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("symlink escape succeeded: body=%s", rec.Body)
+	}
+	if got := rec.Body.String(); got == "should-not-be-readable" {
+		t.Error("secret leaked through symlink")
+	}
+}
+
 func TestWebHandler_MissingFile_Returns404(t *testing.T) {
 	dir := t.TempDir()
 	h := WebHandler(dir)

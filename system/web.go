@@ -1,8 +1,10 @@
 package system
 
 import (
+	"io/fs"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 )
@@ -21,8 +23,8 @@ import (
 // If rootDir is empty, every request 404s — the module declared no web
 // surface.
 //
-// Path traversal is blocked by validating the cleaned filesystem path is
-// rooted under rootDir; symlinks that escape the dir are rejected.
+// Path traversal is blocked by os.Root, which rejects paths and symlinks that
+// escape rootDir while opening the file.
 func WebHandler(rootDir string) http.HandlerFunc {
 	if rootDir == "" {
 		return func(w http.ResponseWriter, _ *http.Request) {
@@ -37,15 +39,6 @@ func WebHandler(rootDir string) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "web dir invalid", http.StatusInternalServerError)
 		}
-	}
-	// Resolve symlinks at construction so per-request EvalSymlinks
-	// results can be prefix-compared. Without this, macOS's tempdir
-	// (/var → /private/var symlink) breaks the prefix check for every
-	// served file. If the dir doesn't exist yet, fall back to abs — the
-	// handler will 404 anyway when files aren't found.
-	root := abs
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		root = resolved
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		setCORS(w)
@@ -66,11 +59,12 @@ func WebHandler(rootDir string) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		full := filepath.Join(root, rel)
-		// Defense-in-depth: refuse anything that escapes rootDir even
-		// after filepath.Clean (e.g. via symlink). EvalSymlinks resolves
-		// links so we compare the real on-disk path.
-		real, err := filepath.EvalSymlinks(full)
+		if !fs.ValidPath(rel) {
+			http.NotFound(w, r)
+			return
+		}
+
+		root, err := os.OpenRoot(abs)
 		if err != nil {
 			if os.IsNotExist(err) {
 				http.NotFound(w, r)
@@ -79,21 +73,25 @@ func WebHandler(rootDir string) http.HandlerFunc {
 			http.Error(w, "io error", http.StatusInternalServerError)
 			return
 		}
-		if !strings.HasPrefix(real, root+string(filepath.Separator)) && real != root {
-			http.NotFound(w, r) // pretend it doesn't exist rather than confirm escape attempt
+		defer root.Close()
+
+		file, err := root.Open(rel)
+		if err != nil {
+			// Do not reveal whether a path is missing, inaccessible, or
+			// rejected because it escapes the configured web root.
+			http.NotFound(w, r)
 			return
 		}
-		fi, err := os.Stat(real)
+		defer file.Close()
+
+		fi, err := file.Stat()
 		if err != nil || fi.IsDir() {
 			http.NotFound(w, r)
 			return
 		}
 
-		// Material content-type for the two file kinds we ship today —
-		// the JS bundle and its sourcemap. http.ServeFile would also work
-		// but adds Last-Modified / ETag handling we don't need yet.
-		w.Header().Set("Content-Type", contentTypeFor(real))
-		http.ServeFile(w, r, real)
+		w.Header().Set("Content-Type", contentTypeFor(rel))
+		http.ServeContent(w, r, pathpkg.Base(rel), fi.ModTime(), file)
 	}
 }
 
@@ -108,7 +106,7 @@ func setCORS(w http.ResponseWriter) {
 }
 
 func contentTypeFor(path string) string {
-	switch filepath.Ext(path) {
+	switch pathpkg.Ext(path) {
 	case ".js", ".mjs":
 		return "application/javascript; charset=utf-8"
 	case ".map":
