@@ -79,13 +79,25 @@ func (c *Cache[T]) Get(key string, factory func() (T, error)) (T, func(), error)
 	}
 	c.mu.Unlock()
 
-	// Slow path: singleflight ensures only one factory call runs per key.
-	// The leader's closure inserts the entry with refCount=1 (pinning it
-	// against immediate eviction). Followers receive the broadcast value and
-	// bump refcount by one each. Total refcount after N callers = N.
-	var iAmLeader bool
+	// Slow path: singleflight coalesces overlapping factory calls. Recheck the
+	// cache inside the closure because a caller can miss the fast path, get
+	// descheduled, and enter Do after an earlier call has already completed.
+	// The closure caller claims one reference; followers that share its result
+	// each claim another below. Total refcount after N callers = N.
+	var closureClaimedRef bool
 	result, err, _ := c.sf.Do(key, func() (any, error) {
-		iAmLeader = true
+		closureClaimedRef = true
+
+		c.mu.Lock()
+		if e, ok := c.items[key]; ok {
+			e.lastUsed = time.Now()
+			e.refCount++
+			value := e.value
+			c.mu.Unlock()
+			return value, nil
+		}
+		c.mu.Unlock()
+
 		value, err := factory()
 		if err != nil {
 			return nil, err
@@ -112,8 +124,9 @@ func (c *Cache[T]) Get(key string, factory func() (T, error)) (T, func(), error)
 	}
 	value := result.(T)
 
-	if iAmLeader {
-		// Factory closure already inserted with refCount=1 on our behalf.
+	if closureClaimedRef {
+		// The closure either incremented an existing entry or inserted a new
+		// one with refCount=1 on this caller's behalf.
 		return value, c.releaseFunc(key), nil
 	}
 

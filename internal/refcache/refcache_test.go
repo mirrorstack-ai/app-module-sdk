@@ -183,11 +183,11 @@ func TestEviction_AllPinned_ReturnsLimitError(t *testing.T) {
 // same missing key coalesce via singleflight: exactly ONE factory call runs,
 // all callers receive the same value, and each caller gets its own refcount.
 //
-// Determinism: each caller increments a counter on entry to Get and spins
-// until all N have entered. Because the fast-path miss happens before the
-// caller's entry-counter increment, we know all N goroutines have passed
-// the cache-empty check by the time the barrier releases. They then all
-// invoke sf.Do, which serializes them — only the leader's factory runs.
+// Each caller increments a counter immediately before Get, and the factory
+// stays open until all N callers have started. A scheduler may still delay a
+// caller between its fast-path miss and sf.Do; the cache's in-closure recheck
+// must make that late caller reuse the newly cached entry instead of running
+// another factory.
 //
 // A 2-second deadline prevents infinite spin if the timing assumption breaks.
 func TestSlowPath_SingleflightCoalesces(t *testing.T) {
