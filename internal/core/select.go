@@ -16,9 +16,15 @@ package core
 // Injection is impossible by construction, on three independent layers, exactly
 // as in the source:
 //
-//  1. manifest whitelist (PLATFORM-OWNED) — the physical Table name comes only
-//     from the trusted injected manifest (DependencyGrant.Tables), never module
-//     input; columns/filter columns are logical names the consumer declared.
+//  1. relation-name provenance — the physical Table name is never module input.
+//     On the DEPLOYED plane it is PLATFORM-OWNED: it comes only from the trusted
+//     injected manifest (DependencyGrant.Tables). On a CO-LOCATED DEV read there
+//     is no platform to supply it, so it is SDK-DERIVED by localPhysicalName
+//     (dependency_local.go) from a moduleIDPattern-validated producer id joined
+//     to a dependencySQLName-validated logical table name — neither of which can
+//     contain a metacharacter. Columns/filter columns are logical names the
+//     consumer declared, on both planes. Layers 2 and 3 below are unchanged and
+//     still make injection impossible in either case.
 //  2. name-shape gate (ENFORCED HERE) — every identifier must match
 //     selectIdentPattern (lowercase snake_case within Postgres's 63-byte budget,
 //     the only shape ExposeTable / the migration DSL can produce). Quotes,

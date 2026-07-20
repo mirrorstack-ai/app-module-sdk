@@ -19,6 +19,12 @@ import (
 // depTestModule builds a module + app-scoped ctx wired at a fake dispatch.
 func depTestModule(t *testing.T, srvURL string) (*Module, context.Context) {
 	t.Helper()
+	// Proxy-plane tests: never take the local branch. This makes the plane gate
+	// hermetic regardless of the developer's shell — without it, a shell that
+	// exports MS_LOCAL_DB_URL would send these through the directory lookup,
+	// which would still fall through to the proxy on error, but noisily and
+	// non-deterministically.
+	t.Setenv(devMigrateEnvVar, "")
 	t.Setenv("MS_DISPATCH_URL", srvURL)
 	t.Setenv("MS_INTERNAL_SECRET", "sess-secret-1")
 	m, err := New(Config{ID: "m1234abcd"})
@@ -573,6 +579,154 @@ func TestDependencyDB_Result_DeployedFiresInLocalShimNotOnlyRealLambda(t *testin
 			t.Errorf("rows = %d, want 1 from the proxied server", len(res.Rows))
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Local-first proxy-intactness locks. Local-first must be strictly ADDITIVE:
+// every case here proves that when the producer is NOT established as
+// co-located, the read-exposed proxy path runs exactly as it did before the
+// local plane existed. The local plane's own behavior lives in
+// dependency_local_test.go.
+// ---------------------------------------------------------------------------
+
+// TestDependencyDB_LocalGateOff_StaysOnProxy is THE additive-behavior lock: with
+// MS_LOCAL_DB_URL unset there is no co-located dev session at all, so the wire
+// envelope must land at dispatch byte-identically to the pre-local-first world.
+func TestDependencyDB_LocalGateOff_StaysOnProxy(t *testing.T) {
+	srv, gotReq, gotBody := fakeReadExposed(t, http.StatusOK, `{"rows":[{"id":1}],"truncated":false}`)
+	m, ctx := depTestModule(t, srv.URL) // depTestModule clears devMigrateEnvVar
+
+	// A directory that would PANIC if consulted: with the gate off, the local
+	// branch must not perform any lookup whatsoever.
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		t.Error("directory consulted with MS_LOCAL_DB_URL unset — the plane gate did not hold")
+		return devModuleEntry{}, false, nil
+	}
+
+	res, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").
+		Select("users").Columns("id", "email").Result(ctx)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+		t.Errorf("path = %q, want the read-exposed proxy path", gotReq.URL.Path)
+	}
+	var body readExposedRequest
+	if err := json.Unmarshal(*gotBody, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v (%s)", err, *gotBody)
+	}
+	if body.Module != "m1234abcd" || body.Producer != "oauth-core" || body.Table != "users" {
+		t.Errorf("wire envelope changed: %+v", body)
+	}
+	if len(res.Rows) != 1 {
+		t.Errorf("rows = %d, want 1 from the proxied server", len(res.Rows))
+	}
+}
+
+// depTestModuleColocated is depTestModule for a module that IS running inside a
+// co-located dev session — the local plane's gate is ON and its directory is
+// consulted. The env var has to be set BEFORE New(): devMode is captured there,
+// and it (not a live os.Getenv) is the plane gate. Setting it afterwards, as
+// these tests originally did, left devMode false and quietly proved nothing —
+// the read took the proxy because the gate was off, not because the directory
+// missed.
+func depTestModuleColocated(t *testing.T, srvURL string) (*Module, context.Context) {
+	t.Helper()
+	t.Setenv(devMigrateEnvVar, "postgres://unused")
+	t.Setenv("MS_DISPATCH_URL", srvURL)
+	t.Setenv("MS_INTERNAL_SECRET", "sess-secret-1")
+	m, err := New(Config{ID: "m1234abcd"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// This module published itself fine; the self-heal must stay dormant so no
+	// test in this file can reach for a pool.
+	m.devDir.published.Store(true)
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-uuid-1", UserID: "u1", AppRole: auth.RoleAdmin})
+	return m, ctx
+}
+
+// TestDependencyDB_ProducerNotColocated_FallsThroughToProxy: a producer that
+// runs only in prod is a legitimate cross-plane read. A directory MISS must not
+// become ErrProducerNotFound — that would break every genuinely-remote producer.
+func TestDependencyDB_ProducerNotColocated_FallsThroughToProxy(t *testing.T) {
+	srv, gotReq, _ := fakeReadExposed(t, http.StatusOK, `{"rows":[{"id":1}],"truncated":false}`)
+	m, ctx := depTestModuleColocated(t, srv.URL) // co-located session, but...
+
+	var asked string
+	m.devDir.lookup = func(_ context.Context, ref string) (devModuleEntry, bool, error) {
+		asked = ref
+		return devModuleEntry{}, false, nil // ...this producer is not in it
+	}
+
+	res, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").
+		Select("users").Columns("id").Result(ctx)
+	if err != nil {
+		t.Fatalf("Result: %v (a directory miss must fall through, not fail)", err)
+	}
+	// The load-bearing assertion: the directory was ACTUALLY consulted (so the
+	// plane gate was on) and it was asked for the normalized bare ref. Without
+	// this the test would pass identically with the local branch disabled.
+	if asked != "oauth-core" {
+		t.Errorf("directory asked for %q, want the normalized bare ref %q", asked, "oauth-core")
+	}
+	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+		t.Errorf("path = %q, want the proxy path (directory miss falls through)", gotReq.URL.Path)
+	}
+	// The "no sentinel leaked" guarantee is carried by the t.Fatalf above: it
+	// already establishes err == nil, so no errors.Is check below it could ever
+	// fire. The loop that used to sit here was unreachable and tested nothing.
+	if len(res.Rows) != 1 {
+		t.Errorf("rows = %d, want 1 from the proxied server", len(res.Rows))
+	}
+}
+
+// TestDependencyDB_DirectoryReadError_FallsThroughToProxy: a broken local
+// optimization must not break a working remote read.
+func TestDependencyDB_DirectoryReadError_FallsThroughToProxy(t *testing.T) {
+	srv, gotReq, _ := fakeReadExposed(t, http.StatusOK, `{"rows":[{"id":1}],"truncated":false}`)
+	m, ctx := depTestModuleColocated(t, srv.URL)
+
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		return devModuleEntry{}, false, errors.New("directory table is on fire")
+	}
+
+	rows, err := m.DependencyDB(ctx, "@mirrorstack/oauth-core").
+		Select("users").Columns("id").Rows(ctx)
+	if err != nil {
+		t.Fatalf("Rows: %v (a directory error must degrade to the proxy, not fail the read)", err)
+	}
+	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+		t.Errorf("path = %q, want the proxy path", gotReq.URL.Path)
+	}
+	if rows == nil {
+		t.Errorf("rows is nil, want the proxied rows")
+	}
+}
+
+// TestDependencyDB_DeployedNeverConsultsDirectory extends the three-way
+// plane-gate pin to four ways: the deployed branch reads the platform-injected
+// manifest and must never touch the dev directory, even in a process that has
+// MS_LOCAL_DB_URL set (which every module under `mirrorstack dev` does).
+func TestDependencyDB_DeployedNeverConsultsDirectory(t *testing.T) {
+	t.Setenv(devMigrateEnvVar, "postgres://unused")
+	m, err := New(Config{ID: "m1234abcd"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		t.Error("deployed plane consulted the dev dependency directory")
+		return devModuleEntry{}, false, nil
+	}
+
+	ctx := deployedCtx([]db.DependencyGrant{
+		{Ref: "oauth-core", Tables: map[string]string{"sessions": "m81b3ac70_sessions"}},
+	})
+	_, err = m.DependencyDB(ctx, "@mirrorstack/oauth-core").Select("users").
+		Columns("id").result(ctx, true /* deployed */)
+	if !errors.Is(err, ErrNotExposed) {
+		t.Errorf("err = %v, want ErrNotExposed from the manifest walk", err)
+	}
 }
 
 func TestMapDeployedReadError(t *testing.T) {
