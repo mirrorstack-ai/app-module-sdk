@@ -506,6 +506,18 @@ var (
 	ErrDependencyUnauthorized = core.ErrDependencyUnauthorized
 	// ErrNotExposed — the table is not exposed to this module by the version
 	// the producer actually runs, or the app owner never consented.
+	//
+	// DEV DOES NOT CHECK CONSENT, so this is the error most likely to appear
+	// for the first time in production. Under `mirrorstack dev` a read of a
+	// co-located producer is authorized by your ms.DependsOn declaration plus
+	// the producer's ms.ExposeTable — that is all there is locally, because a
+	// dev session has no install lifecycle and therefore no app owner to
+	// approve anything. In production those two are necessary but NOT
+	// sufficient: the app owner must also have consented at install time, and
+	// exposure is anchored to the version the producer provably runs in that
+	// app rather than to your working tree. A consumer that reads cleanly all
+	// the way through dev can still be refused on install. Handle
+	// ErrNotExposed as a live runtime outcome, not a setup mistake.
 	ErrNotExposed = core.ErrNotExposed
 	// ErrDependencyUnavailable — authorized, but the producer's relation is
 	// not readable right now (yanked/rolled back), or the platform's read
@@ -534,6 +546,18 @@ var (
 // a READ ONLY transaction, authorized against the consent+exposure catalog.
 // There is no cross-plane SQL JOIN — fetch the exposed rows here, read your
 // own tables via mod.DB, and join in application code.
+//
+// Under `mirrorstack dev --tunnel` a producer running in the SAME dev session
+// is read directly from your local Postgres instead of over the platform
+// proxy — otherwise the proxy would hand you the producer's PRODUCTION rows
+// while your own rows are local, which is wrong data rather than slow data.
+// Two things differ from production on that local path, and both are logged
+// once per producer when it happens: app-owner consent is NOT enforced (see
+// ErrNotExposed), and there is no version anchoring — adding an ms.ExposeTable
+// takes effect on the producer's next boot, whereas production requires a
+// publish AND the app moving to that version. A co-located read also requires
+// an explicit Columns(...) projection; the empty-projection form is resolved
+// by the proxy only.
 //
 // Dev-plane (`mirrorstack dev --tunnel`) only today; a deployed module reads
 // a co-located producer directly via mod.DB (GRANT SELECT). Panics before

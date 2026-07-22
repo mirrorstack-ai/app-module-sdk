@@ -8,8 +8,14 @@ import (
 
 // exposedTableNamePattern: Postgres-safe identifier. Lowercase, starts with a
 // letter, only [a-z0-9_], up to 63 chars (the Postgres NAMEDATALEN ceiling).
-// An exposed table lives under the module's `mod_<id>` schema; the platform
-// composes the fully-qualified name itself when it issues GRANT SELECT.
+//
+// An exposed table is APP-SCOPE: it lives in the per-app schema as
+// app_<id>."<module-id>_<table>", NOT under the module's cross-app `mod_<id>`
+// schema (internal/core/expose.go states the same, and the mod_<id> schemas
+// hold only schema_migrations). The platform composes the fully-qualified name
+// itself when it issues GRANT SELECT; a co-located dev session reconstructs the
+// same rule in internal/core.localPhysicalName, which is why the distinction is
+// now load-bearing rather than cosmetic.
 var exposedTableNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
 // AddExposedTable records a table NAME as eligible for SELECT by a depending

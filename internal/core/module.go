@@ -146,6 +146,11 @@ type Module struct {
 	// *devProvisionEntry) so only the first dev request for an app runs its
 	// app-scope migrations. See Module.ensureDevAppSchema.
 	devProvision sync.Map
+	// devDir is the co-located dev dependency directory: the lookup/ensure/
+	// publish seams, the lease heartbeat's lifecycle channels, and the two
+	// caches that keep the read path off Postgres. See dev_directory.go.
+	// Allocated in New(); never nil.
+	devDir *devDirectoryState
 }
 
 // devAppSchemaName derives the per-app Postgres schema from an app id,
@@ -302,6 +307,12 @@ func New(cfg Config) (*Module, error) {
 	if !cfg.DescriptionLabel.IsZero() {
 		m.registry.SetDescriptionLabel(cfg.DescriptionLabel)
 	}
+
+	// The local dependency plane's directory seams. Bound to the real
+	// Postgres-backed implementations here so they are never nil in production
+	// code; tests overwrite them with in-memory fakes to exercise resultLocal
+	// and the boot publish ordering without a DB.
+	m.devDir = newDevDirectoryState(m)
 
 	m.mountSystemRoutes()
 	return m, nil
@@ -731,6 +742,10 @@ func requireInternalSecret() error {
 
 // Close cleans up resources.
 func (m *Module) Close() {
+	// Before the pools go: withdrawing this module's dev-directory row needs a
+	// connection, and stopping the heartbeat before closing the pool it writes
+	// through is what keeps a shutdown from logging a spurious failure.
+	m.stopDevDirectoryLease()
 	if m.poolCache != nil {
 		m.poolCache.Close()
 	}
