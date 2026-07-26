@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 )
@@ -20,12 +22,26 @@ import (
 // transport lands here (and in the per-surface resolvers' path logic) instead
 // of being swapped in N copies.
 
+// dispatchFallbackWarn keeps the unset-MS_DISPATCH_URL warning to one line per
+// process, so a module that makes many calls does not spam its log.
+var dispatchFallbackWarn sync.Once
+
 // dispatchBase resolves the platform-dispatch base URL: MS_DISPATCH_URL (the
 // container->dispatch base) with the host.docker.internal dev fallback when
 // unset.
 func dispatchBase() string {
 	base := os.Getenv("MS_DISPATCH_URL")
 	if base == "" {
+		// The fallback is only correct when a FULL local platform stack is
+		// running (its dispatch listens on :8083). A dev-tunnel session runs no
+		// local platform, so taking this branch means every ms.Call/Emit/Notify
+		// will fail with a bare connection error the caller can only report as a
+		// 502. Say so once, loudly, instead of failing mute.
+		dispatchFallbackWarn.Do(func() {
+			slog.Warn("MS_DISPATCH_URL is unset; falling back to the local dev dispatch. "+
+				"Inter-module calls, events and notifications will fail unless a local platform stack is running on this address.",
+				"fallback", devDispatchFallback)
+		})
 		base = devDispatchFallback
 	}
 	return strings.TrimRight(base, "/")
