@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,23 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 )
+
+func TestDispatchBaseFallsBackWhenUnset(t *testing.T) {
+	t.Setenv("MS_DISPATCH_URL", "")
+
+	if got := dispatchBase(); got != devDispatchFallback {
+		t.Errorf("dispatchBase() = %q, want %q", got, devDispatchFallback)
+	}
+}
+
+func TestDispatchBaseTrimsTrailingSlash(t *testing.T) {
+	t.Setenv("MS_DISPATCH_URL", "https://api.mirrorstack.ai/dispatch/")
+
+	const want = "https://api.mirrorstack.ai/dispatch"
+	if got := dispatchBase(); got != want {
+		t.Errorf("dispatchBase() = %q, want %q", got, want)
+	}
+}
 
 func TestResolveCallURL_Building(t *testing.T) {
 	cases := []struct {
@@ -123,6 +141,34 @@ func TestCall_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
 	if !strings.Contains(msg, "/module/m0123/internal/users") {
 		t.Errorf("error %q missing request path", msg)
 	}
+}
+
+func TestCall_TransportErrorIncludesResolvedHost(t *testing.T) {
+	const dispatchURL = "http://unreachable-dispatch.example:8083"
+	t.Setenv("MS_DISPATCH_URL", dispatchURL)
+
+	previousClient := callHTTP
+	callHTTP = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		}),
+	}
+	t.Cleanup(func() { callHTTP = previousClient })
+
+	m, _ := New(Config{ID: "demo"})
+	err := m.CallGet(context.Background(), "m0123", "/internal/users", nil)
+	if err == nil {
+		t.Fatal("expected transport error, got nil")
+	}
+	if !strings.Contains(err.Error(), dispatchURL) {
+		t.Errorf("error %q missing resolved dispatch host %q", err, dispatchURL)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestCallGet_NoBodyNoContentType(t *testing.T) {
