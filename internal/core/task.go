@@ -29,6 +29,7 @@ type TaskOption func(*taskOptions)
 type taskOptions struct {
 	timeout    time.Duration
 	maxRetries int
+	compute    *Compute
 }
 
 // taskEntry stores the handler and its configured options.
@@ -50,6 +51,24 @@ func WithMaxRetries(n int) TaskOption {
 	return func(o *taskOptions) { o.maxRetries = n }
 }
 
+// WithCompute selects the execution class and size for this task, so the
+// platform provisions the right runner at deploy from the declaration alone —
+// the same mechanism that already provisions the SQS queue.
+//
+// Omitting it keeps the task on Standard/Lambda with platform-default sizing:
+// the default must never move, or a module could land on expensive compute
+// without anyone declaring it.
+//
+// The descriptor must come from Standard, Heavy or GPU — those validate it.
+// A zero Compute is a programmer error and panics rather than reaching the
+// manifest as a runner class the platform cannot resolve.
+func WithCompute(c Compute) TaskOption {
+	if c.class == "" {
+		panic("mirrorstack: WithCompute(Compute{}) — an empty descriptor cannot select a runner; build one with ms.Standard, ms.Heavy or ms.GPU")
+	}
+	return func(o *taskOptions) { o.compute = &c }
+}
+
 const taskPathPrefix = "/__mirrorstack/tasks/"
 
 // OnTask registers a background task handler. The handler appears in the
@@ -63,7 +82,17 @@ const taskPathPrefix = "/__mirrorstack/tasks/"
 //
 // Panics on duplicate registration with the same name.
 //
-//	mod.OnTask("transcode-video", transcodeHandler, ms.WithTimeout(10*time.Minute))
+// The execution class defaults to Standard — the module's own Lambda, with
+// Lambda's 15-minute ceiling. Pass WithCompute to route the task to a heavier
+// runner instead; the platform provisions it from the manifest at deploy.
+//
+//	mod.OnTask("thumbnail", thumbnailHandler, ms.WithTimeout(10*time.Minute))
+//
+//	mod.OnTask("transcode-video", transcodeHandler,
+//	    ms.WithCompute(ms.Heavy(ms.Res{VCPU: 4, MemoryMB: 8192})),
+//	    ms.WithTimeout(90*time.Minute),
+//	    ms.WithMaxRetries(2),
+//	)
 func (m *Module) OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 	o := taskOptions{}
 	for _, opt := range opts {
@@ -76,6 +105,11 @@ func (m *Module) OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 	}
 	if o.maxRetries > 0 {
 		task.MaxRetries = o.maxRetries
+	}
+	// Only a declared class is projected: an undeclared one leaves the manifest
+	// entry byte-identical to what it was before this field existed.
+	if o.compute != nil {
+		task.Compute = o.compute.taskCompute()
 	}
 
 	if !m.registry.AddTask(task) {

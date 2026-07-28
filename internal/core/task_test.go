@@ -85,6 +85,85 @@ func TestOnTask_AppearsInManifest(t *testing.T) {
 	}
 }
 
+// The default must not move: a task declared before WithCompute existed keeps a
+// byte-identical manifest entry, so no module lands on a different runner (or a
+// different bill) because the SDK grew a field.
+func TestOnTask_NoComputeLeavesManifestByteIdentical(t *testing.T) {
+	m := newTestModuleWithSecret(t, "test")
+	m.OnTask("transcode", func(context.Context, json.RawMessage) error { return nil },
+		WithTimeout(10*time.Minute), WithMaxRetries(3))
+
+	got, err := json.Marshal(m.registry.Tasks()[0])
+	if err != nil {
+		t.Fatalf("marshal task: %v", err)
+	}
+	const want = `{"name":"transcode","maxDuration":"10m0s","maxRetries":3}`
+	if string(got) != want {
+		t.Errorf("task JSON = %s, want %s", got, want)
+	}
+	if strings.Contains(string(got), "compute") {
+		t.Errorf("task JSON unexpectedly carries a compute key: %s", got)
+	}
+}
+
+func TestOnTask_WithComputeProjectsManifest(t *testing.T) {
+	tests := []struct {
+		name    string
+		compute Compute
+		want    string
+	}{
+		{
+			name:    "heavy carries its dimensions",
+			compute: Heavy(Res{VCPU: 4, MemoryMB: 8192}),
+			want:    `{"name":"work","compute":{"class":"heavy","vcpu":4,"memoryMb":8192}}`,
+		},
+		{
+			// GPU dimensions are RESOLVED from the instance, not requested, so
+			// the app owner approves the box they will actually be billed for.
+			name:    "gpu resolves dimensions from the instance",
+			compute: GPU(Res{Instance: "g5.xlarge"}),
+			want:    `{"name":"work","compute":{"class":"gpu","vcpu":4,"memoryMb":16384,"instance":"g5.xlarge"}}`,
+		},
+		{
+			// An explicit Standard declaration says "Lambda, platform default"
+			// out loud; it must not invent a size.
+			name:    "explicit standard default carries class only",
+			compute: Standard(Res{}),
+			want:    `{"name":"work","compute":{"class":"standard"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := newTestModuleWithSecret(t, "test")
+			m.OnTask("work", func(context.Context, json.RawMessage) error { return nil }, WithCompute(test.compute))
+			got, err := json.Marshal(m.registry.Tasks()[0])
+			if err != nil {
+				t.Fatalf("marshal task: %v", err)
+			}
+			if string(got) != test.want {
+				t.Errorf("task JSON = %s, want %s", got, test.want)
+			}
+			if strings.Contains(string(got), `"vcpu":0`) || strings.Contains(string(got), `"memoryMb":0`) {
+				t.Errorf("task JSON contains zero-valued resolved dimensions: %s", got)
+			}
+		})
+	}
+}
+
+// A Compute that did not come from a constructor was never validated, so it
+// must not reach the manifest as a runner class the platform cannot resolve.
+func TestWithCompute_RejectsUnvalidatedDescriptor(t *testing.T) {
+	message := panicMessage(func() { WithCompute(Compute{}) })
+	if message == "" {
+		t.Fatal("WithCompute(Compute{}) did not panic")
+	}
+	for _, want := range []string{"ms.Standard", "ms.Heavy", "ms.GPU"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("panic %q does not point at %s", message, want)
+		}
+	}
+}
+
 func TestOnTask_ManifestEmptyTasksNotNull(t *testing.T) {
 	m := newTestModuleWithSecret(t, "test")
 
