@@ -118,9 +118,14 @@ type Dependency struct {
 // behalf. The contributor declares WHAT and WHERE; it never holds the host's
 // address or credentials.
 type OutboundContribution struct {
-	Host    string          `json:"host"`    // host module spec/id, e.g. "oauth-core"
-	Slot    string          `json:"slot"`    // slot key on the host, e.g. "auth-provider"
-	Payload json.RawMessage `json:"payload"` // typed payload, validated by the host's slot at registration
+	Host string `json:"host"` // host module spec/id, e.g. "oauth-core"
+	// Constraint is the SemVer range of the host this contribution was authored
+	// against. The catalog needs it to refuse a contribution when the installed
+	// host version falls outside that range. Empty means any version, as for
+	// Dependency.Version.
+	Constraint string          `json:"constraint,omitempty"`
+	Slot       string          `json:"slot"`    // slot key on the host, e.g. "auth-provider"
+	Payload    json.RawMessage `json:"payload"` // typed payload, validated by the host's slot at registration
 }
 
 // MetricDecl is a declared usage metric (ms.Meter). Exposed in the manifest so
@@ -274,7 +279,7 @@ func (r *Registry) DescriptionLabels() map[string]string {
 // Events from dep merge into the existing entry as a set union — repeated
 // declarations only add, never remove).
 func (r *Registry) AddDependency(dep Dependency) bool {
-	ValidateDepID(dep.ID)
+	ValidateDepID("DependsOn", dep.ID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.dependencies {
@@ -297,14 +302,16 @@ func (r *Registry) AddDependency(dep Dependency) bool {
 }
 
 // AddOutboundContribution records (or replaces) an outbound contribution keyed
-// by (Host, Slot). Re-declaring the same Host+Slot overwrites the payload —
-// last declaration wins — so a module contributes at most once per host slot.
+// by (Host, Slot). Re-declaring the same Host+Slot overwrites the payload and
+// constraint — last declaration wins — so a module contributes at most once
+// per host slot.
 func (r *Registry) AddOutboundContribution(c OutboundContribution) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, existing := range r.outboundContributions {
 		if existing.Host == c.Host && existing.Slot == c.Slot {
 			r.outboundContributions[i].Payload = slices.Clone(c.Payload)
+			r.outboundContributions[i].Constraint = c.Constraint
 			return
 		}
 	}
@@ -321,9 +328,10 @@ func (r *Registry) OutboundContributions() []OutboundContribution {
 	out := make([]OutboundContribution, len(r.outboundContributions))
 	for i, c := range r.outboundContributions {
 		out[i] = OutboundContribution{
-			Host:    c.Host,
-			Slot:    c.Slot,
-			Payload: slices.Clone(c.Payload),
+			Host:       c.Host,
+			Constraint: c.Constraint,
+			Slot:       c.Slot,
+			Payload:    slices.Clone(c.Payload),
 		}
 	}
 	return out
