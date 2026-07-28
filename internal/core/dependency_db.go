@@ -36,10 +36,23 @@ import (
 // install-time grant walk uses and executed as the consumer's own
 // r_<app8>_<mod> role inside a READ ONLY transaction:
 //
-//   - DEV plane (decision 17 §2, option (d)): shipped over the platform's
-//     read-exposed proxy, authenticated by the live dev-tunnel session secret.
-//     The dev plane holds no socket to the platform DB, so a cross-plane SQL
-//     JOIN is structurally impossible — fetch, then join in app code.
+//   - DEV plane (decision 17 §2, option (d)), TWO sub-paths. The original
+//     premise — "the dev plane holds no socket to the platform DB" — is true of
+//     a REMOTE producer and FALSE of a co-located one: under `mirrorstack dev`
+//     the producer and consumer are two processes sharing one Postgres and one
+//     app schema. So:
+//     (a) CO-LOCATED producer — resolved through the dev dependency directory
+//     (dependency_local.go) — is read LOCALLY, through the same
+//     DynamicSelect + db.TxReadOnly + SQLSTATE mapping the deployed plane
+//     uses. This is not merely faster: the proxy would return PROD rows to a
+//     consumer whose own rows are LOCAL, so routing a co-located read
+//     remotely returns WRONG DATA, not just slow data.
+//     (b) everything else ships over the platform's read-exposed proxy,
+//     authenticated by the live dev-tunnel session secret, exactly as before.
+//     Local-first is strictly ADDITIVE: a producer absent from the directory
+//     keeps the proxy path byte-for-byte unchanged. On both sub-paths a
+//     cross-plane SQL JOIN remains structurally impossible — fetch, then join
+//     in app code.
 //   - DEPLOYED plane (decision 18 §3): the platform ships the authorized
 //     dependency set down the trusted Lambda envelope as a manifest; the SDK
 //     composes a sanitized dynamic SELECT against the platform-supplied
@@ -210,9 +223,10 @@ func (q *DependencyQuery) setErr(err error) *DependencyQuery {
 }
 
 // Columns restricts the projection to the named columns. Accumulates across
-// calls; at most 64 names. On the dev plane an empty projection returns all
-// visible columns (the proxy resolves them); the deployed plane requires at
-// least one column — the blessed dynamic-SELECT builder never emits SELECT *.
+// calls; at most 64 names. An empty projection is resolved by the read-exposed
+// PROXY only, which expands it to all visible columns; the deployed plane and a
+// co-located dev read both require at least one column — the blessed
+// dynamic-SELECT builder never emits SELECT *.
 func (q *DependencyQuery) Columns(cols ...string) *DependencyQuery {
 	if q.err != nil {
 		return q
@@ -368,6 +382,26 @@ func (q *DependencyQuery) result(ctx context.Context, deployed bool) (*Dependenc
 	if deployed {
 		return q.resultDeployed(ctx)
 	}
+	// Local-first: when the producer runs in this same `mirrorstack dev` session
+	// it shares this Postgres and this app schema, so reading it locally is not
+	// an optimization — it is the only way to get the RIGHT rows. Sitting BEFORE
+	// the MS_INTERNAL_SECRET read below is deliberate: a co-located read must
+	// not have to consume a tunnel SECRET to reach a table in its own database.
+	//
+	// It does still need a request carrying the REAL app id, which today means
+	// `mirrorstack dev --tunnel`: with no platform secret configured,
+	// platformAuth takes its local-dev bypass and mints a synthetic
+	// "local-dev-app" identity that cannot agree with the header-derived app
+	// schema, so the app-scope pin in resultLocal refuses. That refusal is
+	// correct — two different app scopes must never resolve — so do not
+	// "restore" no-tunnel local reads by weakening the pin; see the pin in
+	// dependency_local.go for the other half of this reasoning.
+	//
+	// handled=false means "not co-located" and falls through to the proxy
+	// unchanged; see resultLocal's fallthrough rule.
+	if res, handled, err := q.resultLocal(ctx); handled {
+		return res, err
+	}
 	// The proxy binds the caller to its live tunnel session by the session's
 	// InternalSecret — the exact value the CLI exports as MS_INTERNAL_SECRET
 	// (the same seam the module-log ingest rides). Deliberately NOT the
@@ -446,6 +480,10 @@ var errDevPlaneOnly = errors.New("mirrorstack: DependencyDB is dev-plane only �
 // on the vended connection, so a wrong/forged manifest name cannot over-read
 // (42501 → ErrDependencyUnavailable). Every degradation is a typed fail-closed
 // sentinel; none returns silent-empty.
+//
+// That GRANT ceiling is a DEPLOYED-plane property. The co-located dev caller of
+// readGrantedRows runs on a superuser pool with no such ceiling and must
+// authorize in Go — see dependency_local.go.
 func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult, error) {
 	// Layer-1 fail-closed: manifest-absent + manifest-omission (decision 18 §5).
 	manifest := db.DependenciesFrom(ctx)
@@ -467,9 +505,38 @@ func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult
 		return nil, fmt.Errorf("%w: %q is not exposed to this module by %q on its running version", ErrNotExposed, q.table, q.dep.producer)
 	}
 
+	rows, truncated, err := q.readGrantedRows(ctx, physical)
+	if err != nil {
+		// Layer-2 fail-closed: physical/grant state at read time (decision 18 §5).
+		return nil, err
+	}
+	if rows == nil {
+		rows = []map[string]any{}
+	}
+	return &DependencyResult{Rows: rows, Truncated: truncated}, nil
+}
+
+// readGrantedRows executes an ALREADY-AUTHORIZED read of one physical relation
+// and is shared by both non-proxy planes: the deployed plane passes the name the
+// platform manifest supplied, the co-located dev plane passes the name
+// localPhysicalName derived. Sharing it means there is only one dynamic SELECT,
+// one READ ONLY tx and one SQLSTATE mapping that can ever drift.
+//
+// It performs NO authorization — every caller must have completed its own walk
+// first.
+//
+// The dev cross-module guard does not fire here, and that is REQUIRED rather
+// than accidental: guardQuerier wraps db.Querier (db_guard.go:186) while
+// db.TxReadOnly hands fn a raw pgx.Tx and queryDynamicSelect calls tx.Query
+// directly. Do NOT "fix" this by routing through Module.DB/Module.Tx — the
+// guard's moduleTableRe would reject a foreign m<hex>_* name, and circularly
+// so, since its own error text tells users to call ms.DependencyDB. db.go:81's
+// seedConn is the existing precedent for a documented, deliberate bypass.
+func (q *DependencyQuery) readGrantedRows(ctx context.Context, physical string) ([]map[string]any, bool, error) {
 	// Schema comes from the trusted envelope (SchemaFrom), never module input;
-	// the physical name comes only from the manifest. The shape-gate +
-	// Sanitize in buildDynamicSelect is the last-line defense on both.
+	// the physical name comes from the manifest (deployed) or from
+	// localPhysicalName (co-located dev). The shape-gate + Sanitize in
+	// buildDynamicSelect is the last-line defense on both.
 	ds := DynamicSelect{
 		Schema:  db.SchemaFrom(ctx),
 		Table:   physical,
@@ -478,12 +545,12 @@ func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult
 		Limit:   q.limit,
 	}
 
-	// mod.DB's consumer-role pool: db.CredentialFrom(ctx) → r_<app8>_<consumer>,
-	// the same role the install-time GRANT SELECT targets. resolvePool refcount-
-	// pins it until release.
+	// Deployed: mod.DB's consumer-role pool — db.CredentialFrom(ctx) →
+	// r_<app8>_<consumer>, the same role the install-time GRANT SELECT targets.
+	// Dev: the single shared dev pool. resolvePool refcount-pins until release.
 	pool, release, err := q.dep.mod.resolvePool(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("mirrorstack: DependencyDB: acquire consumer pool: %w", err)
+		return nil, false, fmt.Errorf("mirrorstack: DependencyDB: acquire consumer pool: %w", err)
 	}
 	defer release()
 
@@ -495,13 +562,9 @@ func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult
 		return e
 	})
 	if err != nil {
-		// Layer-2 fail-closed: physical/grant state at read time (decision 18 §5).
-		return nil, mapDeployedReadError(err)
+		return nil, false, mapDeployedReadError(err)
 	}
-	if rows == nil {
-		rows = []map[string]any{}
-	}
-	return &DependencyResult{Rows: rows, Truncated: truncated}, nil
+	return rows, truncated, nil
 }
 
 // lookupDependency finds the manifest entry for a producer ref. The manifest is

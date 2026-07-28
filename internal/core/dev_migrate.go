@@ -49,7 +49,37 @@ func (m *Module) devMigrateEnabled() bool {
 // Module scope is shared across apps by design, so mod_<id> has a home the
 // moment the module boots and is migrated here.
 func (m *Module) applyDevMigrations(ctx context.Context) error {
-	return m.ensureSchemaMigrated(ctx, migration.ScopeModule, "mod_"+m.config.ID)
+	if err := m.ensureSchemaMigrated(ctx, migration.ScopeModule, "mod_"+m.config.ID); err != nil {
+		return err
+	}
+	// Publish this module's identity + exposure set for co-located consumers,
+	// then hold the lease open for the life of the process (see
+	// dev_directory.go). NON-FATAL by design: the directory is an optimization
+	// that lets a co-located cross-module read stay local. A module that cannot
+	// publish still boots and serves normally; its consumers simply keep taking
+	// the read-exposed proxy path, which is exactly the behavior that existed
+	// before the directory. Failing boot over a degraded optimization would
+	// trade a working module for a faster one.
+	//
+	// Note the shape: NO early return, and no `return nil` swallowing a setup
+	// failure. Whether the table could be created and whether this module's row
+	// could be written are separate questions with separate answers, and the
+	// first failing is the WEAKEST possible evidence that the second will —
+	// under `mirrorstack dev --all` the usual cause of a failed create is a peer
+	// module creating the same table at the same instant. publishDevDirectory
+	// owns that ordering and the lease goroutine owns the retry.
+	// Bounded so "NON-FATAL by design" is true of the BOOT PATH too, not just of
+	// the outcome. The first thing the publish does is take a
+	// pg_advisory_xact_lock, which blocks until the holder's transaction ends;
+	// applyDevMigrations runs synchronously on the way to ListenAndServe, so a
+	// peer wedged mid-DDL (a debugger breakpoint, a SIGSTOPped process) would
+	// otherwise stop this module from ever serving, with no log line and no
+	// timeout — the hardest possible failure to diagnose. A deadline turns that
+	// into one degraded publish plus a log line, and the 30s heartbeat retries.
+	bootCtx, cancel := context.WithTimeout(ctx, devDirectoryBootTimeout)
+	defer cancel()
+	m.startDevDirectoryLease(bootCtx)
+	return nil
 }
 
 // devProvisionEntry guards one app schema's lazy provisioning. The sync.Once

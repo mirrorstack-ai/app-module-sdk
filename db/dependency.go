@@ -9,14 +9,21 @@ import "context"
 // single DB-level authorizer, and Postgres enforces it on the vended pool no
 // matter what this manifest says.
 //
+// That last sentence is a DEPLOYED-plane statement. A co-located
+// `mirrorstack dev` session runs one superuser role and has no
+// r_<app8>_<mod> roles at all, so there is no DB-level authorizer beneath it
+// and the SDK's Go-side walk is the only gate — see the KNOWN LIMITS block in
+// internal/core/dependency_local.go for exactly what that does and does not buy.
+//
 //   - Ref is the producer keyed by the SAME normalized form the SDK's
 //     parseProducerRef yields (the bare "slug" the platform reconstructs from
 //     the producer's owner/slug — see decision 18 §3 step 6).
 //   - Tables maps each exposed LOGICAL table name ("users") to the physical
 //     relation the platform computed via ids.PhysicalTableName
 //     ("m<hex>_users"). The SDK never derives the physical name; it reads it
-//     here. Only tables exposed + consented on the producer's running version
-//     appear.
+//     here — except in a co-located dev session, where there is no platform to
+//     compute it; see localPhysicalName. Only tables exposed + consented on the
+//     producer's running version appear.
 //
 // The JSON tags are the cross-repo wire contract with api-platform's local
 // mirror (moduleinvoke.DependencyGrant — api-platform never imports the SDK).

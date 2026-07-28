@@ -84,7 +84,7 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 
 	resp, err := callHTTP.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("ms.Call %s %s: %w", method, u, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
