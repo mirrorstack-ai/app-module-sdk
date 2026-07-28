@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -37,6 +38,40 @@ type TaskHandler = core.TaskHandler
 
 // TaskOption configures an OnTask registration.
 type TaskOption = core.TaskOption
+
+// Res is the resource request passed to Standard, Heavy or GPU. Each class
+// honours a different subset of its fields and rejects the rest — see core.Res.
+type Res = core.Res
+
+// Compute is a validated execution-class descriptor. Obtainable only from
+// Standard, Heavy or GPU, which validate eagerly and panic on an illegal
+// request.
+type Compute = core.Compute
+
+// Standard sizes a task for Lambda — the default class. Memory only; Lambda
+// derives vCPU from it.
+func Standard(r Res) Compute { return core.Standard(r) }
+
+// Heavy sizes a task for Fargate, for work that does not fit Lambda's 15-minute
+// ceiling. VCPU and MemoryMB must form a legal Fargate pair.
+func Heavy(r Res) Compute { return core.Heavy(r) }
+
+// GPU sizes a task for ECS on an allowlisted EC2 GPU instance. Fargate has no
+// GPU support, so this is a materially different runner. The instance type
+// determines vCPU and memory.
+func GPU(r Res) Compute { return core.GPU(r) }
+
+// WithCompute selects a task's execution class and size. Omit it to stay on
+// Standard/Lambda — the default never moves.
+func WithCompute(c Compute) TaskOption { return core.WithCompute(c) }
+
+// WithTimeout sets the maximum duration for a task handler, and the SQS
+// visibility timeout the platform provisions from it.
+func WithTimeout(d time.Duration) TaskOption { return core.WithTimeout(d) }
+
+// WithMaxRetries sets the SQS retry count before a task message is routed to
+// the DLQ.
+func WithMaxRetries(n int) TaskOption { return core.WithMaxRetries(n) }
 
 // --- Lifecycle ---
 
