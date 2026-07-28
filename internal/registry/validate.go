@@ -15,12 +15,13 @@ import (
 // identifier rules and the storage-prefix grammar.
 var depIDPattern = regexp.MustCompile(`^(@[a-z][a-z0-9_-]*/)?[a-z][a-z0-9_-]*$`)
 
-// ValidateDepID rejects dependency IDs that don't match the bare or
-// owner-prefixed shape. Used by AddDependency in place of ValidateName,
-// which is too restrictive (it forbids `/` and `@`).
-func ValidateDepID(spec string) {
+// ValidateDepID rejects module IDs that don't match the bare or owner-prefixed
+// shape. kind is the user-facing API name so startup panics identify the
+// declaration that failed. Used in place of ValidateName, which is too
+// restrictive (it forbids `/` and `@`).
+func ValidateDepID(kind, spec string) {
 	if !depIDPattern.MatchString(spec) {
-		panic("mirrorstack/registry: DependsOn(" + spec + ") must match `<id>` or `@<owner>/<id>` (lowercase, leading letter, [a-z0-9_-])")
+		panic("mirrorstack/registry: " + kind + "(" + spec + ") must match `<id>` or `@<owner>/<id>` (lowercase, leading letter, [a-z0-9_-])")
 	}
 }
 

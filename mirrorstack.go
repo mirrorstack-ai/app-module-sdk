@@ -459,11 +459,13 @@ func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
 // always returns (zero, false).
 func Resolve[T any](id string) (T, bool) { return core.Resolve[T](id) }
 
-// ContributesTo declares that this module pushes payload into host module's
-// slot — the contributor side of Provide. Zero-runtime: it becomes
-// manifest metadata and the platform (CLI in dev) performs the registration
-// after app-owner approval. Pair with ms.DependsOn(host). See core.ContributesTo.
-func ContributesTo(host, slot string, payload any) { core.ContributesTo(host, slot, payload) }
+// ContributesTo declares that this module pushes payload into a host module's
+// slot — the contributor side of Provide. hostSpec is an id or id@constraint;
+// see DependsOn for the full syntax. Zero-runtime: it becomes manifest metadata
+// and the platform (CLI in dev) performs registration after app-owner approval.
+func ContributesTo(hostSpec, slot string, payload any) {
+	core.ContributesTo(hostSpec, slot, payload)
+}
 
 // ExposeTable marks a table in this module's schema as read-only
 // SELECT-eligible for a depending module — the producer side of DependsOn's

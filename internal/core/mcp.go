@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/invopop/jsonschema"
-
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -60,11 +58,11 @@ func ToolPermission(name string) MCPToolOption {
 // Panics before Init or on schema derivation failure.
 func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error), opts ...MCPToolOption) {
 	m := mustDefault("MCPTool")
-	inputSchema, err := deriveSchema[In]()
+	inputSchema, err := deriveMCPSchema[In]()
 	if err != nil {
 		panic("mirrorstack: MCPTool(" + name + ") input schema derivation failed: " + err.Error())
 	}
-	outputSchema, err := deriveSchema[Out]()
+	outputSchema, err := deriveMCPSchema[Out]()
 	if err != nil {
 		panic("mirrorstack: MCPTool(" + name + ") output schema derivation failed: " + err.Error())
 	}
@@ -90,7 +88,7 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 // Panics before Init or on schema derivation failure.
 func MCPResource[Out any](name, description string, handler func(ctx context.Context) (Out, error)) {
 	m := mustDefault("MCPResource")
-	schema, err := deriveSchema[Out]()
+	schema, err := deriveMCPSchema[Out]()
 	if err != nil {
 		panic("mirrorstack: MCPResource(" + name + ") schema derivation failed: " + err.Error())
 	}
@@ -100,16 +98,6 @@ func MCPResource[Out any](name, description string, handler func(ctx context.Con
 		Schema:      schema,
 		Handler:     wrapMCPResourceHandler(handler),
 	})
-}
-
-func deriveSchema[T any]() (json.RawMessage, error) {
-	var zero T
-	// DoNotReference inlines the struct schema so the top level is a concrete
-	// {"type":"object",...} rather than invopop's default {"$ref":"#/$defs/..."}.
-	// The MCP spec requires inputSchema/outputSchema to be an object schema with
-	// type:"object"; a top-level $ref makes clients reject the whole tools/list.
-	r := &jsonschema.Reflector{DoNotReference: true}
-	return json.Marshal(r.Reflect(zero))
 }
 
 // wrapMCPToolHandler adapts a typed handler into the type-erased registry form.

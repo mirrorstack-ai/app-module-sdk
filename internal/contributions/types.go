@@ -39,9 +39,10 @@ var (
 // incoming payloads against the host's declared T at register time —
 // without the storage layer needing to know what T is.
 type Slot struct {
-	Key       string
-	validate  func(data json.RawMessage) error
-	schemaTag string
+	Key           string
+	validate      func(data json.RawMessage) error
+	schemaTag     string
+	payloadSchema json.RawMessage
 }
 
 // Validate runs the per-slot JSON validator against an incoming
@@ -118,6 +119,11 @@ func (r *Registry) Len() int {
 type SlotInfo struct {
 	Key       string `json:"key"`
 	SchemaTag string `json:"schemaTag,omitempty"`
+	// Payload is the full recursive JSON Schema of the slot's payload type.
+	// The validator is a closure that lives only in the host process; without
+	// this manifest metadata a contributor can discover the slot but not what
+	// payload to send.
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // List returns every declared slot's manifest projection, sorted by
@@ -129,7 +135,11 @@ func (r *Registry) List() []SlotInfo {
 	defer r.mu.RUnlock()
 	out := make([]SlotInfo, 0, len(r.slots))
 	for _, s := range r.slots {
-		out = append(out, SlotInfo{Key: s.Key, SchemaTag: s.schemaTag})
+		out = append(out, SlotInfo{
+			Key:       s.Key,
+			SchemaTag: s.schemaTag,
+			Payload:   slices.Clone(s.payloadSchema),
+		})
 	}
 	slices.SortFunc(out, func(a, b SlotInfo) int {
 		if a.Key < b.Key {
@@ -146,6 +156,6 @@ func (r *Registry) List() []SlotInfo {
 // NewSlot constructs a Slot with a validator closure. Generic
 // Provide[T] in the parent package builds the closure
 // where T is in scope.
-func NewSlot(key string, schemaTag string, validate func(json.RawMessage) error) Slot {
-	return Slot{Key: key, schemaTag: schemaTag, validate: validate}
+func NewSlot(key, schemaTag string, payloadSchema json.RawMessage, validate func(json.RawMessage) error) Slot {
+	return Slot{Key: key, schemaTag: schemaTag, payloadSchema: payloadSchema, validate: validate}
 }

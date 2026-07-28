@@ -938,7 +938,11 @@ func (m *Module) ProvideSlot(slot contributions.Slot) {
 func NewContributionSlot[T any](key string) contributions.Slot {
 	var zero T
 	schemaTag := fmt.Sprintf("%T", zero)
-	return contributions.NewSlot(key, schemaTag, func(data json.RawMessage) error {
+	payloadSchema, err := derivePayloadSchema[T]()
+	if err != nil {
+		panic("mirrorstack: Provide(" + key + ") payload schema derivation failed: " + err.Error())
+	}
+	return contributions.NewSlot(key, schemaTag, payloadSchema, func(data json.RawMessage) error {
 		var v T
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.DisallowUnknownFields()

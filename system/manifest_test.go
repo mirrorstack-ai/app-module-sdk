@@ -11,6 +11,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 )
 
@@ -479,5 +480,43 @@ func TestManifest_UIOmittedWhenNotRegistered(t *testing.T) {
 
 	if strings.Contains(rec.Body.String(), `"ui"`) {
 		t.Errorf("expected \"ui\" key omitted when no RegisterUI was called, got: %s", rec.Body.String())
+	}
+}
+
+// A slot's payload schema is worthless if it stops at the in-process registry:
+// the manifest is the ONLY channel a contributor who cannot read the host's
+// source has, so pin that it survives to the wire.
+func TestManifest_ProvidesCarryPayloadSchema(t *testing.T) {
+	t.Parallel()
+
+	contribReg := contributions.NewRegistry()
+	schema := json.RawMessage(`{"type":"object","properties":{"title":{"type":"string"}}}`)
+	if err := contribReg.Define(contributions.NewSlot("user-detail-blocks", "main.Block", schema, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := decodeManifest(t, ManifestHandler("oauth-core", "", "OAuth Core", "vpn_key", nil, nil, nil, registry.New(), contribReg))
+	if len(got.Provides) != 1 {
+		t.Fatalf("provides length = %d, want 1", len(got.Provides))
+	}
+	if got.Provides[0].Key != "user-detail-blocks" {
+		t.Errorf("provides[0].key = %q, want user-detail-blocks", got.Provides[0].Key)
+	}
+	if string(got.Provides[0].Payload) != string(schema) {
+		t.Errorf("provides[0].payload = %s, want %s", got.Provides[0].Payload, schema)
+	}
+}
+
+func TestManifest_ProvidesOmitPayloadWhenUnderived(t *testing.T) {
+	t.Parallel()
+
+	contribReg := contributions.NewRegistry()
+	if err := contribReg.Define(contributions.NewSlot("legacy", "", nil, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := manifestResponse(t, ManifestHandler("oauth-core", "", "OAuth Core", "vpn_key", nil, nil, nil, registry.New(), contribReg))
+	if strings.Contains(rec.Body.String(), `"payload"`) {
+		t.Errorf("expected \"payload\" key omitted for a slot with no schema, got: %s", rec.Body.String())
 	}
 }
