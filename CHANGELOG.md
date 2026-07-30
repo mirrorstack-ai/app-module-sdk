@@ -5,7 +5,7 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.3.0] - 2026-07-30
 
 Cross-module reads resolve **locally** when the producer runs in the same `mirrorstack dev --tunnel` session. The premise the dev plane was built on — "a dev module holds no socket to the platform DB" — is true of a *remote* producer and false of a *co-located* one: under `mirrorstack dev` the producer and the consumer are two processes sharing one Postgres and one app schema. Routing a co-located read over the platform proxy therefore returned the producer's **production** rows to a consumer whose own rows are local, which is wrong data rather than slow data.
 
