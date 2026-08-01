@@ -116,7 +116,9 @@ func (m *Module) Notify(ctx context.Context, n Notification) error {
 		Link:           n.Link,
 		Audience:       audience,
 	}
-	return postDispatchJSON(ctx, "ms.Notify", resolveNotifyURL(appID), appID, env)
+	return postDispatchJSON(ctx, "ms.Notify", resolveNotifyURL(appID), appID, env, map[string]string{
+		"X-MS-Service-Secret": moduleSessionSecret(),
+	})
 }
 
 // hasMessage reports whether a resolved locale map carries at least one

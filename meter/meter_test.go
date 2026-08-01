@@ -22,13 +22,14 @@ type capture struct {
 	path   string
 	appID  string
 	ct     string
+	secret []string
 	body   []byte
 }
 
 func (c *capture) get() capture {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return capture{hits: c.hits, method: c.method, path: c.path, appID: c.appID, ct: c.ct, body: c.body}
+	return capture{hits: c.hits, method: c.method, path: c.path, appID: c.appID, ct: c.ct, secret: c.secret, body: c.body}
 }
 
 // newDispatchStub starts an httptest server standing in for the dispatch usage
@@ -44,6 +45,7 @@ func newDispatchStub(t *testing.T, status int) (*Client, *capture) {
 		cap.path = r.URL.Path
 		cap.appID = r.Header.Get("X-MS-App-ID")
 		cap.ct = r.Header.Get("Content-Type")
+		cap.secret = r.Header.Values("X-MS-Service-Secret")
 		cap.body, _ = io.ReadAll(r.Body)
 		cap.mu.Unlock()
 		if status == 0 {
@@ -179,6 +181,42 @@ func TestRecord_PostsEventToUsageIngress(t *testing.T) {
 	}
 	if got.RecordedAtHint.IsZero() {
 		t.Error("recordedAtHint should be set")
+	}
+}
+
+// The usage ingress is the billable one: dispatch requires this header to match
+// the module's live tunnel session, so dropping it makes every ms.Record under
+// `mirrorstack dev --tunnel` 403 and silently stop metering.
+func TestRecord_SendsModuleSessionSecret(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "session-secret-1")
+	c, cap := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+
+	if err := c.Record(appCtx("a-456"), "transcode.minutes", 1); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got := cap.get().secret; len(got) != 1 || got[0] != "session-secret-1" {
+		t.Errorf("X-MS-Service-Secret values = %q, want [session-secret-1]", got)
+	}
+}
+
+// A deployed module has no tunnel session secret. Metering is non-fatal by
+// contract, so an unset secret must still POST (and let dispatch reject) rather
+// than error early or put a blank header on the wire.
+func TestRecord_WithoutModuleSessionSecretStillPosts(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "")
+	c, cap := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+
+	if err := c.Record(appCtx("a-456"), "transcode.minutes", 1); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	got := cap.get()
+	if got.hits != 1 {
+		t.Errorf("usage ingress hit %d times, want 1", got.hits)
+	}
+	if len(got.secret) != 0 {
+		t.Errorf("X-MS-Service-Secret values = %q, want no header", got.secret)
 	}
 }
 

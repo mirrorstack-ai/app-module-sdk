@@ -179,6 +179,58 @@ func TestNotify_PostsFromContextAppID(t *testing.T) {
 	}
 }
 
+// Dispatch's notification ingress is mounted outside all auth middleware and
+// now gates on X-MS-Service-Secret matching the module's live tunnel session.
+// If this header stops going out, ms.Notify silently 403s for every module
+// under `mirrorstack dev --tunnel`.
+func TestNotify_SendsModuleSessionSecret(t *testing.T) {
+	var gotSecret string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSecret = r.Header.Get("X-MS-Service-Secret")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "session-secret-1")
+
+	m, _ := New(Config{ID: "billing"})
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	if err := m.Notify(ctx, Notification{Title: Text("Hello")}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if gotSecret != "session-secret-1" {
+		t.Errorf("X-MS-Service-Secret = %q, want session-secret-1", gotSecret)
+	}
+}
+
+// A deployed (non-tunnel) module has no session secret. That must stay a
+// best-effort POST that dispatch rejects, never a client-side hard error or a
+// blank header — notification delivery may not break a module's request path.
+func TestNotify_WithoutModuleSessionSecretStillPosts(t *testing.T) {
+	var hits int
+	var gotSecretValues []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		gotSecretValues = r.Header.Values("X-MS-Service-Secret")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "")
+
+	m, _ := New(Config{ID: "billing"})
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	if err := m.Notify(ctx, Notification{Title: Text("Hello")}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("dispatch hit %d times, want 1", hits)
+	}
+	if len(gotSecretValues) != 0 {
+		t.Errorf("X-MS-Service-Secret values = %q, want no header", gotSecretValues)
+	}
+}
+
 func TestNotify_ValidationErrorsWithoutHTTP(t *testing.T) {
 	var hit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

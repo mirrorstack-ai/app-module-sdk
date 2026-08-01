@@ -68,7 +68,7 @@ func (m *Module) Emit(ctx context.Context, name string, payload any) error {
 		SentAt:         time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:        payload,
 	}
-	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env)
+	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env, nil)
 }
 
 // Emit publishes an event on the default module created by Init(). Panics
