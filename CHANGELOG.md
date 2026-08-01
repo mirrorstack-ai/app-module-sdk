@@ -5,6 +5,19 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1] - 2026-08-02
+
+### Fixed
+- **The meter and `ms.Notify` now send the module's tunnel-session secret.** Dispatch's `POST /apps/{appID}/usage` and `/apps/{appID}/notifications` are mounted outside all auth middleware and used to gate the sender on session *existence* alone, so an unauthenticated caller on the open internet could POST forged billable usage events for any app with a tunnel-live module. api-platform now requires `X-MS-Service-Secret` to constant-time-match the live session's `InternalSecret` (the same gate module-log ingest and read-exposed already used); this SDK never sent that header on either transport.
+
+  The value is the one the CLI already mints per `mirrorstack dev --tunnel` session, injects into the module process env, and sends on the WS `register` frame — so both ends carry the same secret by construction and nothing new needs configuring. `ms.Emit` and `ms.Call` are deliberately unchanged: the credential is opted into per call site rather than blanket-applied by the shared `postDispatchJSON`, so no surface acquires the session secret by accident.
+
+  An unset secret stays best-effort — no header, no early error, the request is still sent — because metering must never break a module's own request path, and dispatch is the fail-closed enforcement point. That is intentionally unlike `ms.DependencyDB`, which hard-errors.
+
+  ⚠️ **Upgrade ordering matters.** api-platform's side of this is already merged, so a module still on **v0.3.0 will 403 on usage and notifications** once that reaches an environment. Bump to v0.3.1 and rebuild your modules **before** the platform deploys. A CLI old enough not to send `internal_secret` on its register frame is also now rejected on these two routes, as it already was on read-exposed and log ingest.
+
+  Part of mirrorstack-ai/mirrorstack-core-v2#337. Pairs with api-platform#438 — the two must land together.
+
 ## [v0.3.0] - 2026-07-30
 
 Cross-module reads resolve **locally** when the producer runs in the same `mirrorstack dev --tunnel` session. The premise the dev plane was built on — "a dev module holds no socket to the platform DB" — is true of a *remote* producer and false of a *co-located* one: under `mirrorstack dev` the producer and the consumer are two processes sharing one Postgres and one app schema. Routing a co-located read over the platform proxy therefore returned the producer's **production** rows to a consumer whose own rows are local, which is wrong data rather than slow data.
