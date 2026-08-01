@@ -47,6 +47,12 @@ func dispatchBase() string {
 	return strings.TrimRight(base, "/")
 }
 
+// moduleSessionSecret returns the dev-tunnel credential that binds this module
+// process to the same live session dispatch registered for it. This is the
+// outbound session-identity seam already used by dependency_db.go and the
+// CLI's module-log ingest, not the inbound MS_PLATFORM_TOKEN hierarchy.
+func moduleSessionSecret() string { return os.Getenv("MS_INTERNAL_SECRET") }
+
 // appIDFromContext reads the current app id from the request context — the
 // same identity the SDK injects for handlers. An empty app id is an error
 // (no panic): every dispatch surface needs an app scope. op names the caller
@@ -58,12 +64,17 @@ func appIDFromContext(ctx context.Context, op string) (string, error) {
 	return "", fmt.Errorf("mirrorstack: %s requires an app-scoped context (no AppID in auth identity)", op)
 }
 
-// postDispatchJSON marshals payload and POSTs it to url with the module->
-// dispatch header set (Content-Type + X-MS-App-ID — no token; the dispatch
-// authenticates the sender by transport, never by envelope assertion). A
-// non-2xx response is returned as an error prefixed with op ("ms.Emit",
-// "ms.Notify"), body truncated to ~2 KB.
-func postDispatchJSON(ctx context.Context, op, url, appID string, payload any) error {
+// postDispatchJSON marshals payload and POSTs it to url with the base module->
+// dispatch headers (Content-Type + X-MS-App-ID) plus whatever extraHeaders the
+// CALLER opts into. Credentials are per-surface, not blanket: only the routes
+// dispatch actually gates on a secret pass one, so a surface can never acquire
+// the session credential by accident. An empty value is skipped rather than
+// written as a blank header — dispatch reads a blank as "no credential", and a
+// blank header is indistinguishable on the wire from an authentication bug.
+// Whatever is sent, dispatch still re-derives sender identity itself and never
+// trusts an envelope assertion. A non-2xx response is returned as an error
+// prefixed with op ("ms.Emit", "ms.Notify"), body truncated to ~2 KB.
+func postDispatchJSON(ctx context.Context, op, url, appID string, payload any, extraHeaders map[string]string) error {
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -74,6 +85,11 @@ func postDispatchJSON(ctx context.Context, op, url, appID string, payload any) e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-MS-App-ID", appID)
+	for name, value := range extraHeaders {
+		if value != "" {
+			req.Header.Set(name, value)
+		}
+	}
 
 	resp, err := callHTTP.Do(req)
 	if err != nil {

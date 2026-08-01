@@ -471,6 +471,18 @@ func (c *Client) dispatch(ctx context.Context, appID string, event Event) error 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-MS-App-ID", appID)
+	// The usage ingress is billable: dispatch requires this header to
+	// constant-time-match the module's live tunnel-session secret, or an
+	// unauthenticated caller could forge usage events for any app with a
+	// tunnel-live module. MS_INTERNAL_SECRET is the CLI-exported per-session
+	// value dispatch stored at register time — read here rather than through
+	// internal/core's moduleSessionSecret because meter is a separate package
+	// and this does not warrant a new exported API. Best-effort, not fatal: a
+	// deployed module legitimately has no tunnel session, and metering must
+	// never break a module's request path.
+	if secret := os.Getenv("MS_INTERNAL_SECRET"); secret != "" {
+		req.Header.Set("X-MS-Service-Secret", secret)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
