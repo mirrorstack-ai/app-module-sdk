@@ -572,3 +572,93 @@ func TestEventID_StableAcrossRetry(t *testing.T) {
 		t.Errorf("EventID changed across retry: first=%q retry=%q (ON CONFLICT cannot dedupe)", first.EventID, retried.EventID)
 	}
 }
+
+// provisionedCredential stands in for what the deploy provisioner injects as
+// MS_INTERNAL_SECRET on a DEPLOYED module: the per-module credential dispatch
+// recomputes from the platform secret and the module's catalog UUID. Its
+// internal structure is deliberately not modelled here — the SDK neither
+// derives nor parses it, and duplicating the platform's derivation format in
+// this repo would create a second copy to drift.
+const provisionedCredential = "3f5a9c1e7b2d48a6f0c3e8b5d1a4720965fe83cb47d20a19e6b8f3c5d7a10e42"
+
+// The fixture itself must stay a realistic opaque credential: 64 lowercase hex
+// characters. If someone "tidies" it into something shorter or upper-cased, the
+// verbatim-passthrough test below stops proving anything about real values.
+func TestProvisionedCredentialFixtureIsOpaqueHex(t *testing.T) {
+	if len(provisionedCredential) != 64 {
+		t.Fatalf("fixture length = %d, want 64", len(provisionedCredential))
+	}
+	for _, r := range provisionedCredential {
+		if strings.IndexRune("0123456789abcdef", r) < 0 {
+			t.Fatalf("fixture contains non-lowercase-hex rune %q", r)
+		}
+	}
+}
+
+// THE DEPLOYED-PLANE WIRE CONTRACT. A deployed module has no tunnel session; it
+// authenticates with the credential the provisioner injected. Dispatch does a
+// constant-time BYTE compare against a value it recomputes independently, so
+// the SDK must forward the env value verbatim — any trimming, case-folding,
+// re-encoding or prefixing here is an unattributable 403 in production, and
+// metering fails silently by contract.
+func TestRecord_SendsProvisionedModuleCredentialVerbatim(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", provisionedCredential)
+	c, cap := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+
+	if err := c.Record(appCtx("a-456"), "transcode.minutes", 1); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	got := cap.get().secret
+	// Exactly one value: a duplicated header is ambiguous on the wire and some
+	// proxies forward only the first.
+	if len(got) != 1 {
+		t.Fatalf("X-MS-Service-Secret values = %q, want exactly 1", got)
+	}
+	if got[0] != provisionedCredential {
+		t.Errorf("X-MS-Service-Secret = %q, want the env value forwarded byte-for-byte (%q)", got[0], provisionedCredential)
+	}
+}
+
+// The credential must never reach a log line or an error string: ms.Record's
+// error is what a module logs on the non-fatal metering path, so leaking it
+// there publishes the module's callback credential into CloudWatch.
+func TestRecord_NeverLeaksCredentialIntoError(t *testing.T) {
+	t.Run("non-2xx response", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", provisionedCredential)
+		c, _ := newDispatchStub(t, http.StatusForbidden)
+		declareCounter(t, c, "transcode.minutes")
+
+		err := c.Record(appCtx("a-456"), "transcode.minutes", 1)
+		if err == nil {
+			t.Fatal("expected an error on a 403 usage ingress")
+		}
+		if strings.Contains(err.Error(), provisionedCredential) {
+			t.Errorf("error leaks the module credential: %v", err)
+		}
+	})
+
+	t.Run("transport failure", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", provisionedCredential)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+		}))
+		t.Setenv("MS_DISPATCH_URL", srv.URL)
+		c, err := New()
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		// Close before recording so the POST fails at the transport layer —
+		// the path where net/http builds an error out of the request.
+		srv.Close()
+		declareCounter(t, c, "transcode.minutes")
+
+		err = c.Record(appCtx("a-456"), "transcode.minutes", 1)
+		if err == nil {
+			t.Fatal("expected a transport error against a closed server")
+		}
+		if strings.Contains(err.Error(), provisionedCredential) {
+			t.Errorf("transport error leaks the module credential: %v", err)
+		}
+	})
+}

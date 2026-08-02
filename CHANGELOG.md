@@ -5,6 +5,26 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.2] - 2026-08-02
+
+**No wire change. Nothing about what this SDK sends is different from v0.3.1** — this release documents and test-pins a contract that already holds, so that the platform can start authenticating *deployed* modules without any module rebuild.
+
+### Added
+- **The deployed-plane callback contract is now pinned by tests.** A deployed module (a provisioned Lambda, no `mirrorstack dev --tunnel` session) calls back into dispatch for usage ingest and notifications, and dispatch must be able to authenticate it as that specific module. That credential arrives the same way the tunnel one always has — as `MS_INTERNAL_SECRET`, forwarded as `X-MS-Service-Secret` — except that on the deployed plane the deploy provisioner injects a **per-module** value rather than the CLI injecting a per-session one. Dispatch constant-time **byte**-compares it against a value it recomputes independently, so the SDK forwarding it verbatim is a hard requirement: trimming, case-folding, re-encoding or prefixing it would produce an unattributable 403, and because metering is non-fatal by contract that 403 is **silent** — usage would simply stop being billed with nothing in the module's own logs. `ms.Record` and `ms.Notify` now each assert verbatim single-valued forwarding of a realistic opaque credential.
+- **The credential is pinned as un-loggable.** `ms.Record`'s error is exactly what a module logs on the non-fatal metering path, so leaking the credential into it would publish a module's callback credential straight into CloudWatch. Both the non-2xx and the transport-failure error paths of `ms.Record`, and the non-2xx path of `ms.Notify`, now assert the credential does not appear in the returned error.
+
+### Changed
+- **`resolveUsageURL`'s "swap the body of this function when #146 lands" instruction is resolved and removed — the answer was that no swap is needed.** #146 (the production module→dispatch transport) turned out to require no SDK code at all: the deployed leg is the same `MS_DISPATCH_URL` base the dev leg uses, and the deploy provisioner injects that variable into every module Lambda. The comment is replaced with the reason, plus an explicit warning **not** to repoint the `host.docker.internal:8083` fallback at production — that fallback is what makes a full local platform stack work, and defaulting it to prod would make a local stack silently emit usage against the real dispatch. `resolveNotifyURL` carried the same now-obsolete `#146` marker and gets the same treatment.
+- **`moduleSessionSecret` is documented as no longer tunnel-only.** It now carries either credential depending on plane. The function name is deliberately unchanged: renaming it would churn every call site for zero behavioral gain.
+- **`ms.DependencyDB`'s read-exposed proxy is documented as staying tunnel-only, by decision.** It is the one module→dispatch surface *not* widened to accept the per-module credential, and its "run under `mirrorstack dev --tunnel`" error correctly stays: the deployed plane cannot reach that code path (a trusted-payload invoke routes to `resultDeployed`), because a deployed consumer reads a producer through the platform-injected `Dependencies` manifest under the install-time GRANT ceiling, never through read-exposed.
+
+### Upgrade notes
+- **Nothing forces you to upgrade, and upgrading changes no behavior.** A module still on v0.3.1 authenticates on the deployed plane exactly as one on v0.3.2 does. Modules must still be on **at least v0.3.1** — v0.3.0 sends no credential at all and 403s on usage and notifications.
+- **Ordering lives entirely on the platform side.** Dispatch must accept the per-module credential *before* the provisioner starts injecting it; otherwise the first provisioned module 403s on every `ms.Record`/`ms.Notify`. This SDK release is not part of that ordering.
+- The per-module credential's isolation guarantee is conditional on dispatch no longer shipping the platform secret to modules in the invoke envelope (`X-MS-Internal-Secret`), which is tracked separately.
+
+Part of mirrorstack-ai/mirrorstack-core-v2#338 (step 6). Closes core-v2#337 defect 1 together with the platform side.
+
 ## [v0.3.1] - 2026-08-02
 
 ### Fixed

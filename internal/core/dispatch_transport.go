@@ -47,10 +47,21 @@ func dispatchBase() string {
 	return strings.TrimRight(base, "/")
 }
 
-// moduleSessionSecret returns the dev-tunnel credential that binds this module
-// process to the same live session dispatch registered for it. This is the
-// outbound session-identity seam already used by dependency_db.go and the
-// CLI's module-log ingest, not the inbound MS_PLATFORM_TOKEN hierarchy.
+// moduleSessionSecret returns the outbound credential that binds this module
+// process to an identity dispatch can verify. This is the outbound
+// module-identity seam already used by dependency_db.go, meter and the CLI's
+// module-log ingest, NOT the inbound MS_PLATFORM_TOKEN hierarchy.
+//
+// No longer tunnel-only despite the name. MS_INTERNAL_SECRET now carries either
+// the per-session secret the CLI mints under `mirrorstack dev --tunnel`, or —
+// on a deployed module — the per-module credential the deploy provisioner
+// injects, which dispatch recomputes from the platform secret and this module's
+// catalog UUID. Both are opaque here and are sent verbatim; dispatch does a
+// constant-time compare, so reshaping the value is a silent 403.
+//
+// The name is kept deliberately: renaming it would churn every call site for no
+// behavioral gain. Empty means "no credential" and callers skip the header
+// rather than sending it blank.
 func moduleSessionSecret() string { return os.Getenv("MS_INTERNAL_SECRET") }
 
 // appIDFromContext reads the current app id from the request context — the
