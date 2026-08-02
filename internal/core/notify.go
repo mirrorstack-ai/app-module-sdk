@@ -54,10 +54,11 @@ type notifyEnvelope struct {
 //
 //	{base}/apps/{appID}/notifications
 //
-// DEV/DISPATCH TRANSPORT. Prod notification-ingress resolution is task #146 —
-// this resolver (path) and dispatchBase (base) are the seams where that plugs
-// in, mirroring resolveEventBusURL. Notify's marshal/auth/error contract
-// (dispatch_transport.go) stays put.
+// #146 is landed and needed no change here: the deployed notification ingress
+// is the same path on the same base, and the deploy provisioner injects
+// MS_DISPATCH_URL into every module Lambda, so dispatchBase resolves the real
+// dispatch on both planes. What differs between planes is only the CREDENTIAL
+// Notify sends (see moduleSessionSecret), not this URL.
 func resolveNotifyURL(appID string) string {
 	return fmt.Sprintf("%s/apps/%s/notifications", dispatchBase(), appID)
 }
@@ -80,9 +81,12 @@ func resolveNotifyURL(appID string) string {
 // empty map). An unset Audience defaults to
 // NotifyAdmins; any value other than NotifyAdmins/NotifyAllMembers is an
 // error. A non-2xx response from the dispatch is returned as an error with
-// the response body truncated to ~2 KB.
+// the response body truncated to ~2 KB — never with the credential.
 //
-// DEV/DISPATCH TRANSPORT — see resolveNotifyURL for the prod (#146) seam.
+// Works on both planes: under `mirrorstack dev --tunnel` the credential is the
+// CLI's per-session secret; on a deployed module it is the per-module value the
+// deploy provisioner injects. Both arrive as MS_INTERNAL_SECRET and are sent
+// verbatim (see moduleSessionSecret).
 func (m *Module) Notify(ctx context.Context, n Notification) error {
 	appID, err := appIDFromContext(ctx, "Notify")
 	if err != nil {

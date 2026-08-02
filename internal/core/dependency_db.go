@@ -407,6 +407,14 @@ func (q *DependencyQuery) result(ctx context.Context, deployed bool) (*Dependenc
 	// (the same seam the module-log ingest rides). Deliberately NOT the
 	// MS_PLATFORM_TOKEN hierarchy: that is a different per-session credential
 	// for inbound proxy validation, not this session-identity seam.
+	//
+	// Unlike meter and Notify, this branch stays TUNNEL-ONLY, so the error below
+	// may keep naming `mirrorstack dev --tunnel` as the fix. It is unreachable
+	// on the deployed plane by construction: result() routes a trusted-payload
+	// invoke to resultDeployed above, and a deployed consumer reads a producer
+	// through the platform-injected Dependencies manifest under the install-time
+	// GRANT ceiling — never through read-exposed. Read-exposed is therefore NOT
+	// widened to accept the provisioner-injected per-module credential.
 	secret := os.Getenv("MS_INTERNAL_SECRET")
 	if secret == "" {
 		return nil, fmt.Errorf("%w: no dev-tunnel session secret (MS_INTERNAL_SECRET is unset — run under `mirrorstack dev --tunnel`)", ErrDependencyUnauthorized)

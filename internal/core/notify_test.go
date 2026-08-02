@@ -328,3 +328,58 @@ func TestNotify_Non2xxBodyIsTruncatedTo2KB(t *testing.T) {
 		t.Errorf("error message is %d bytes, want upstream body truncated to ~2KB", got)
 	}
 }
+
+// notifyProvisionedCredential mirrors meter's fixture: the opaque per-module
+// credential the deploy provisioner injects as MS_INTERNAL_SECRET on a deployed
+// module. ms.Notify rides the same header as the meter, so it must forward the
+// value with the same discipline.
+const notifyProvisionedCredential = "3f5a9c1e7b2d48a6f0c3e8b5d1a4720965fe83cb47d20a19e6b8f3c5d7a10e42"
+
+// THE DEPLOYED-PLANE WIRE CONTRACT for notifications. A deployed module has no
+// tunnel session and authenticates with the injected per-module credential;
+// dispatch constant-time byte-compares it against a value it recomputes, so any
+// reshaping in postDispatchJSON is a silent 403 in production.
+func TestNotify_SendsProvisionedModuleCredentialVerbatim(t *testing.T) {
+	var gotValues []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotValues = r.Header.Values("X-MS-Service-Secret")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", notifyProvisionedCredential)
+
+	m, _ := New(Config{ID: "billing"})
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	if err := m.Notify(ctx, Notification{Title: Text("Hello")}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if len(gotValues) != 1 {
+		t.Fatalf("X-MS-Service-Secret values = %q, want exactly 1", gotValues)
+	}
+	if gotValues[0] != notifyProvisionedCredential {
+		t.Errorf("X-MS-Service-Secret = %q, want the env value forwarded byte-for-byte", gotValues[0])
+	}
+}
+
+// ms.Notify's error is returned to module code that typically logs it. It must
+// carry the dispatch response, never the credential that produced it.
+func TestNotify_NeverLeaksCredentialIntoError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("unknown_sender"))
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", notifyProvisionedCredential)
+
+	m, _ := New(Config{ID: "billing"})
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	err := m.Notify(ctx, Notification{Title: Text("Hello")})
+	if err == nil {
+		t.Fatal("expected an error on a 403 notification ingress")
+	}
+	if strings.Contains(err.Error(), notifyProvisionedCredential) {
+		t.Errorf("error leaks the module credential: %v", err)
+	}
+}

@@ -438,11 +438,20 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 // ms.Call / ms.Emit use. Dispatch re-derives the authoritative app/module from
 // the authenticated invoker; the appID in the path is the SDK's hint scope.
 //
-// DEV/DISPATCH TRANSPORT. The prod module->dispatch leg rides task #146 (the
-// same seam ms.Emit's resolveEventBusURL documents); the dispatch->billing leg
-// is already prod-ready. When #146 lands, swap the body of this function (and
-// only this function) to consult the prod transport; Record's
-// marshal/auth/error contract stays put.
+// #146 IS LANDED, AND THIS BODY ALREADY IS THE PROD TRANSPORT — do not swap it.
+// The previous comment here said to "swap the body of this function (and only
+// this function) to consult the prod transport" once #146 shipped. That turned
+// out to require no code: the prod module->dispatch leg is the SAME
+// MS_DISPATCH_URL base, and the deploy provisioner now injects it into every
+// module Lambda's environment (api-platform#439's moduleEnvironment, which
+// injects exactly MS_DISPATCH_URL + MS_INTERNAL_SECRET). A deployed module
+// therefore resolves the real dispatch through the line below, unchanged.
+//
+// Keep the host.docker.internal fallback. It is not dead code and it must not
+// be repointed at production: it is what makes a full LOCAL platform stack work,
+// and defaulting to prod would make a local stack silently bill against the real
+// dispatch. Its only failure mode — an unset MS_DISPATCH_URL in an environment
+// with no local stack — is a connection error the caller already reports.
 func resolveUsageURL(appID string) string {
 	base := os.Getenv("MS_DISPATCH_URL")
 	if base == "" {
@@ -472,14 +481,38 @@ func (c *Client) dispatch(ctx context.Context, appID string, event Event) error 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-MS-App-ID", appID)
 	// The usage ingress is billable: dispatch requires this header to
-	// constant-time-match the module's live tunnel-session secret, or an
-	// unauthenticated caller could forge usage events for any app with a
-	// tunnel-live module. MS_INTERNAL_SECRET is the CLI-exported per-session
-	// value dispatch stored at register time — read here rather than through
-	// internal/core's moduleSessionSecret because meter is a separate package
-	// and this does not warrant a new exported API. Best-effort, not fatal: a
-	// deployed module legitimately has no tunnel session, and metering must
-	// never break a module's request path.
+	// constant-time-match a credential it can tie to THIS module, or an
+	// unauthenticated caller could forge usage events for any app. The value is
+	// whatever MS_INTERNAL_SECRET holds, and it now has TWO sources depending on
+	// which plane the module runs in — both opaque to the SDK, which never
+	// derives, parses or reshapes it:
+	//
+	//   dev/tunnel: the per-session secret the CLI mints for
+	//     `mirrorstack dev --tunnel` and dispatch stored at register time.
+	//     Dispatch compares it to the live session's InternalSecret.
+	//   deployed:   a per-module credential the deploy provisioner injects into
+	//     the module Lambda's environment. Dispatch recomputes it from the
+	//     platform secret and this module's catalog UUID and compares.
+	//
+	// The SDK cannot compute the deployed form and must not try: deriving needs
+	// the platform secret (which a third-party module process must never hold —
+	// it would let one module mint every other module's credential) and this
+	// module's catalog UUID (which nothing in the SDK reads). Injection is what
+	// keeps one module's leaked credential from proving anything about another.
+	//
+	// Send it VERBATIM. Dispatch does a constant-time byte compare, so any
+	// trimming, case-folding or re-encoding here is a silent 403 in production.
+	//
+	// Read directly rather than through internal/core's moduleSessionSecret
+	// because meter is a separate package and this does not warrant a new
+	// exported API. Best-effort, not fatal: metering must never break a
+	// module's request path, and dispatch is the fail-closed enforcement point.
+	// An empty value is skipped, never written as a blank header — dispatch
+	// reads a blank as "no credential", and on the wire a blank header is
+	// indistinguishable from an authentication bug.
+	//
+	// NEVER log this value and never put it in an error. The non-2xx path below
+	// deliberately reports req.URL.Path and the response body only.
 	if secret := os.Getenv("MS_INTERNAL_SECRET"); secret != "" {
 		req.Header.Set("X-MS-Service-Secret", secret)
 	}
