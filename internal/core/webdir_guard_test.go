@@ -3,6 +3,7 @@ package core
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // checkUIServable exists because of a real outage-shaped bug: a module declared
@@ -34,6 +35,38 @@ func TestCheckUIServable_DeclaredPagesWithoutWebDir(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
+	}
+}
+
+// The guard is worthless if Start stops calling it, and every other test here
+// calls checkUIServable directly — they would all stay green if the call site
+// were deleted. This one exercises Start itself.
+//
+// Start is run on a goroutine with a deadline rather than called inline: when
+// the guard IS wired it returns the error immediately, but an unwired Start
+// falls through to ListenAndServe and never returns. Waiting inline would turn
+// the regression into a ten-minute package timeout instead of a failure that
+// names itself.
+func TestStart_RefusesDeclaredUIWithoutWebDir(t *testing.T) {
+	m, _ := New(Config{ID: "demo"})
+	m.RegisterUI(ModuleUI{
+		DefaultPages: []UIPage{{Route: "/", Title: "Settings", Export: "mountSettings"}},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- m.Start() }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start() = nil; want the checkUIServable error")
+		}
+		if !strings.Contains(err.Error(), "WebDir") {
+			t.Errorf("Start() = %v; want the WebDir guard error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start() did not return — it got past the UI guard and reached the listener, " +
+			"so checkUIServable is no longer wired into Start")
 	}
 }
 
