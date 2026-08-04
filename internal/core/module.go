@@ -577,6 +577,37 @@ func RequirePermission(name string) func(http.Handler) http.Handler {
 //   - Task worker (MS_TASK_WORKER_MODE=true): polls SQS for background tasks
 //   - Otherwise: HTTP server on :PORT (default 8080) for local development
 //
+// checkUIServable rejects the one combination that is always a mistake:
+// RegisterUI declared a surface, but Config.WebDir is empty so ms.Start never
+// mounts a directory behind GET /__mirrorstack/web/*.
+//
+// Nothing else catches it. The manifest still advertises the page, the module
+// still builds, its bundle still builds, and CI still passes — the platform
+// dynamically imports /__mirrorstack/web/index.js, gets a 404, and the admin
+// sees "Couldn't load module bundle". The failure is entirely in the wiring
+// between a declaration and the runtime meant to serve it, so it only ever
+// shows up in a browser.
+//
+// A module with no UI is fine, and a module with WebDir and no UI is fine too
+// (it may serve assets a contribution renders). Only declared-but-unservable
+// is contradictory, and it is worth failing the process for: the module is
+// advertising a surface it cannot deliver.
+func (m *Module) checkUIServable() error {
+	if m.config.WebDir != "" {
+		return nil
+	}
+	ui := m.registry.UI()
+	if ui == nil || (len(ui.DefaultPages) == 0 && len(ui.Components) == 0) {
+		return nil
+	}
+	return fmt.Errorf(
+		"mirrorstack: RegisterUI declared %d page(s) and %d component(s) but Config.WebDir is empty — "+
+			"the bundle route GET /__mirrorstack/web/* is not mounted, so the platform will 404 when it "+
+			"imports the bundle. Set WebDir (conventionally \"web/dist\") in ms.Init, or drop the RegisterUI call",
+		len(ui.DefaultPages), len(ui.Components),
+	)
+}
+
 // Lambda wins if both env vars are set (they are mutually exclusive in
 // production but this ordering is a safety net).
 func (m *Module) Start() error {
@@ -591,6 +622,10 @@ func (m *Module) Start() error {
 
 	if runtime.IsTaskWorker() {
 		return m.startTaskWorker()
+	}
+
+	if err := m.checkUIServable(); err != nil {
+		return err
 	}
 
 	if m.devMode {
