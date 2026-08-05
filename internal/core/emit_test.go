@@ -115,6 +115,33 @@ func TestEmit_PostsEnvelopeFromContextAppID(t *testing.T) {
 	}
 }
 
+// The event bus rejects a sender carrying no X-MS-Service-Secret before it
+// looks anything up, so omitting it made every Emit fail 403 unknown_sender —
+// silently, because Emit is best-effort. Nothing else caught it: the envelope
+// was correct, the URL was correct, and the module's own log was the only place
+// the failure appeared. Assert the credential, not just the payload.
+func TestEmit_SendsServiceSecretHeader(t *testing.T) {
+	var gotSecret string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSecret = r.Header.Get("X-MS-Service-Secret")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"delivered":0}`))
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "sess-secret-xyz")
+
+	m, _ := New(Config{ID: "billing"})
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
+	if err := m.Emit(ctx, "payment.captured", map[string]any{"amount": 100}); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+
+	if gotSecret != "sess-secret-xyz" {
+		t.Errorf("X-MS-Service-Secret = %q, want the session secret — the event bus 403s without it", gotSecret)
+	}
+}
+
 func TestEmit_EmptyAppContextErrorsWithoutHTTP(t *testing.T) {
 	var hit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

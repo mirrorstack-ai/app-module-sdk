@@ -68,7 +68,15 @@ func (m *Module) Emit(ctx context.Context, name string, payload any) error {
 		SentAt:         time.Now().UTC().Format(time.RFC3339Nano),
 		Payload:        payload,
 	}
-	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env, nil)
+	// The event bus rejects a sender with no X-MS-Service-Secret before it looks
+	// anything up, so passing nil headers here meant every Emit came back
+	// 403 unknown_sender ("event sender is not a live module") — a message that
+	// points at tunnel liveness rather than at the missing credential it
+	// actually describes. ms.Notify and the dependency read proxy send the same
+	// secret; Emit was the one caller that did not.
+	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env, map[string]string{
+		"X-MS-Service-Secret": moduleSessionSecret(),
+	})
 }
 
 // Emit publishes an event on the default module created by Init(). Panics
