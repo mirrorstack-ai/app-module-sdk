@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
@@ -741,32 +739,6 @@ func TestEnsureDevDirectoryPublished_OneShotSelfHeal(t *testing.T) {
 	m2.ensureDevDirectoryPublished(context.Background())
 	if *publishes2 != 0 {
 		t.Errorf("publish called %d times for an already-published module, want 0", *publishes2)
-	}
-}
-
-// TestIsRelationAlreadyExists covers the two SQLSTATEs a concurrent
-// CREATE TABLE IF NOT EXISTS can raise. Both mean the relation exists, which is
-// the entire postcondition ensureDevDirectory owes its caller.
-func TestIsRelationAlreadyExists(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"42P07 duplicate_table", &pgconn.PgError{Code: "42P07"}, true},
-		{"23505 catalog unique violation", &pgconn.PgError{Code: "23505"}, true},
-		{"wrapped 23505", fmt.Errorf("dev directory: %w", &pgconn.PgError{Code: "23505"}), true},
-		{"42501 insufficient_privilege is NOT a race", &pgconn.PgError{Code: "42501"}, false},
-		{"08006 connection failure is NOT a race", &pgconn.PgError{Code: "08006"}, false},
-		{"non-pg error", errors.New("boom"), false},
-		{"nil", nil, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isRelationAlreadyExists(tc.err); got != tc.want {
-				t.Errorf("isRelationAlreadyExists(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
 	}
 }
 

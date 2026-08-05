@@ -86,7 +86,9 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	if err := h.storage.Upsert(r.Context(), q, slotKey, id, body); err != nil {
+	if err := h.storage.WithTable(r.Context(), q, func() error {
+		return h.storage.Upsert(r.Context(), q, slotKey, id, body)
+	}); err != nil {
 		httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 		return
 	}
@@ -111,7 +113,9 @@ func (h *Handlers) unregister(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	if err := h.storage.Delete(r.Context(), q, slotKey, id); err != nil {
+	if err := h.storage.WithTable(r.Context(), q, func() error {
+		return h.storage.Delete(r.Context(), q, slotKey, id)
+	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			httputil.JSON(w, http.StatusNotFound, httputil.ErrorResponse{Error: "contribution not found"})
 			return
@@ -139,8 +143,12 @@ func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	out, err := h.storage.List(r.Context(), q, slotKey)
-	if err != nil {
+	var out []Contribution
+	if err := h.storage.WithTable(r.Context(), q, func() error {
+		var listErr error
+		out, listErr = h.storage.List(r.Context(), q, slotKey)
+		return listErr
+	}); err != nil {
 		httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 		return
 	}

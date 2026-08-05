@@ -94,8 +94,21 @@ type UninstallResult struct {
 	Status string `json:"status"`
 }
 
-// InstallHandler returns an http.HandlerFunc that applies all migrations
-// from sqlFS in numeric ascending order.
+// Provisioner is SDK-owned per-app setup the install and upgrade handlers run
+// BEFORE the author's migrations, inside the already-injected lifecycle context
+// (schema + credential). Nil means this scope has nothing to provision.
+//
+// It exists because some per-app state belongs to the SDK rather than to the
+// module author's sql/app set — today the contributions store — and this is the
+// only window on the deployed plane where the SDK holds an app schema together
+// with a credential allowed to create tables in it. A failure fails the
+// lifecycle call: reporting install success over a module whose declared
+// contribution slots have no store is the silent half-install this hook exists
+// to remove.
+type Provisioner func(ctx context.Context) error
+
+// InstallHandler returns an http.HandlerFunc that runs provision (when
+// non-nil), then applies all migrations from sqlFS in numeric ascending order.
 //
 // The SDK does NOT track which migrations were previously applied — it is a
 // stateless executor. The platform decides when install is appropriate (a
@@ -103,10 +116,13 @@ type UninstallResult struct {
 // calls install at most once per (scope, target). Calling install twice
 // will re-run every migration and likely fail with "relation already exists"
 // — platform-side saga logic is responsible for preventing that.
-func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
+func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner, provision Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, ok := injectInstallContext(w, r)
 		if !ok {
+			return
+		}
+		if !runProvision(w, ctx, provision) {
 			return
 		}
 		migrations, err := migration.List(sqlFS, scope)
@@ -124,6 +140,25 @@ func InstallHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner
 		}
 		httputil.JSON(w, http.StatusOK, LifecycleResult{Applied: applied})
 	}
+}
+
+// runProvision runs the SDK-owned setup step, if any. Returns ok=false after
+// writing a 500 when it fails; callers must return without touching w again.
+//
+// The failure is reported in the LifecycleError shape with an empty Applied
+// list, which is the truth (no migration ran) and is what the platform's
+// partial-apply parser expects — it leaves the install watermark at 0 so a
+// retry re-runs the whole install rather than resuming past a store that was
+// never created.
+func runProvision(w http.ResponseWriter, ctx context.Context, provision Provisioner) bool {
+	if provision == nil {
+		return true
+	}
+	if err := provision(ctx); err != nil {
+		httputil.JSON(w, http.StatusInternalServerError, LifecycleError{Error: "provision: " + err.Error()})
+		return false
+	}
+	return true
 }
 
 // injectInstallContext reads an optional InstallRequest body and folds its
@@ -195,7 +230,12 @@ func writeBodyDecodeError(w http.ResponseWriter, err error) {
 // path), the migrations run under that per-(app, module) credential with
 // search_path = schema — identical to InstallHandler. A bare {from, to}
 // body keeps the dev-tunnel env-pool behavior.
-func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner) http.HandlerFunc {
+//
+// provision runs here as well as on install, and BEFORE the (From, To] window
+// is even resolved: upgrade is the only lifecycle call an already-installed app
+// ever receives, so it is the only place SDK-owned per-app state can converge
+// for an install that predates it. An empty window must still provision.
+func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner, provision Provisioner) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, ok := decodeUpgradeRequest(w, r)
 		if !ok {
@@ -203,6 +243,9 @@ func UpgradeHandler(sqlFS fs.FS, scope migration.Scope, runTx migration.TxRunner
 		}
 		ctx, ok := injectLifecycleContext(w, r.Context(), req.InstallRequest)
 		if !ok {
+			return
+		}
+		if !runProvision(w, ctx, provision) {
 			return
 		}
 
