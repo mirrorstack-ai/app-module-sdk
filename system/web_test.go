@@ -147,6 +147,54 @@ func TestWebHandler_Options_PreflightSucceeds(t *testing.T) {
 	}
 }
 
+// Under `dev --tunnel` the page is a public https origin while the bundle is
+// served from http://localhost, so Chrome sends a local-network preflight and
+// blocks the load unless this handler opts in. The block happens in the
+// browser, so a regression here shows up only as a blank settings page with
+// nothing in the module's log — hence covering both spellings explicitly.
+func TestWebHandler_LocalNetworkPreflight_OptsIn(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.js", "ok")
+	h := WebHandler(dir)
+
+	for _, tt := range []struct{ name, reqHeader, wantHeader string }{
+		{"chrome 138+", "Access-Control-Request-Local-Network-Access", "Access-Control-Allow-Local-Network-Access"},
+		{"chrome <138", "Access-Control-Request-Private-Network", "Access-Control-Allow-Private-Network"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodOptions, "/__mirrorstack/web/index.js", nil)
+			req.Header.Set("Origin", "https://apps.mirrorstack.ai")
+			req.Header.Set(tt.reqHeader, "true")
+			rec := httptest.NewRecorder()
+			h(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204", rec.Code)
+			}
+			if got := rec.Header().Get(tt.wantHeader); got != "true" {
+				t.Errorf("%s = %q, want \"true\" — the browser drops the bundle without it", tt.wantHeader, got)
+			}
+		})
+	}
+}
+
+// The opt-in is echoed only when asked for, so an ordinary fetch does not
+// advertise local-network access it was never requested to grant.
+func TestWebHandler_NoLocalNetworkRequest_NoOptIn(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.js", "ok")
+	h := WebHandler(dir)
+
+	req := httptest.NewRequest(http.MethodOptions, "/__mirrorstack/web/index.js", nil)
+	req.Header.Set("Origin", "https://apps.mirrorstack.ai")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	for _, header := range []string{"Access-Control-Allow-Local-Network-Access", "Access-Control-Allow-Private-Network"} {
+		if got := rec.Header().Get(header); got != "" {
+			t.Errorf("%s = %q on an unrequested preflight, want empty", header, got)
+		}
+	}
+}
+
 func TestWebHandler_BadMethod_405(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "index.js", "ok")

@@ -41,7 +41,7 @@ func WebHandler(rootDir string) http.HandlerFunc {
 		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		setCORS(w)
+		setCORS(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -95,7 +95,7 @@ func WebHandler(rootDir string) http.HandlerFunc {
 	}
 }
 
-func setCORS(w http.ResponseWriter) {
+func setCORS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "*")
@@ -103,6 +103,24 @@ func setCORS(w http.ResponseWriter) {
 	// fresh fetch when the module restarts. Short max-age keeps the dev
 	// loop responsive while still letting browsers reuse within a render.
 	w.Header().Set("Cache-Control", "no-cache")
+
+	// Under `mirrorstack dev --tunnel` the page is a PUBLIC https origin
+	// (apps.mirrorstack.ai) while this bundle is served from http://localhost.
+	// Chrome treats that as a local-network request and blocks it unless the
+	// target opts in on the preflight — the request never reaches this process,
+	// so the settings page renders blank with nothing in the module's log.
+	// Echo the opt-in only when asked for, and answer both spellings: Chrome
+	// <138 sends the Private Network Access header, 138+ the Local Network
+	// Access one. Opting in is safe here because the namespace is read-only
+	// public static assets with no credentials — see the type comment.
+	if r != nil {
+		if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		}
+		if r.Header.Get("Access-Control-Request-Local-Network-Access") == "true" {
+			w.Header().Set("Access-Control-Allow-Local-Network-Access", "true")
+		}
+	}
 }
 
 func contentTypeFor(path string) string {
