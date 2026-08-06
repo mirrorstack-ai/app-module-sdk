@@ -52,9 +52,11 @@ func resolveCallURL(targetModuleID, path string) string {
 //
 // The app id is read from the request context (auth.Get) — the same identity
 // the SDK injects for handlers — and sent as X-MS-App-ID so the dispatch can
-// resolve the install. The CALLER never holds the callee's credentials:
-// dispatch injects the TARGET module's per-session token + identity before
-// forwarding.
+// resolve the install. X-MS-Service-Secret carries this CALLING module's live
+// session/deploy credential, allowing dispatch to authenticate which installed
+// module initiated the internal hop. The caller never holds the CALLEE's
+// credentials: dispatch injects the target module's per-session token and
+// identity before forwarding.
 //
 // path must include its leading slash and any raw query string, e.g.
 // "/internal/exchange" or "/internal/users?limit=10".
@@ -81,6 +83,9 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("X-MS-App-ID", appID)
+	if secret := moduleSessionSecret(); secret != "" {
+		req.Header.Set("X-MS-Service-Secret", secret)
+	}
 
 	resp, err := callHTTP.Do(req)
 	if err != nil {
