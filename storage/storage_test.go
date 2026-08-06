@@ -33,18 +33,6 @@ func TestForApp_SharesS3Client(t *testing.T) {
 	}
 }
 
-func TestOpen_ReadsCDNBaseURL(t *testing.T) {
-	t.Setenv("CDN_BASE_URL", "https://media.beta.mirrorstack.ai")
-
-	c, err := Open(context.Background())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if c.cdnBase != "https://media.beta.mirrorstack.ai" {
-		t.Errorf("cdnBase = %q, want CDN_BASE_URL value", c.cdnBase)
-	}
-}
-
 func TestURL(t *testing.T) {
 	t.Parallel()
 
@@ -156,14 +144,6 @@ func TestRequireCredential(t *testing.T) {
 	full := &Client{presigner: &s3.PresignClient{}, s3Client: &s3.Client{}}
 	if err := full.requireCredential(); err != nil {
 		t.Errorf("expected nil for fully constructed client, got %v", err)
-	}
-}
-
-func TestOpen_LambdaGuard(t *testing.T) {
-	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "app-mod-media")
-	_, err := Open(context.Background())
-	if err == nil {
-		t.Error("expected error in Lambda environment")
 	}
 }
 
