@@ -2,6 +2,18 @@ package registry
 
 import "testing"
 
+func TestRequireStorageIsExplicitAndIdempotent(t *testing.T) {
+	r := New()
+	if r.StorageRequired() {
+		t.Fatal("new registry unexpectedly requires storage")
+	}
+	r.RequireStorage()
+	r.RequireStorage()
+	if !r.StorageRequired() {
+		t.Fatal("RequireStorage did not persist the declaration")
+	}
+}
+
 func TestAddRoute_GroupsByScope(t *testing.T) {
 	t.Parallel()
 

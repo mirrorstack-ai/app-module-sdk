@@ -256,7 +256,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 
 ### Platform resources
 
-- [x] `ms.Storage(ctx)` — S3 presigned URLs + CDN (R2 cache) + multipart upload
+- [x] `ms.RequireStorage()` + `ms.Storage(ctx)` — explicit startup declaration, then per-request S3 presigned URLs + CDN (R2 cache) + multipart upload
 - [x] `ms.Cache(ctx)` — scoped Redis (ElastiCache Serverless)
 - [x] `ms.Meter(ctx)` — custom usage metrics for billing
 

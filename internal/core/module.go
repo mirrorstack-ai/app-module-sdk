@@ -130,7 +130,7 @@ type Module struct {
 	devCache       *cache.Client
 	devCacheErr    error
 	devStorageOnce sync.Once // dev mode: lazy storage init
-	devStorage     *storage.Client
+	devStorage     *storage.DevMinter
 	devStorageErr  error
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
 	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)

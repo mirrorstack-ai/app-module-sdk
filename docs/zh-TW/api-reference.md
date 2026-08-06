@@ -112,10 +112,12 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | 用途 |
 |---|---|
 | `ms.Cache(ctx)` | Per-app Redis client。 |
-| `ms.Storage(ctx)` | Per-app 物件儲存。S3 為 origin + presigned multipart upload;讀取走 R2 + Cloudflare Worker 做快取。 |
+| `ms.RequireStorage()` | 啟動時明確宣告模組需要 per-app 物件儲存命名空間；未宣告的模組不會取得任何儲存憑證。 |
+| `ms.Storage(ctx)` | 取得此 request 已宣告的 per-app 物件儲存。S3 為 origin，支援 presigned multipart upload；若啟動時未呼叫 `ms.RequireStorage()`，回傳 `storage.ErrNotDeclared`。 |
 | `ms.Meter(ctx).Record(metric, value)` | 以非同步 Lambda invoke 發送計費事件。 |
 
 ```go
+ms.RequireStorage() // setup
 ms.Meter(r.Context()).Record("transcode.minutes", 12)
 ```
 

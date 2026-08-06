@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
@@ -46,32 +47,61 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error
 	return m.devCache, func() {}, nil
 }
 
-// Storage returns a scoped storage client. Keys are auto-prefixed with the app/module path.
+// Storage returns a client always scoped to apps/<app>/<module>/.
 //
 //	s, err := mod.Storage(r.Context())
 //	if err != nil { ... }
 //	url, err := s.PresignPut(ctx, "photo.jpg", 15*time.Minute)
 //	cdnURL, err := s.URL("photo.jpg")
 //
-// Prefix and CDN base come from the per-invocation STS credential in production,
-// or env vars in dev mode. resolveStorage handles both paths — NewFromCredential
-// already sets the prefix from cred.Prefix, so no separate ForApp scoping is needed.
+// Production enforces that scope with the IAM session policy on the vended
+// credential; the client prefix is ergonomics, not a boundary. Dev mints the
+// same policy shape and MinIO enforces it.
 func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
+	if !m.registry.StorageRequired() {
+		return nil, storage.ErrNotDeclared
+	}
 	return m.resolveStorage(ctx)
 }
 
+// RequireStorage opts this module into its per-app storage namespace. Call it
+// once during startup before Start. The declaration is emitted in the manifest
+// and is the platform's gate for vending temporary storage credentials.
+func (m *Module) RequireStorage() {
+	m.registry.RequireStorage()
+}
+
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
-	// Production: STS credentials from Lambda payload.
+	// DEPLOYED: the platform vends a prefix-scoped STS credential per invocation.
 	// No caching — S3 client creation is cheap (no I/O), and STS tokens rotate
 	// frequently. Caching by AccessKeyID risks using stale credentials.
 	if cred := storage.CredentialFrom(ctx); cred != nil {
 		return storage.NewFromCredential(*cred)
 	}
-	// Dev: env vars
+	if storage.UnderLambda() {
+		return nil, storage.ErrNotVended
+	}
+	identity := auth.Get(ctx)
+	if identity == nil || identity.AppID == "" {
+		return nil, fmt.Errorf("mirrorstack: Storage: this request carries no app scope (no X-MS-App-ID header), so there is no app prefix to scope storage to")
+	}
+	// DEV: initialize the parent-key minter once, then mint/cache by request scope.
 	m.devStorageOnce.Do(func() {
-		m.devStorage, m.devStorageErr = storage.Open(context.Background())
+		cfg, err := storage.DevConfigFromEnv()
+		if err != nil {
+			m.devStorageErr = err
+			return
+		}
+		m.devStorage, m.devStorageErr = storage.NewDevMinter(context.Background(), cfg)
 	})
-	return m.devStorage, m.devStorageErr
+	if m.devStorageErr != nil {
+		return nil, m.devStorageErr
+	}
+	cred, err := m.devStorage.Mint(ctx, identity.AppID, m.config.ID)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewFromCredentialForDev(cred, m.devStorage.Config())
 }
 
 // Meter DECLARES a usage metric. Call it once, up front (startup code), per
@@ -138,6 +168,9 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) {
 func Storage(ctx context.Context) (storage.Storer, error) {
 	return mustDefault("Storage").Storage(ctx)
 }
+
+// RequireStorage declares storage on the default module created by Init.
+func RequireStorage() { mustDefault("RequireStorage").RequireStorage() }
 
 // Meter declares a usage metric on the default module (side effect, no return).
 // Panics before Init.

@@ -73,6 +73,10 @@ func (u *MultipartUpload) PresignPart(ctx context.Context, partNumber int32, exp
 	if partNumber < 1 || partNumber > 10000 {
 		return "", fmt.Errorf("mirrorstack/storage: partNumber must be between 1 and 10000, got %d", partNumber)
 	}
+	expires, err := u.client.presignTTL(expires)
+	if err != nil {
+		return "", err
+	}
 	req, err := u.client.presigner.PresignUploadPart(ctx, &s3.UploadPartInput{
 		Bucket:     aws.String(u.bucket),
 		Key:        aws.String(u.key),

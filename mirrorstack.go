@@ -139,6 +139,11 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) { return core.Cach
 // Storage returns a scoped storage client on the default module.
 func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(ctx) }
 
+// RequireStorage declares that this module needs its per-app object-storage
+// namespace. Call it during startup before Start; the platform vends storage
+// credentials only to modules whose manifest contains this declaration.
+func RequireStorage() { core.RequireStorage() }
+
 // MetricOption configures a metric at declaration. The KIND is itself an option
 // (Counter / Gauge), alongside Unit and Price.
 type MetricOption = meter.MetricOption

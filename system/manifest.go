@@ -55,6 +55,9 @@ type ManifestPayload struct {
 	Schedules   []registry.Schedule   `json:"schedules"`
 	Tasks       []registry.Task       `json:"tasks"`
 	Permissions []registry.Permission `json:"permissions"`
+	// Resources declares privileged runtime resources the module needs. The
+	// platform must not vend a resource merely because the SDK supports it.
+	Resources ManifestResources `json:"resources"`
 	// Metrics lists the usage metrics this module declares (ms.Meter). The
 	// platform populates its metric_definitions catalog (kind/unit/price) from
 	// this at install/publish, so the catalog is authoritative before any usage
@@ -75,6 +78,12 @@ type ManifestPayload struct {
 	// the registration after app-owner approval. Always present; empty
 	// array when the module contributes nothing.
 	ContributesTo []registry.OutboundContribution `json:"contributesTo"`
+}
+
+// ManifestResources is the module's opt-in runtime-resource contract. Empty is
+// encoded as {} so old modules remain explicitly resource-free.
+type ManifestResources struct {
+	Storage bool `json:"storage,omitempty"`
 }
 
 // ManifestMCP declares the MCP tool and resource surface of the module. The
@@ -210,6 +219,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Schedules:         reg.Schedules(),
 			Tasks:             reg.Tasks(),
 			Permissions:       reg.Permissions(),
+			Resources:         ManifestResources{Storage: reg.StorageRequired()},
 			Metrics:           reg.Metrics(),
 			MCP:               buildManifestMCP(reg),
 			UI:                reg.UI(),

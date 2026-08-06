@@ -46,6 +46,27 @@ func TestManifest_IDAndDefaults(t *testing.T) {
 	}
 }
 
+func TestManifest_StorageDeclarationIsExplicit(t *testing.T) {
+	base := registry.New()
+	baseRec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, base, nil))
+	if !strings.Contains(baseRec.Body.String(), `"resources":{}`) {
+		t.Fatalf("resource-free manifest must encode resources as an empty object: %s", baseRec.Body.String())
+	}
+	if decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, base, nil)).Resources.Storage {
+		t.Fatal("storage unexpectedly declared by default")
+	}
+
+	withStorage := registry.New()
+	withStorage.RequireStorage()
+	storageRec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withStorage, nil))
+	if !decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withStorage, nil)).Resources.Storage {
+		t.Fatal("storage declaration missing from manifest")
+	}
+	if baseRec.Header().Get("X-MS-Manifest-Hash") == storageRec.Header().Get("X-MS-Manifest-Hash") {
+		t.Fatal("manifest hash did not change after declaring storage")
+	}
+}
+
 func TestManifest_SlugSurfaced(t *testing.T) {
 	t.Parallel()
 	got := decodeManifest(t, ManifestHandler("m15c0f543cf164433b524d312dbf68159", "oauth", "Google Sign-In", "vpn_key", nil, nil, nil, registry.New(), nil))

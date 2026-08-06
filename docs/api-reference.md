@@ -116,12 +116,14 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | Purpose |
 |---|---|
 | `ms.Cache(ctx)` | Per-app Redis client. |
-| `ms.Storage(ctx)` | Per-app object storage. S3 as origin + presigned multipart upload; reads served from R2 via a Cloudflare Worker cache layer. |
+| `ms.RequireStorage()` | Declare during startup that this module needs its per-app object-storage namespace. Undeclared modules receive no credential. |
+| `ms.Storage(ctx)` | Resolve the declared per-app object storage for this request. S3 is the origin with presigned multipart upload; reads may be served through the configured CDN. Returns `storage.ErrNotDeclared` if startup omitted `ms.RequireStorage()`. |
 | `ms.Meter(name, opts...)` | DECLARE a usage metric once in setup. The kind is an OPTION (`ms.Counter`/`ms.Gauge`); also `ms.Unit`/`ms.Price`. A custom metric MUST pass exactly one kind. A reserved `infra.*`/`platform.*` metric may pass `ms.Price` ONLY (a customer-passthrough override; kind/unit are platform-owned). Registers it into the manifest; returns nothing. |
 | `ms.Record(ctx, name, value)` | Emit a usage event BY NAME for a declared metric. Mirrors `ms.Emits`/`ms.Emit`; errors on an undeclared name and on a reserved `infra.*`/`platform.*` name (platform-measured, never self-reported). |
 
 ```go
 // setup
+ms.RequireStorage()
 ms.Meter("transcode.minutes", ms.Counter, ms.Unit("minute"), ms.Price(50_000))
 ms.Meter("infra.compute.ms", ms.Price(0)) // reserved: absorb platform compute (price-only override)
 // handler
