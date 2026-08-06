@@ -7,6 +7,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
@@ -14,12 +15,13 @@ import (
 // Used by both the Lambda handler and the task worker — any change here
 // applies to both paths automatically.
 type InjectParams struct {
-	Resources    *Resources
-	Dependencies []DependencyGrant
-	UserID       string
-	AppID        string
-	AppRole      string
-	AppSchema    string
+	Resources       *Resources
+	Dependencies    []DependencyGrant
+	UserID          string
+	AppID           string
+	AppRole         string
+	AppSchema       string
+	ActorDelegation string
 }
 
 // validRoles is the set of platform roles the SDK recognizes. Messages
@@ -43,6 +45,9 @@ func InjectResources(ctx context.Context, p InjectParams) (context.Context, erro
 	}
 	if !validRoles[p.AppRole] {
 		return ctx, fmt.Errorf("mirrorstack: unknown app role %q", p.AppRole)
+	}
+	if p.ActorDelegation != "" && !actor.ValidTransportValue(p.ActorDelegation) {
+		return ctx, fmt.Errorf("mirrorstack: invalid actor delegation")
 	}
 
 	if p.Resources != nil {
@@ -71,6 +76,12 @@ func InjectResources(ctx context.Context, p InjectParams) (context.Context, erro
 			AppID:   p.AppID,
 			AppRole: p.AppRole,
 		})
+	}
+	if p.ActorDelegation != "" {
+		// Lambda route scope is not known here. Keep the assertion pending;
+		// PlatformAuth activates it only on a Platform route after the typed
+		// payload trust mark is present. Public/Internal remain actorless.
+		ctx = actor.WithPendingDelegation(ctx, p.ActorDelegation)
 	}
 	return ctx, nil
 }

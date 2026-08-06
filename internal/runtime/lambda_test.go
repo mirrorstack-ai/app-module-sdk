@@ -11,6 +11,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {
@@ -222,6 +223,37 @@ func TestNewLambdaHandler_AuthSecretHeadersSurvive(t *testing.T) {
 		if body[claim] != "" {
 			t.Errorf("identity claim %q must be stripped, got %q", claim, body[claim])
 		}
+	}
+}
+
+func TestNewLambdaHandler_KeepsTypedActorPendingAndStripsRawHeader(t *testing.T) {
+	r := chi.NewRouter()
+	var gotActor, gotHeader string
+	r.Get("/check", func(w http.ResponseWriter, r *http.Request) {
+		gotActor = actor.Delegation(r.Context())
+		gotHeader = r.Header.Get(actor.HeaderDelegation)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	handler := NewLambdaHandler(r)
+	resp, err := handler(context.Background(), mustMarshal(t, LambdaRequest{
+		Method:          http.MethodGet,
+		Path:            "/check",
+		ActorDelegation: "msa1.typed.signature",
+		Headers: map[string]string{
+			actor.HeaderDelegation: "msa1.spoofed.signature",
+		},
+	}))
+	requireNoErr(t, err)
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", resp.StatusCode, resp.Body)
+	}
+	if gotActor != "" {
+		t.Errorf("actor delegation = %q, want pending until a Platform route authenticates", gotActor)
+	}
+	if gotHeader != "" {
+		t.Errorf("raw %s reached handler as %q", actor.HeaderDelegation, gotHeader)
 	}
 }
 

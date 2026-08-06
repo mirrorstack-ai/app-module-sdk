@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	pathpkg "path"
 	"strings"
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
 // devDispatchFallback is used when MS_DISPATCH_URL is unset. Modules run inside
@@ -59,7 +62,10 @@ func resolveCallURL(targetModuleID, path string) string {
 // identity before forwarding.
 //
 // path must include its leading slash and any raw query string, e.g.
-// "/internal/exchange" or "/internal/users?limit=10".
+// "/internal/exchange" or "/platform/users?limit=10". A verified actor
+// delegation is forwarded only to a canonical /platform route. Public and
+// Internal calls remain actorless service calls even when they originate in a
+// Platform handler.
 //
 // DEV/DISPATCH TRANSPORT — see resolveCallURL for the prod (#146) seam.
 func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
@@ -86,6 +92,9 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 	if secret := moduleSessionSecret(); secret != "" {
 		req.Header.Set("X-MS-Service-Secret", secret)
 	}
+	if delegation := actor.Delegation(ctx); delegation != "" && isPlatformCallPath(path) {
+		req.Header.Set(actor.HeaderDelegation, delegation)
+	}
 
 	resp, err := callHTTP.Do(req)
 	if err != nil {
@@ -100,6 +109,22 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// isPlatformCallPath recognizes only canonical module Platform routes. It
+// parses the request target before classification so dot-segment or encoded
+// traversal cannot make an assertion appear to target /platform while the
+// receiving HTTP stack resolves it somewhere else.
+func isPlatformCallPath(raw string) bool {
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" {
+		return false
+	}
+	cleaned := pathpkg.Clean(u.Path)
+	if cleaned != u.Path && !(u.Path == "/platform/" && cleaned == "/platform") {
+		return false
+	}
+	return u.Path == "/platform" || strings.HasPrefix(u.Path, "/platform/")
 }
 
 // CallGet is Call specialized to GET (no request body). path carries any raw
