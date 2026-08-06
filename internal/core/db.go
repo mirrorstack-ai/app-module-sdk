@@ -7,6 +7,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
+	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
 // DB returns a scoped database connection.
@@ -220,6 +221,43 @@ func (m *Module) lifecycleTxRunner(scope migration.Scope) migration.TxRunner {
 		return m.Tx
 	default:
 		panic("mirrorstack: lifecycleTxRunner: unhandled scope " + string(scope))
+	}
+}
+
+// lifecycleProvisioner returns the SDK-owned per-app setup the install/upgrade
+// handlers run for the given scope, or nil when there is nothing to provision.
+//
+// Today that is the contributions store: <Config.ID>_contributions holds one
+// app's registered contributions, so it lives in the APP schema and has to be
+// created once per (app, module). The platform's install/upgrade call is the
+// only deployed-plane window that carries both an app schema and a credential
+// allowed to create tables in it — a cold-start hook could not do this, because
+// one Lambda container serves many apps and would only ever provision the first
+// one it happened to see. Module scope has no store of its own (mod_<id> is
+// shared across apps, contributions are not), hence app scope only.
+func (m *Module) lifecycleProvisioner(scope migration.Scope) system.Provisioner {
+	if scope != migration.ScopeApp {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		// The slot count is read per CALL, never when the route is mounted:
+		// ms.Provide runs after ms.Init, which is what mounts the lifecycle
+		// routes, so a mount-time check would see zero slots for every module
+		// that declares any — and silently provision nothing, forever.
+		if m.contribReg.Len() == 0 {
+			return nil
+		}
+		// No schema in the lifecycle body means the tunnel payload shape, where
+		// the module runs against its own dev DB and the per-app store is
+		// created by ensureDevAppSchema instead. Creating it here would land a
+		// per-app table in the connection's default schema — the wrong place,
+		// and shared across every app.
+		if db.SchemaFrom(ctx) == "" {
+			return nil
+		}
+		return m.Tx(ctx, func(q db.Querier) error {
+			return m.contribStorage.EnsureTable(ctx, q)
+		})
 	}
 }
 

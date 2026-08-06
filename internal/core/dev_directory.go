@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/pgerr"
 )
 
 // The DEV-PLANE ANALOGUE of the platform's module_version_exposed_tables
@@ -277,7 +278,7 @@ func (m *Module) ensureDevDirectory(ctx context.Context) error {
 			exposes    jsonb NOT NULL DEFAULT '[]'::jsonb,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		)`); err != nil {
-		if isRelationAlreadyExists(err) {
+		if pgerr.RelationAlreadyExists(err) {
 			// The tx is already aborted, so there is nothing to commit; the
 			// deferred Rollback cleans up. The postcondition holds regardless.
 			return nil
@@ -288,20 +289,6 @@ func (m *Module) ensureDevDirectory(ctx context.Context) error {
 		return fmt.Errorf("dev directory: commit: %w", err)
 	}
 	return nil
-}
-
-// isRelationAlreadyExists reports whether err is Postgres telling us the
-// relation we tried to create is already there. 42P07 is the direct
-// duplicate_table verdict; 23505 is the same race observed one layer down, as a
-// unique violation on the pg_class/pg_type catalog index, and is what
-// CREATE TABLE IF NOT EXISTS actually raises when two backends interleave
-// between the existence check and the insert.
-func isRelationAlreadyExists(err error) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
-		return false
-	}
-	return pgErr.Code == "42P07" || pgErr.Code == "23505"
 }
 
 // registerInDevDirectory upserts THIS module's row and reclaims its slug.

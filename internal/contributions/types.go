@@ -14,9 +14,13 @@
 //	    PRIMARY KEY (slot, contribution_id)
 //	)
 //
-// The host names the table prefix once (Config.ID) and the SDK creates
-// the table on Start if any slot has been declared. Production schema
-// management is handled by the lifecycle install hook in a follow-up.
+// The host names the table prefix once (Config.ID); the table itself is
+// per-APP, because the rows are (one app's copy of) the contributions
+// registered into that app's installs. So it is created per (app, module) by
+// the platform's lifecycle install/upgrade hook — see core.Module's
+// lifecycleProvisioner — never once per process: one deployed container serves
+// many apps and many schemas. Storage.WithTable heals an install that predates
+// that hook on first use.
 package contributions
 
 import (

@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,7 @@ func noopTxRunner(t *testing.T) migration.TxRunner {
 func TestInstallHandler_EmptyFS(t *testing.T) {
 	t.Parallel()
 
-	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t))
+	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t), nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
@@ -71,7 +72,7 @@ func TestUpgradeHandler_RequiresFromTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
+			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t), nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
@@ -100,7 +101,7 @@ func TestUpgradeHandler_RejectsSemver(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
+			h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t), nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
@@ -121,7 +122,7 @@ func TestUpgradeHandler_UnknownTarget(t *testing.T) {
 	// doesn't exist in the (empty) migrations list. The handler must
 	// translate the runner's error into a 400 (caller asked for something
 	// the module doesn't have).
-	h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t))
+	h := UpgradeHandler(nil, migration.ScopeApp, noopTxRunner(t), nil)
 	body := strings.NewReader(`{"from": "0000", "to": "0001"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -140,7 +141,7 @@ func TestUpgradeHandler_NoOp(t *testing.T) {
 	fsys := fstest.MapFS{
 		"sql/app/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	h := UpgradeHandler(fsys, migration.ScopeApp, noopTxRunner(t))
+	h := UpgradeHandler(fsys, migration.ScopeApp, noopTxRunner(t), nil)
 	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -206,7 +207,7 @@ func TestUpgradeHandler_ModuleScope(t *testing.T) {
 	fsys := fstest.MapFS{
 		"sql/module/0008_a.up.sql": &fstest.MapFile{Data: []byte("")},
 	}
-	h := UpgradeHandler(fsys, migration.ScopeModule, noopTxRunner(t))
+	h := UpgradeHandler(fsys, migration.ScopeModule, noopTxRunner(t), nil)
 	body := strings.NewReader(`{"from": "0008", "to": "0008"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -221,7 +222,7 @@ func TestInstallHandler_BadFS_500(t *testing.T) {
 
 	// fs.FS that returns an error on every Open. fs.ReadDir wraps and
 	// surfaces the error — the handler should respond 500.
-	h := InstallHandler(errFS{}, migration.ScopeApp, noopTxRunner(t))
+	h := InstallHandler(errFS{}, migration.ScopeApp, noopTxRunner(t), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
 
@@ -267,7 +268,7 @@ func TestInstallHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
 	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
 
 	var captured context.Context
-	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 
 	body := strings.NewReader(`{
 		"appId":  "6c8d1234-abcd-ef01-2345-6789abcdef00",
@@ -310,7 +311,7 @@ func TestInstallHandler_EmptyBodyFallsThrough(t *testing.T) {
 	// leave ctx without injected schema or credential so resolvePoolFor
 	// falls back to the dev pool.
 	var captured context.Context
-	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
 
@@ -328,7 +329,7 @@ func TestInstallHandler_EmptyBodyFallsThrough(t *testing.T) {
 func TestInstallHandler_MalformedBody_400(t *testing.T) {
 	t.Parallel()
 
-	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t))
+	h := InstallHandler(nil, migration.ScopeApp, noopTxRunner(t), nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", strings.NewReader(`{not json`)))
 
@@ -347,7 +348,7 @@ func TestUpgradeHandler_BodyInjectsCredentialAndSchema(t *testing.T) {
 	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
 
 	var captured context.Context
-	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 
 	body := strings.NewReader(`{
 		"from":   "0000",
@@ -390,7 +391,7 @@ func TestUpgradeHandler_FromToOnlyKeepsDevPath(t *testing.T) {
 	// and leave ctx without schema or credential so resolvePoolFor falls
 	// back to the dev pool — pre-existing behavior, unchanged.
 	var captured context.Context
-	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 	body := strings.NewReader(`{"from": "0000", "to": "0001"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -426,7 +427,7 @@ func TestUpgradeHandler_MalformedCredential_400(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t))
+			h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", strings.NewReader(tc.body)))
 
@@ -443,7 +444,7 @@ func TestUpgradeHandler_EmptyCredentialObjectFallsThrough(t *testing.T) {
 	// `"credential": {}` (shape compat) must behave like no credential at
 	// all — same rule injectInstallContext applies on install.
 	var captured context.Context
-	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 	body := strings.NewReader(`{"from": "0000", "to": "0001", "credential": {}}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade", body))
@@ -497,7 +498,7 @@ func TestInstallHandler_PartialBodyOmitsMissingFields(t *testing.T) {
 	t.Parallel()
 
 	var captured context.Context
-	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured))
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
 	body := strings.NewReader(`{"schema": "app_only"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", body))
@@ -510,5 +511,101 @@ func TestInstallHandler_PartialBodyOmitsMissingFields(t *testing.T) {
 	}
 	if db.CredentialFrom(captured) != nil {
 		t.Error("CredentialFrom should be nil when body omits credential")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Provisioner — SDK-owned per-app setup on install + upgrade.
+// ---------------------------------------------------------------------------
+
+// TestInstallHandler_ProvisionRunsInLifecycleContext is the wiring guard for the
+// deployed plane: the hook must see the schema + credential the platform sent,
+// because that is the only thing that puts the SDK's per-app DDL in the right
+// app's schema under a role allowed to run it.
+func TestInstallHandler_ProvisionRunsInLifecycleContext(t *testing.T) {
+	// Not t.Parallel: t.Setenv on MS_LOCAL_DB_URL would race the env base read.
+	t.Setenv("MS_LOCAL_DB_URL", "postgres://envuser:envpw@db.platform.local:6543/platform_apps?sslmode=disable")
+
+	calls := 0
+	var provisionCtx context.Context
+	provision := func(ctx context.Context) error {
+		calls++
+		provisionCtx = ctx
+		return nil
+	}
+
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), provision)
+	body := strings.NewReader(`{
+		"appId":  "6c8d1234-abcd-ef01-2345-6789abcdef00",
+		"schema": "app_6c8d1234_abcd_ef01_2345_6789abcdef00",
+		"credential": {"username": "r_6c8d1234_oauth-core", "token": "secret-token"}
+	}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("provisioner called %d times, want exactly 1", calls)
+	}
+	if got := db.SchemaFrom(provisionCtx); got != "app_6c8d1234_abcd_ef01_2345_6789abcdef00" {
+		t.Errorf("provision ctx SchemaFrom = %q, want app_6c8d1234_...", got)
+	}
+	if cred := db.CredentialFrom(provisionCtx); cred == nil || cred.Username != "r_6c8d1234_oauth-core" {
+		t.Errorf("provision ctx CredentialFrom = %+v, want the per-install role", cred)
+	}
+}
+
+// TestInstallHandler_ProvisionFailureFailsInstall pins both the disposition and
+// the ORDER: a provisioning failure must 500 with an empty Applied list, and the
+// migration runner must never run (noopTxRunner fails the test if it does, and
+// the FS here HAS a migration to apply).
+func TestInstallHandler_ProvisionFailureFailsInstall(t *testing.T) {
+	t.Parallel()
+
+	provision := func(context.Context) error { return errors.New("no CREATE on schema") }
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), provision)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", strings.NewReader(`{"schema": "app_x"}`)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	var got LifecycleError
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Applied) != 0 {
+		t.Errorf("applied = %v, want empty — nothing ran", got.Applied)
+	}
+	if !strings.Contains(got.Error, "no CREATE on schema") {
+		t.Errorf("error = %q, want the provisioner's cause", got.Error)
+	}
+}
+
+// TestUpgradeHandler_ProvisionRunsOnEmptyWindow is the convergence guard for
+// installs that predate the hook. An app already at the target version yields an
+// EMPTY migration slice, and the hook still has to run — otherwise the lifecycle
+// would never create the store for an app installed before this shipped.
+func TestUpgradeHandler_ProvisionRunsOnEmptyWindow(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	provision := func(context.Context) error { calls++; return nil }
+	// from == to → Slice is empty → noopTxRunner must not be called.
+	h := UpgradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), provision)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/upgrade",
+		strings.NewReader(`{"from": "0001", "to": "0001", "schema": "app_x"}`)))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Errorf("provisioner called %d times on an empty upgrade window, want 1", calls)
 	}
 }

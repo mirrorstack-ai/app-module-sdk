@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/pgerr"
 )
 
 // listLimit caps the row count returned by Storage.List so a slot
@@ -35,14 +36,45 @@ func NewStorage(modulePrefix string) *Storage {
 // contributions table name. Exposed for test diagnostics.
 func (s *Storage) TableName() string { return s.table }
 
-// EnsureTable runs CREATE TABLE IF NOT EXISTS. Dev fallback; prod
-// schema management lives in the lifecycle install hook.
+// EnsureTable creates the store in whatever schema q's search_path resolves to.
+// The store is per-APP (one table per module per app schema), so every caller
+// must already be scoped to one app — there is no once-per-process shortcut: a
+// deployed module's container serves many apps.
+//
+// Callers: the lifecycle install/upgrade hook (the platform's per-(app, module)
+// window, which is what provisions a deployed install) and WithTable's retry
+// (which heals an install that predates that hook). Both are idempotent.
+//
+// CONCURRENCY. CREATE TABLE IF NOT EXISTS is idempotent but NOT atomic — the
+// existence check and the catalog insert race, so two cold containers
+// provisioning the same app at the same instant can both pass the check and
+// then collide in pg_class. Two things prevent that, deliberately both:
+//
+//   - The advisory lock serializes provisioning per SCHEMA. Keyed on the
+//     resolved schema rather than on the module because the store is per-app:
+//     two apps must not queue behind each other, two cold starts for the SAME
+//     app must. It is the xact-scoped variant so it is released by the implicit
+//     transaction that ends this Exec, never leaked onto a pooled connection.
+//   - pgerr.RelationAlreadyExists is the backstop for what the lock cannot
+//     cover — a psql session, or any future non-SDK writer — at the cost of one
+//     error-code comparison.
+//
+// The three statements MUST stay in one argument-less Exec: pgx sends that over
+// the simple protocol, which Postgres runs as a single implicit transaction, and
+// that is the only thing making pg_advisory_xact_lock outlive its own statement
+// and still cover the CREATEs.
 func (s *Storage) EnsureTable(ctx context.Context, q db.Querier) error {
 	// Index name strips the surrounding quotes from the sanitized
 	// table name so it stays a bare identifier (Postgres errors on
 	// quoted index names that contain double-quotes).
-	idx := s.tableUnquoted() + "_slot_registered_idx"
+	bare := s.tableUnquoted()
+	idx := bare + "_slot_registered_idx"
+	// bare is <modulePrefix>_contributions, and modulePrefix is validated
+	// against moduleIDPattern in core.New(), so it cannot close the lock key's
+	// string literal.
 	stmt := fmt.Sprintf(`
+		SELECT pg_advisory_xact_lock(hashtext(current_schema() || '.%[3]s'));
+
 		CREATE TABLE IF NOT EXISTS %[1]s (
 		    slot            text NOT NULL,
 		    contribution_id text NOT NULL,
@@ -53,10 +85,38 @@ func (s *Storage) EnsureTable(ctx context.Context, q db.Querier) error {
 
 		CREATE INDEX IF NOT EXISTS %[2]s
 		    ON %[1]s (slot, registered_at DESC);`,
-		s.table, idx,
+		s.table, idx, bare,
 	)
-	_, err := q.Exec(ctx, stmt)
-	return err
+	if _, err := q.Exec(ctx, stmt); err != nil && !pgerr.RelationAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+// WithTable runs op and, when op failed because the store does not exist in this
+// app's schema, creates it and runs op once more.
+//
+// This is the heal path for an install that predates the lifecycle provisioning
+// hook: the platform only opens an install/upgrade window when a migration
+// watermark moves, so an app already installed at the current version gets no
+// further lifecycle call and would otherwise never acquire the table. 42P01 is
+// the only error it acts on — the one code that means "never provisioned for
+// this app" rather than "this query is wrong" — so a provisioned store pays
+// nothing and a permission failure still surfaces to the caller.
+//
+// q MUST NOT be inside a caller-owned transaction: the failed statement aborts
+// it, so neither the CREATE nor the retry could run. Both call sites (the
+// /contrib handlers and Module.StoredContributions) hold a plain pooled
+// connection for exactly that reason.
+func (s *Storage) WithTable(ctx context.Context, q db.Querier, op func() error) error {
+	err := op()
+	if !pgerr.UndefinedTable(err) {
+		return err
+	}
+	if ensureErr := s.EnsureTable(ctx, q); ensureErr != nil {
+		return fmt.Errorf("contributions: provision %s: %w", s.table, ensureErr)
+	}
+	return op()
 }
 
 // tableUnquoted returns the table name without the pgx-Sanitize

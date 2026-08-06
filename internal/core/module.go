@@ -634,27 +634,14 @@ func (m *Module) Start() error {
 		}
 	}
 
-	// Auto-create the contributions table when any slot is declared.
-	// CREATE TABLE IF NOT EXISTS is safe to call on every Start; the
-	// guard keeps modules that never use Provide from
-	// touching their DB for an empty feature. Production schema
-	// management lands via the lifecycle install hook in a follow-up.
-	//
-	// Skipped in devMode: the store is per-app, so it is created per app schema
-	// during lazy provisioning (provisionDevAppSchema) rather than once in the
-	// connection's default schema here — otherwise it would land in the wrong
-	// (shared) place and every app's contributions would collide.
-	if !m.devMode && m.contribReg.Len() > 0 {
-		q, release, err := m.DB(context.Background())
-		if err != nil {
-			return fmt.Errorf("mirrorstack: contributions: open DB: %w", err)
-		}
-		if err := m.contribStorage.EnsureTable(context.Background(), q); err != nil {
-			release()
-			return fmt.Errorf("mirrorstack: contributions: ensure table: %w", err)
-		}
-		release()
-	}
+	// The contributions store is deliberately NOT created here. It is per-app
+	// and Start has no app, so creating it on the way to ListenAndServe put it
+	// in the connection's default schema, where no request ever looks for it —
+	// and Lambda returns above this line anyway, which is how a deployed host
+	// ended up with no store at all. Provisioning is the per-(app, module)
+	// lifecycle hook's job (lifecycleProvisioner, db.go); dev additionally
+	// creates it per app schema in provisionDevAppSchema, which is what serves
+	// the tunnel's schema-less install body.
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -868,9 +855,14 @@ func (m *Module) mountSystemRoutes() {
 				// them independently.
 				for _, scope := range migration.AllScopes() {
 					runTx := m.lifecycleTxRunner(scope)
+					// SDK-owned per-app setup (the contributions store) rides
+					// install + upgrade, not downgrade: reverting an author's
+					// migrations is not a reason to drop SDK infrastructure, and
+					// re-creating it there would be the only DDL a downgrade did.
+					provision := m.lifecycleProvisioner(scope)
 					r.Route("/"+string(scope), func(r chi.Router) {
-						r.With(smallBody).Post("/install", system.InstallHandler(m.config.SQL, scope, runTx))
-						r.With(smallBody).Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, runTx))
+						r.With(smallBody).Post("/install", system.InstallHandler(m.config.SQL, scope, runTx, provision))
+						r.With(smallBody).Post("/upgrade", system.UpgradeHandler(m.config.SQL, scope, runTx, provision))
 						r.With(smallBody).Post("/downgrade", system.DowngradeHandler(m.config.SQL, scope, runTx))
 						r.With(smallBody).Post("/uninstall", system.UninstallHandler()) // no scope — no-op for both
 
@@ -1013,13 +1005,28 @@ func Contributions() []contributions.SlotInfo {
 // entry's ID is the contributing module's id (the registration key), which a
 // host can use to address that module. Use this on the HOST side to consume
 // contributions (e.g. oauth-core listing its registered auth providers).
+//
+// A host installed before the SDK provisioned this store on install has no
+// table for the app yet; the first read creates it (see Storage.WithTable) and
+// returns empty, instead of failing the host with a missing-relation error it
+// has no way to act on.
 func (m *Module) StoredContributions(ctx context.Context, slot string) ([]contributions.Contribution, error) {
-	q, release, err := DB(ctx)
+	// m.DB, not the package-level DB: that one resolves through the DEFAULT
+	// module, so a non-default *Module would read another module's pool.
+	q, release, err := m.DB(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	return m.contribStorage.List(ctx, q, slot)
+	var out []contributions.Contribution
+	if err := m.contribStorage.WithTable(ctx, q, func() error {
+		var listErr error
+		out, listErr = m.contribStorage.List(ctx, q, slot)
+		return listErr
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // StoredContributions reads stored contributions for a slot on the default
