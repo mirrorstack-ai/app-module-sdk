@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func TestDevConfigFromEnvFailsLoudly(t *testing.T) {
 }
 
 func TestDevSessionPolicyShape(t *testing.T) {
-	policy, err := devSessionPolicy("media", "apps/app-uuid/module-slug/")
+	policy, err := devSessionPolicy("media", "apps/app-uuid/module_id/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +67,8 @@ func TestDevSessionPolicyShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(policy), &got); err != nil {
 		t.Fatal(err)
 	}
-	wantResource := "arn:aws:s3:::media/apps/app-uuid/module-slug/*"
-	if len(got.Statement) != 1 || got.Statement[0].Resource != wantResource || strings.Join(got.Statement[0].Action, ",") != "s3:GetObject,s3:PutObject" {
+	wantResource := "arn:aws:s3:::media/apps/app-uuid/module_id/*"
+	if len(got.Statement) != 1 || got.Statement[0].Resource != wantResource || strings.Join(got.Statement[0].Action, ",") != "s3:GetObject,s3:PutObject,s3:AbortMultipartUpload" {
 		t.Fatalf("unexpected policy: %s", policy)
 	}
 }
@@ -110,6 +111,67 @@ func TestDevMintCachesPerAppModule(t *testing.T) {
 	}
 }
 
+func TestDevMintCoalescesConcurrentSameScope(t *testing.T) {
+	now := time.Now()
+	fake := &fakeSTS{now: func() time.Time { return now }, expires: time.Hour}
+	m := testMinter(&now, fake)
+
+	const callers = 32
+	start := make(chan struct{})
+	credentials := make(chan Credential, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			cred, err := m.Mint(context.Background(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "video_core")
+			if err != nil {
+				errs <- err
+				return
+			}
+			credentials <- cred
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(credentials)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	for cred := range credentials {
+		if cred.AccessKeyID != "key1" {
+			t.Fatalf("AccessKeyID=%q, want coalesced key1", cred.AccessKeyID)
+		}
+	}
+	if fake.calls != 1 {
+		t.Fatalf("AssumeRole calls=%d, want 1", fake.calls)
+	}
+}
+
+func TestDevCredentialCacheIsBounded(t *testing.T) {
+	now := time.Now()
+	fake := &fakeSTS{now: func() time.Time { return now }, expires: time.Hour}
+	m := testMinter(&now, fake)
+	for i := 0; i <= maxDevCredentialCacheEntries; i++ {
+		appID := fmt.Sprintf("00000000-0000-0000-0000-%012x", i)
+		if _, err := m.Mint(context.Background(), appID, "mod"); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Second)
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if got := len(m.cache); got != maxDevCredentialCacheEntries {
+		t.Fatalf("cache entries=%d, want bound %d", got, maxDevCredentialCacheEntries)
+	}
+	if _, ok := m.cache["00000000-0000-0000-0000-000000000000\x00mod"]; ok {
+		t.Fatal("oldest credential was not evicted")
+	}
+}
+
 func TestVendedCredentialOutlivesLongestPresign(t *testing.T) {
 	now := time.Now()
 	fake := &fakeSTS{now: func() time.Time { return now }, expires: time.Hour}
@@ -128,13 +190,13 @@ func TestVendedCredentialOutlivesLongestPresign(t *testing.T) {
 
 func TestDevMintRejectsPolicyMetacharacters(t *testing.T) {
 	validAppID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	validModuleID := "video-core"
+	validModuleID := "video_core"
 	appIDs := []string{
 		"*", "?", "a*", "*/*", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/*",
 		"../../other", "apps/x", "%2e%2e", "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/*", "",
 		strings.Repeat("a", 35), strings.Repeat("a", 37), validAppID + "/", " " + validAppID + " ",
 	}
-	moduleIDs := []string{"*", "video/core", "video..core", "Video-Core", "video%core", ""}
+	moduleIDs := []string{"*", "video/core", "video..core", "Video_Core", "video-core", "video%core", ""}
 
 	for _, appID := range appIDs {
 		t.Run("appID="+appID, func(t *testing.T) {
@@ -165,7 +227,7 @@ func TestDevMintRejectsPolicyMetacharacters(t *testing.T) {
 func TestDevMintPolicyContainsNoWildcardBeyondTheFinalSegment(t *testing.T) {
 	now := time.Now()
 	fake := &fakeSTS{now: func() time.Time { return now }, expires: time.Hour}
-	if _, err := testMinter(&now, fake).Mint(context.Background(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "video-core"); err != nil {
+	if _, err := testMinter(&now, fake).Mint(context.Background(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "video_core"); err != nil {
 		t.Fatal(err)
 	}
 	var policy sessionPolicy
@@ -181,11 +243,11 @@ func TestDevMintPolicyContainsNoWildcardBeyondTheFinalSegment(t *testing.T) {
 func TestDevMintLowercasesTheAppID(t *testing.T) {
 	now := time.Now()
 	fake := &fakeSTS{now: func() time.Time { return now }, expires: time.Hour}
-	cred, err := testMinter(&now, fake).Mint(context.Background(), "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "video-core")
+	cred, err := testMinter(&now, fake).Mint(context.Background(), "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "video_core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantScope := "apps/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/video-core/"
+	wantScope := "apps/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/video_core/"
 	if cred.Prefix != wantScope {
 		t.Fatalf("prefix=%q, want %q", cred.Prefix, wantScope)
 	}

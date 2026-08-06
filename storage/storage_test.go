@@ -2,21 +2,94 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func TestForApp_Prefix(t *testing.T) {
-	c := &Client{bucket: "test-bucket", prefix: "", cdnBase: "https://cdn.example.com"}
-	scoped := c.ForApp("apps/app_abc/mod_media/", "https://media.mirrorstack.ai")
-
-	if scoped.prefix != "apps/app_abc/mod_media/" {
-		t.Errorf("expected prefix 'apps/app_abc/mod_media/', got %q", scoped.prefix)
+func TestCredentialExpiryRoundTripsOnTheWire(t *testing.T) {
+	want := time.Date(2026, time.August, 6, 12, 30, 0, 0, time.UTC)
+	b, err := json.Marshal(Credential{ExpiresAt: want})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if scoped.cdnBase != "https://media.mirrorstack.ai" {
-		t.Errorf("expected cdnBase 'https://media.mirrorstack.ai', got %q", scoped.cdnBase)
+	if !strings.Contains(string(b), `"expiresAt":"2026-08-06T12:30:00Z"`) {
+		t.Fatalf("wire credential missing expiry: %s", b)
+	}
+	var got Credential
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.ExpiresAt.Equal(want) {
+		t.Fatalf("ExpiresAt=%v, want %v", got.ExpiresAt, want)
+	}
+}
+
+func TestOpenFailsClosedButRemainsSourceCompatible(t *testing.T) {
+	client, err := Open(context.Background())
+	if client != nil || err == nil || !strings.Contains(err.Error(), "cannot derive an app scope") {
+		t.Fatalf("Open client=%v err=%v, want fail-closed migration error", client, err)
+	}
+}
+
+func TestPresignTTLStaysWithinCredentialLifetime(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	c := &Client{expiresAt: now.Add(10 * time.Minute), now: func() time.Time { return now }}
+
+	got, err := c.presignTTL(15 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 10*time.Minute - credentialExpirySafetyMargin; got != want {
+		t.Fatalf("clamped TTL=%v, want %v", got, want)
+	}
+	if got, err := c.presignTTL(time.Minute); err != nil || got != time.Minute {
+		t.Fatalf("short TTL=%v err=%v, want 1m", got, err)
+	}
+	c.expiresAt = now.Add(credentialExpirySafetyMargin)
+	if _, err := c.presignTTL(time.Minute); !errors.Is(err, ErrCredentialExpired) {
+		t.Fatalf("expired credential err=%v, want ErrCredentialExpired", err)
+	}
+}
+
+func TestMultipartPresignStaysWithinCredentialLifetime(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	c, err := newClient(Credential{
+		Bucket: "bucket", Region: "ap-northeast-1", Prefix: "apps/app/mod/", CDNBase: "https://cdn.example.com",
+		AccessKeyID: "key", SecretAccessKey: "secret", SessionToken: "token", ExpiresAt: now.Add(10 * time.Minute),
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return now }
+	upload := &MultipartUpload{client: c, bucket: "bucket", key: "apps/app/mod/video.mp4", uploadID: "upload"}
+	raw, err := upload.PresignPart(context.Background(), 1, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := parsed.Query().Get("X-Amz-Expires"), "570"; got != want {
+		t.Fatalf("X-Amz-Expires=%q, want %q", got, want)
+	}
+}
+
+func TestForAppCannotChangeVendedScope(t *testing.T) {
+	c := &Client{bucket: "test-bucket", prefix: "apps/app_a/mod_media/", cdnBase: "https://cdn.example.com"}
+	scoped := c.ForApp("apps/app_b/mod_media/", "https://attacker.example.com")
+
+	if scoped.prefix != c.prefix {
+		t.Errorf("ForApp changed vended prefix to %q", scoped.prefix)
+	}
+	if scoped.cdnBase != c.cdnBase {
+		t.Errorf("ForApp changed platform CDN base to %q", scoped.cdnBase)
 	}
 	if scoped.bucket != "test-bucket" {
 		t.Errorf("expected bucket 'test-bucket', got %q", scoped.bucket)
@@ -65,11 +138,11 @@ func TestURL(t *testing.T) {
 			want:    "https://media.mirrorstack.ai/apps/app_abc/mod_media/photos/avatar.jpg",
 		},
 		{
-			name:    "dev unscoped",
-			prefix:  "",
+			name:    "dev scoped",
+			prefix:  "apps/app_abc/mod_media/",
 			cdnBase: "http://localhost:9000/mirrorstack-dev",
 			key:     "test.txt",
-			want:    "http://localhost:9000/mirrorstack-dev/test.txt",
+			want:    "http://localhost:9000/mirrorstack-dev/apps/app_abc/mod_media/test.txt",
 		},
 	}
 

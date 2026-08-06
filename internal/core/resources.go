@@ -58,7 +58,17 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error
 // credential; the client prefix is ergonomics, not a boundary. Dev mints the
 // same policy shape and MinIO enforces it.
 func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
+	if !m.registry.StorageRequired() {
+		return nil, storage.ErrNotDeclared
+	}
 	return m.resolveStorage(ctx)
+}
+
+// RequireStorage opts this module into its per-app storage namespace. Call it
+// once during startup before Start. The declaration is emitted in the manifest
+// and is the platform's gate for vending temporary storage credentials.
+func (m *Module) RequireStorage() {
+	m.registry.RequireStorage()
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
@@ -158,6 +168,9 @@ func Cache(ctx context.Context) (cache.Cacher, func(), error) {
 func Storage(ctx context.Context) (storage.Storer, error) {
 	return mustDefault("Storage").Storage(ctx)
 }
+
+// RequireStorage declares storage on the default module created by Init.
+func RequireStorage() { mustDefault("RequireStorage").RequireStorage() }
 
 // Meter declares a usage metric on the default module (side effect, no return).
 // Panics before Init.

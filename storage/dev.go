@@ -20,9 +20,9 @@ import (
 
 var (
 	canonicalAppIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	// Deliberately narrower than internal/core's moduleIDPattern. This local
-	// restatement prevents future callers from injecting policy metacharacters.
-	devModuleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,35}$`)
+	// This mirrors internal/core's Config.ID contract. The local restatement
+	// keeps the storage package independent while preventing policy metacharacters.
+	devModuleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 )
 
 const (
@@ -34,6 +34,9 @@ const (
 	// redemption, so the URL's real validity is min(X-Amz-Expires, remaining token lifetime).
 	// Re-minting this far ahead of expiry guarantees a presigned URL never outlives its token.
 	refreshBuffer = maxPresignTTL + presignSafetyMargin
+	// A tunnel can visit many app/module pairs over its lifetime. Keep the
+	// parent-key process from retaining every expired scope forever.
+	maxDevCredentialCacheEntries = 256
 )
 
 // DevConfig is the local S3-compatible (MinIO) plane, read from env.
@@ -205,7 +208,8 @@ func (m *DevMinter) mint(ctx context.Context, cacheKey, appID, moduleID string) 
 		return Credential{}, fmt.Errorf("mirrorstack/storage: dev STS returned incomplete credentials")
 	}
 	cred := Credential{Bucket: m.cfg.Bucket, Region: m.cfg.Region, Prefix: prefix, CDNBase: m.cfg.CDNBase,
-		AccessKeyID: *out.Credentials.AccessKeyId, SecretAccessKey: *out.Credentials.SecretAccessKey}
+		AccessKeyID: *out.Credentials.AccessKeyId, SecretAccessKey: *out.Credentials.SecretAccessKey,
+		ExpiresAt: *out.Credentials.Expiration}
 	if out.Credentials.SessionToken != nil {
 		cred.SessionToken = *out.Credentials.SessionToken
 	}
@@ -213,9 +217,26 @@ func (m *DevMinter) mint(ctx context.Context, cacheKey, appID, moduleID string) 
 		return Credential{}, err
 	}
 	m.mu.Lock()
+	if _, exists := m.cache[cacheKey]; !exists && len(m.cache) >= maxDevCredentialCacheEntries {
+		m.evictOneLocked()
+	}
 	m.cache[cacheKey] = cachedCredential{credential: cred, expires: *out.Credentials.Expiration}
 	m.mu.Unlock()
 	return cred, nil
+}
+
+func (m *DevMinter) evictOneLocked() {
+	var oldestKey string
+	var oldestExpiry time.Time
+	for key, entry := range m.cache {
+		if oldestKey == "" || entry.expires.Before(oldestExpiry) {
+			oldestKey = key
+			oldestExpiry = entry.expires
+		}
+	}
+	if oldestKey != "" {
+		delete(m.cache, oldestKey)
+	}
 }
 
 type sessionPolicy struct {
@@ -231,7 +252,7 @@ type policyStatement struct {
 
 func devSessionPolicy(bucket, prefix string) (string, error) {
 	p := sessionPolicy{Version: "2012-10-17", Statement: []policyStatement{{
-		Sid: "OwnPrefixRW", Effect: "Allow", Action: []string{"s3:GetObject", "s3:PutObject"},
+		Sid: "OwnPrefixRW", Effect: "Allow", Action: []string{"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"},
 		Resource: "arn:aws:s3:::" + bucket + "/" + prefix + "*",
 	}}}
 	b, err := json.Marshal(p)

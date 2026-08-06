@@ -207,6 +207,7 @@ type Registry struct {
 	outboundContributions []OutboundContribution
 	mcpTools              []MCPToolDecl
 	mcpResources          []MCPResourceDecl
+	storageRequired       bool
 	ui                    *ModuleUI
 }
 
@@ -215,6 +216,23 @@ func New() *Registry {
 		routes:     make(map[Scope][]Route),
 		subscribes: make(map[string]string),
 	}
+}
+
+// RequireStorage declares that this module needs its per-app object-storage
+// namespace. The platform uses this manifest bit as the authorization gate for
+// vending a temporary S3 credential; modules that do not opt in receive no S3
+// access at all.
+func (r *Registry) RequireStorage() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.storageRequired = true
+}
+
+// StorageRequired reports whether RequireStorage was declared.
+func (r *Registry) StorageRequired() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.storageRequired
 }
 
 // SetDescription sets the module's human-readable description. Last-write-wins;

@@ -74,11 +74,24 @@ type Client struct {
 	bucket    string
 	prefix    string // "apps/<app>/<module>/"; Credential.validate forbids empty
 	cdnBase   string // "https://media.mirrorstack.ai"
+	expiresAt time.Time
+	now       func() time.Time
 }
 
 // NewFromCredential creates a Client from platform-injected STS credentials.
 func NewFromCredential(cred Credential) (*Client, error) {
 	return newClient(cred, "", "")
+}
+
+// Open is retained for source compatibility with older SDK consumers. An
+// unscoped process-wide client can no longer be constructed safely; module
+// code must declare ms.RequireStorage and resolve ms.Storage per request so the
+// app identity participates in the credential scope.
+//
+// Deprecated: use ms.RequireStorage during startup and ms.Storage(ctx) in a
+// request handler.
+func Open(context.Context) (*Client, error) {
+	return nil, errors.New("mirrorstack/storage: Open is no longer safe because it cannot derive an app scope — use ms.RequireStorage() during startup and ms.Storage(ctx) per request")
 }
 
 // newClient separates the endpoint used by server-side S3 calls from the one
@@ -115,18 +128,25 @@ func newClient(cred Credential, internalEndpoint, publicEndpoint string) (*Clien
 		bucket:    cred.Bucket,
 		prefix:    cred.Prefix,
 		cdnBase:   cred.CDNBase,
+		expiresAt: cred.ExpiresAt,
+		now:       time.Now,
 	}, nil
 }
 
-// ForApp returns a new Client with an app-scoped prefix and CDN base.
-// Shares the underlying S3 client.
-func (c *Client) ForApp(prefix, cdnBase string) *Client {
+// ForApp is retained for source compatibility but can no longer rescope a
+// vended credential. Prefix and CDN base are platform-owned because the public
+// CDN path must remain inside the same app/module boundary as the IAM policy.
+//
+// Deprecated: resolve ms.Storage(ctx) separately for each request.
+func (c *Client) ForApp(_, _ string) *Client {
 	return &Client{
 		presigner: c.presigner,
 		s3Client:  c.s3Client,
 		bucket:    c.bucket,
-		prefix:    prefix,
-		cdnBase:   cdnBase,
+		prefix:    c.prefix,
+		cdnBase:   c.cdnBase,
+		expiresAt: c.expiresAt,
+		now:       c.now,
 	}
 }
 
@@ -135,11 +155,43 @@ func (c *Client) ForApp(prefix, cdnBase string) *Client {
 // public delivery routes may legitimately use storage too.
 var ErrNoCredential = fmt.Errorf("mirrorstack/storage: no storage credentials — presigned URLs require authenticated context")
 
+// ErrNotDeclared is returned when module code calls ms.Storage without first
+// declaring ms.RequireStorage during startup. Undeclared modules receive no
+// storage credential from the platform.
+var ErrNotDeclared = errors.New("mirrorstack/storage: storage was not declared — call ms.RequireStorage() during module startup before using ms.Storage(ctx)")
+
 // ErrNotVended is returned when a deployed invocation carries no storage credential.
 var ErrNotVended = errors.New("mirrorstack/storage: the platform did not vend storage credentials for this invocation (envelope resources.storage was absent) — this is a PLATFORM misconfiguration, not a module bug: the operator must wire dispatch's module-storage vend (MS_MODULE_STORAGE_ROLE_ARN / _BUCKET / _CDN_BASE)")
 
+// ErrCredentialExpired is returned when a vended STS credential has no safe
+// lifetime left for a new presigned URL.
+var ErrCredentialExpired = errors.New("mirrorstack/storage: storage credential expired before a safe presigned URL could be created")
+
 // UnderLambda reports whether the process is running under AWS Lambda.
 func UnderLambda() bool { return lambdaenv.IsSet() }
+
+const credentialExpirySafetyMargin = 30 * time.Second
+
+func (c *Client) presignTTL(requested time.Duration) (time.Duration, error) {
+	if requested <= 0 {
+		return 0, fmt.Errorf("mirrorstack/storage: presign expiry must be positive")
+	}
+	if c.expiresAt.IsZero() {
+		return requested, nil
+	}
+	now := time.Now
+	if c.now != nil {
+		now = c.now
+	}
+	remaining := c.expiresAt.Sub(now()) - credentialExpirySafetyMargin
+	if remaining <= 0 {
+		return 0, ErrCredentialExpired
+	}
+	if requested > remaining {
+		return remaining, nil
+	}
+	return requested, nil
+}
 
 // PresignPut generates a presigned S3 PUT URL for uploading a file.
 // Requires storage credentials in context (Platform/Internal routes only).
@@ -148,6 +200,10 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 		return "", err
 	}
 	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	expires, err := c.presignTTL(expires)
+	if err != nil {
 		return "", err
 	}
 	fullKey := c.prefix + key
@@ -168,6 +224,10 @@ func (c *Client) PresignGet(ctx context.Context, key string, expires time.Durati
 		return "", err
 	}
 	if err := validateKey(key); err != nil {
+		return "", err
+	}
+	expires, err := c.presignTTL(expires)
+	if err != nil {
 		return "", err
 	}
 	fullKey := c.prefix + key

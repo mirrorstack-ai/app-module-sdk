@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 type contextKey string
@@ -14,13 +15,18 @@ const credentialKey = contextKey("ms-storage-credential")
 type Credential struct {
 	Bucket string `json:"bucket"`
 	Region string `json:"region"`
-	// Prefix is apps/<appUUID>/<moduleUUID>/ in production. Dev uses
-	// apps/<appUUID>/<module-slug>/ because the SDK has no production module UUID.
+	// Prefix is apps/<appUUID>/<moduleUUID>/ in production. Dev uses the
+	// platform-minted Config.ID in the module segment because no installed
+	// module UUID exists in a local tunnel session.
 	Prefix          string `json:"prefix"`
 	CDNBase         string `json:"cdnBase"` // "https://media.mirrorstack.ai"
 	AccessKeyID     string `json:"accessKeyId"`
 	SecretAccessKey string `json:"secretAccessKey"`
 	SessionToken    string `json:"sessionToken"`
+	// ExpiresAt is the STS credential expiry. Older platform envelopes may omit
+	// it; clients preserve that compatibility while newer envelopes use it to
+	// keep presigned URLs within the credential lifetime.
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 }
 
 // validate checks that all required fields are populated. Prefix is required
