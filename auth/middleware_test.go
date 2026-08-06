@@ -524,17 +524,23 @@ func TestPlatformAuth_PlatformToken_ValidToken_InjectsIdentity(t *testing.T) {
 	}
 }
 
+func withPlatformSurfaceForTest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(actor.WithPlatformSurface(r.Context())))
+	})
+}
+
 func TestPlatformAuth_TrustedProxyActivatesPrivateActorDelegation(t *testing.T) {
 	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
 	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
 	t.Setenv("MS_INTERNAL_SECRET", "")
 	const assertion = "msa1.payload.signature"
 	var gotActor, gotHeader string
-	handler := requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := withPlatformSurfaceForTest(requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotActor = actor.Delegation(r.Context())
 		gotHeader = r.Header.Get(actor.HeaderDelegation)
 		w.WriteHeader(http.StatusOK)
-	})))
+	}))))
 
 	req := httptest.NewRequest("GET", "/platform/users", nil)
 	req.Header.Set(HeaderPlatformToken, "pt-secret-789")
@@ -561,9 +567,9 @@ func TestPlatformAuth_DuplicateActorDelegationFailsClosed(t *testing.T) {
 	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
 	t.Setenv("MS_INTERNAL_SECRET", "")
 	reached := false
-	handler := requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := withPlatformSurfaceForTest(requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		reached = true
-	})))
+	}))))
 
 	req := httptest.NewRequest("GET", "/platform/users", nil)
 	req.Header.Set(HeaderPlatformToken, "pt-secret-789")

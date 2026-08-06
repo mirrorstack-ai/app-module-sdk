@@ -87,8 +87,10 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 				// mark authorizes activation of its pending delegation. On Lambda,
 				// the typed payload is the equivalent trust boundary. A caller that
 				// merely preloads Identity cannot activate or smuggle one in.
-				if proxyTrusted(r.Context()) || PayloadTrusted(r.Context()) {
+				if actor.PlatformSurface(r.Context()) && (proxyTrusted(r.Context()) || PayloadTrusted(r.Context())) {
 					r = r.WithContext(actor.ActivatePendingDelegation(r.Context()))
+				} else {
+					r = discardActorDelegation(r)
 				}
 				next.ServeHTTP(w, stripActorDelegationHeader(r))
 				return
@@ -106,7 +108,7 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 					AppID:   "local-dev-app",
 					AppRole: RoleAdmin,
 				})
-				next.ServeHTTP(w, stripActorDelegationHeader(r.WithContext(ctx)))
+				next.ServeHTTP(w, discardActorDelegation(r.WithContext(ctx)))
 				return
 			}
 
@@ -144,10 +146,15 @@ func platformAuth(inLambda bool) func(http.Handler) http.Handler {
 				AppRole: appRole,
 			})
 			r = r.WithContext(ctx)
-			var ok bool
-			r, ok = captureTrustedActorDelegation(w, r)
-			if !ok {
-				return
+			if actor.PlatformSurface(r.Context()) {
+				var ok bool
+				r, ok = capturePendingActorDelegation(w, r)
+				if !ok {
+					return
+				}
+				r = r.WithContext(actor.ActivatePendingDelegation(r.Context()))
+			} else {
+				r = discardActorDelegation(r)
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -223,7 +230,7 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 			// Mirrors RequireProxy: the mark is set only by the lambda entry,
 			// never from inbound request data, so a direct caller cannot forge it.
 			if PayloadTrusted(r.Context()) {
-				next.ServeHTTP(w, stripActorDelegationHeader(r))
+				next.ServeHTTP(w, discardActorDelegation(r))
 				return
 			}
 
@@ -240,7 +247,7 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 					})
 					return
 				}
-				next.ServeHTTP(w, stripActorDelegationHeader(r))
+				next.ServeHTTP(w, discardActorDelegation(r))
 				return
 			}
 
@@ -263,21 +270,9 @@ func internalAuth(inLambda bool) func(http.Handler) http.Handler {
 			// CRITICAL ORDERING: this MUST stay below the constant-time check —
 			// promoting on the local bypass or any rejection branch would trust
 			// spoofable headers from an unauthenticated caller.
-			next.ServeHTTP(w, promoteForwarderIdentity(stripActorDelegationHeader(r)))
+			next.ServeHTTP(w, promoteForwarderIdentity(discardActorDelegation(r)))
 		})
 	}
-}
-
-// captureTrustedActorDelegation moves the private actor assertion off the
-// HTTP wire and into internal request context. Callers must invoke it only
-// after a platform trust signal has succeeded. Ambiguous, empty, oversized,
-// or delimiter-bearing values fail closed without logging the assertion.
-func captureTrustedActorDelegation(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
-	r, assertion, ok := takeTrustedActorDelegation(w, r)
-	if !ok || assertion == "" {
-		return r, ok
-	}
-	return r.WithContext(actor.WithDelegation(r.Context(), assertion)), true
 }
 
 // capturePendingActorDelegation removes the private header immediately after
@@ -323,6 +318,14 @@ func stripActorDelegationHeader(r *http.Request) *http.Request {
 	clean.Header = r.Header.Clone()
 	clean.Header.Del(actor.HeaderDelegation)
 	return clean
+}
+
+// discardActorDelegation removes the wire header and shadows any active or
+// pending assertion inherited from a typed payload or an upstream context.
+// Use this at every Public/Internal or unauthenticated local boundary.
+func discardActorDelegation(r *http.Request) *http.Request {
+	r = stripActorDelegationHeader(r)
+	return r.WithContext(actor.WithoutDelegation(r.Context()))
 }
 
 // CodeNotProxied is the stable error code returned when a request reaches a
@@ -392,7 +395,11 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			// request data — so honoring it here cannot be forged by a direct
 			// caller.
 			if inLambda || PayloadTrusted(r.Context()) {
-				next.ServeHTTP(w, stripActorDelegationHeader(r))
+				if actor.PlatformSurface(r.Context()) {
+					next.ServeHTTP(w, stripActorDelegationHeader(r))
+				} else {
+					next.ServeHTTP(w, discardActorDelegation(r))
+				}
 				return
 			}
 
@@ -403,7 +410,7 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			// came from dispatch, so trusting them would let a direct caller
 			// forge an app id. The surface is simply open (local dev / tests).
 			if !configured {
-				next.ServeHTTP(w, stripActorDelegationHeader(r))
+				next.ServeHTTP(w, discardActorDelegation(r))
 				return
 			}
 
@@ -433,9 +440,15 @@ func requireProxy(inLambda bool) func(http.Handler) http.Handler {
 			//
 			// CRITICAL ORDERING: this MUST run only after the token check above
 			// passes. Promoting before validation would trust spoofable headers.
-			trusted, ok := capturePendingActorDelegation(w, r)
-			if !ok {
-				return
+			trusted := r
+			if actor.PlatformSurface(r.Context()) {
+				var ok bool
+				trusted, ok = capturePendingActorDelegation(w, r)
+				if !ok {
+					return
+				}
+			} else {
+				trusted = discardActorDelegation(r)
 			}
 			trusted = promoteForwarderIdentity(trusted)
 			trusted = trusted.WithContext(withProxyTrust(trusted.Context()))

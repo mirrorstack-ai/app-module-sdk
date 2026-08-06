@@ -28,6 +28,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/i18n"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
@@ -330,12 +331,17 @@ func (m *Module) Router() *chi.Mux { return m.router }
 // Default role gate: admin only. Use Module.RequirePermission to
 // open routes to member/viewer.
 func (m *Module) Platform(fn func(r chi.Router)) {
-	// proxyGuard runs BEFORE PlatformAuth: reject non-proxied callers at the
-	// trust boundary, then let PlatformAuth read the now-trusted identity
-	// headers. (PlatformAuth already validates the platform token on its own,
-	// so the guard is belt-and-suspenders here, but keeping it makes the
-	// public + platform surfaces enforce identically and auditably.)
-	m.scopedRoutes(registry.ScopePlatform, fn, m.proxyGuard, m.platformAuth)
+	// platformActorSurface installs the private capability before proxyGuard
+	// captures a pending actor assertion. PlatformAuth can activate delegation
+	// only while this marker is present, so a module cannot reproduce the
+	// capability by nesting the exported middleware on another surface.
+	m.scopedRoutes(registry.ScopePlatform, fn, platformActorSurface, m.proxyGuard, m.platformAuth)
+}
+
+func platformActorSurface(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(actor.WithPlatformSurface(r.Context())))
+	})
 }
 
 // Public registers routes with public auth scope (anyone, including
