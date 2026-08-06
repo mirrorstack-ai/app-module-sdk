@@ -53,6 +53,10 @@ the contribution registry used to provision the per-app contribution store.
   effect.
 - **`ms.Emit` authenticates with the module service secret**, matching the
   already authenticated usage and notification callbacks.
+- **`ms.Call` authenticates inter-module requests with the module service
+  secret.** Dispatch can now distinguish a module caller from a browser caller
+  before it injects the bounded internal identity, and the credential is
+  omitted when it is not configured and never included in returned errors.
 - **A declared UI without a bundle fails startup** instead of advertising a
   surface that can only 404 at runtime.
 - Multipart uploads can be aborted through the same exact-prefix resource
@@ -70,7 +74,7 @@ the contribution registry used to provision the per-app contribution store.
 - Rebuild every storage-using module on v0.4.0; older SDKs do not enforce the
   declaration or credential-expiry boundary.
 
-Includes app-module-sdk #163, #164, #165, #166, and #167. Part of
+Includes app-module-sdk #163, #164, #165, #166, #167, and #170. Part of
 mirrorstack-ai/mirrorstack-core-v2#338.
 
 ## [v0.3.2] - 2026-08-02
