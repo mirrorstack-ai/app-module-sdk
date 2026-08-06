@@ -5,26 +5,6 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-- **A module's contribution store is now created on the deployed plane.** `<moduleID>_contributions` was only ever created under `mirrorstack dev`: the one non-dev call site sat *below* `Start()`'s `runtime.IsLambda()` early return, so a deployed module never ran it — and even off-Lambda it created the table in the connection's default schema, which is the wrong place for a per-app table. Every deployed host of a contribution slot therefore answered `ms.StoredContributions` with `relation "m..._contributions" does not exist`, and every consumer of that call reported "no contributions" — indistinguishable, to an operator, from nobody having contributed. For oauth-core's `auth-provider` slot that is sign-in.
-
-  Provisioning moves to the platform's per-(app, module) lifecycle window: `system.InstallHandler` and `system.UpgradeHandler` now run an SDK-owned `Provisioner` before the author's migrations, inside the install context the platform already sends (`schema` + `credential`). That is the only place on the deployed plane where the SDK holds an app schema together with a role allowed to create tables in it, and it is per-app by construction — a cold-start hook could not be, because one Lambda container serves many apps. A schema-less (dev-tunnel) body stays a no-op; the dev plane keeps creating the store in `provisionDevAppSchema` exactly as before.
-
-  `EnsureTable` is now concurrency-safe: the CREATEs ride a `pg_advisory_xact_lock` keyed on `current_schema()` in the same argument-less `Exec` (one implicit transaction — split into two statements the lock would be released before the DDL it guards), with `42P07`/`23505` tolerated as "the relation exists" for the racers the lock cannot cover. Without it, eight concurrent installs of one app fail with a `pg_type_typname_nsp_index` unique violation.
-
-- **An app installed before this ships heals itself on first use.** The platform sends no lifecycle call at all to an install already at its target migration counter, so the hook alone would never reach existing installs. `ms.StoredContributions` and the `/__mirrorstack/contrib` routes now create the store and retry once when — and only when — Postgres answers `42P01`. Any other failure, a missing `CREATE` grant included, still surfaces.
-
-- **`Module.StoredContributions` reads its OWN pool.** It called the package-level `DB(ctx)`, which resolves through the module created by `ms.Init`, so a non-default `*Module` read another module's connection.
-
-### Changed
-- `system.InstallHandler` and `system.UpgradeHandler` take a fourth argument, `Provisioner` (nil for none). `DowngradeHandler` deliberately does not: reverting an author's migrations is not a reason to re-create SDK infrastructure. Modules do not call these — `ms.Init` mounts them.
-
-### Upgrade notes
-- **A deployed module must be rebuilt against this SDK for its store to be created.** Nothing on the platform side changes.
-- **The contribution PUSH still has no deployed transport.** `pushContribution` and the manifest read behind it resolve only a live dev-tunnel session (`WSSessionModuleEndpoints`), so on the deployed plane the platform never asks a host to register anything — silently, before the store is even reached. This release makes the store exist and reads return empty instead of erroring; filling it deployed is a platform change.
-
 ## [v0.3.2] - 2026-08-02
 
 **No wire change. Nothing about what this SDK sends is different from v0.3.1** — this release documents and test-pins a contract that already holds, so that the platform can start authenticating *deployed* modules without any module rebuild.
