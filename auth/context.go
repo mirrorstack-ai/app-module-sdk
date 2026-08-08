@@ -43,6 +43,22 @@ func Get(ctx context.Context) *Identity {
 
 const payloadTrustKey = contextKey("ms-payload-trust")
 
+const proxyTrustKey = contextKey("ms-proxy-trust")
+
+// withProxyTrust marks the HTTP request after RequireProxy validates the
+// server-only platform token. PlatformAuth uses this private mark to know that
+// it may capture the dispatch-issued actor delegation header. Public routes do
+// not run PlatformAuth, so they never gain a delegation merely by being
+// proxied.
+func withProxyTrust(ctx context.Context) context.Context {
+	return context.WithValue(ctx, proxyTrustKey, true)
+}
+
+func proxyTrusted(ctx context.Context) bool {
+	trusted, _ := ctx.Value(proxyTrustKey).(bool)
+	return trusted
+}
+
 // WithPayloadTrust marks ctx as carrying identity injected from the typed
 // Lambda payload — set ONLY by runtime.NewLambdaHandler (the real Lambda
 // invoke path, or the dev lambda-invoke shim after its envelope-secret gate).

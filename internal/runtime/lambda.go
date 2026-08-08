@@ -72,6 +72,10 @@ type LambdaRequest struct {
 	AppID     string `json:"appId,omitempty"`
 	AppRole   string `json:"appRole,omitempty"`
 	AppSchema string `json:"appSchema,omitempty"`
+	// ActorDelegation is an opaque, short-lived dispatch-signed assertion.
+	// It is a typed trusted field because every inbound X-MS-* claim header is
+	// stripped before the module router runs.
+	ActorDelegation string `json:"actorDelegation,omitempty"`
 }
 
 // LambdaResponse is returned to the platform after handling a request.
@@ -156,12 +160,13 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 		// InjectResources is the shared injection function used by both
 		// Lambda and task worker paths — see inject.go.
 		reqCtx, err := InjectResources(httpReq.Context(), InjectParams{
-			Resources:    req.Resources,
-			Dependencies: req.Dependencies,
-			UserID:       req.UserID,
-			AppID:        req.AppID,
-			AppRole:      req.AppRole,
-			AppSchema:    req.AppSchema,
+			Resources:       req.Resources,
+			Dependencies:    req.Dependencies,
+			UserID:          req.UserID,
+			AppID:           req.AppID,
+			AppRole:         req.AppRole,
+			AppSchema:       req.AppSchema,
+			ActorDelegation: req.ActorDelegation,
 		})
 		if err != nil {
 			return jsonError(400, err.Error()), nil
