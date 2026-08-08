@@ -7,10 +7,13 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [v0.4.0] - 2026-08-06
 
-This release makes module storage an explicit, fail-closed resource and makes
-contribution slots available on both the dev and deployed request planes. It is
-a minor release because the exported lifecycle handler constructors now accept
-the contribution registry used to provision the per-app contribution store.
+This release makes module storage an explicit, fail-closed resource and
+provisions each module's per-app contribution store on the deployed request
+plane. Contributions are still delivered only under
+`mirrorstack dev --tunnel`; the registration transport resolves only live
+dev-tunnel sessions. It is a minor release because the exported lifecycle
+handler constructors now accept the contribution registry used to provision
+the per-app contribution store.
 
 ### Added
 
@@ -46,11 +49,20 @@ the contribution registry used to provision the per-app contribution store.
 
 ### Fixed
 
-- **Contribution stores are created on deployed install/upgrade and heal only
-  a missing-table error.** App-schema isolation, advisory locking, and bounded
-  concurrent provisioning are shared with the dev lifecycle. Auth-provider and
-  role-assignment contributions no longer depend on a dev-only table side
-  effect.
+- **Deployed lifecycle hooks create the per-app contribution store, but
+  contribution delivery remains dev-tunnel-only.** Install and upgrade run the
+  SDK provisioner in the platform's app-schema context before author migrations;
+  advisory locking prevents concurrent provisioning from racing. Reads and
+  writes heal an older install by creating the store and retrying once, only on
+  PostgreSQL 42P01. A deployed host therefore sees an empty contribution slot
+  instead of an undefined-table error. Delivery is the half that is still
+  missing: the platform's install-time reconcile both reads the contributor's
+  declared `contributesTo` and POSTs it into the host's slot over a transport
+  that resolves only live `mirrorstack dev --tunnel` WebSocket sessions, so the
+  push is skipped whenever EITHER module is deployed — recorded in the platform
+  server log and nowhere else. Neither module sees an error, so an empty slot on
+  the deployed plane means "nothing was ever delivered", not "nothing was
+  contributed".
 - **`ms.Emit` authenticates with the module service secret**, matching the
   already authenticated usage and notification callbacks.
 - **`ms.Call` authenticates inter-module requests with the module service
@@ -71,6 +83,12 @@ the contribution registry used to provision the per-app contribution store.
   upgrade the platform before rebuilding storage-using modules on v0.4.0.
 - Direct callers of `system.InstallHandler` or `system.UpgradeHandler` must pass
   the module contribution registry as the new argument.
+- **Do not deploy a module whose behavior depends on receiving contributions.**
+  The store exists on the deployed plane; the registration transport does not,
+  and the miss is silent on both sides. Deploying a host and its contributor
+  together — e.g. an `auth-provider` slot, which is sign-in — leaves the host
+  with an empty slot and no error anywhere. Keep those modules on
+  `mirrorstack dev --tunnel` until a deployed registration transport ships.
 - Rebuild every storage-using module on v0.4.0; older SDKs do not enforce the
   declaration or credential-expiry boundary.
 
