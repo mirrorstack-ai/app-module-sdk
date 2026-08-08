@@ -19,7 +19,10 @@ jobs:
         github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_branch == 'main'
       }}
-    runs-on: ubuntu-latest
+    # Runner selection is data, not code.
+    # Unset RUNNER_LABELS falls back to GitHub-hosted arm64; the org variable currently
+    # points at the shared self-hosted labels. arm64 is deliberate.
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-24.04-arm"]') }}
     steps:
       - name: Mint core-only workflow dispatcher token
         id: app-token

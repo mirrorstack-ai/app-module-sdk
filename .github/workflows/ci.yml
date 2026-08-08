@@ -11,7 +11,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Runner selection is data, not code.
+    # Unset RUNNER_LABELS falls back to GitHub-hosted arm64; the org variable currently
+    # points at the shared self-hosted labels. arm64 is deliberate.
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-24.04-arm"]') }}
+    # Limit hung jobs to 20 minutes so they cannot occupy one of three shared runners for six hours.
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine

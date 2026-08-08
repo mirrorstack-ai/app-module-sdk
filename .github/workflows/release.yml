@@ -21,7 +21,10 @@ on:
 jobs:
   release:
     if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'release')
-    runs-on: ubuntu-latest
+    # Runner selection is data, not code.
+    # Unset RUNNER_LABELS falls back to GitHub-hosted arm64; the org variable currently
+    # points at the shared self-hosted labels. arm64 is deliberate.
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-24.04-arm"]') }}
     permissions:
       contents: write
     steps:
@@ -52,8 +55,9 @@ jobs:
       - name: Verify tag does not already exist
         run: |
           TAG="v${{ steps.version.outputs.version }}"
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "Tag $TAG already exists — bump VERSION before merging." >&2
+          # Reused workspaces may retain local tags, so origin is the release authority.
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "Tag $TAG already exists on origin — bump VERSION before merging." >&2
             exit 1
           fi
 
