@@ -58,12 +58,34 @@ type Schedule struct {
 	Path string `json:"path"`
 }
 
+// TaskCompute is a task's declared execution class and size. It exists so the
+// platform can provision the right runner at deploy from the declaration alone
+// — the same mechanism that already provisions the SQS queue.
+//
+// It is equally a GUARDRAIL: "this module wants 4 vCPU / 8 GB" is visible in
+// the manifest, therefore visible at install, therefore approved by the app
+// owner before the module can spend anything — the same trust root that already
+// governs dependencies and exposed tables.
+//
+// The dimensions are RESOLVED, not requested: on the GPU class the instance
+// type fixes vCPU and memory, and these fields carry what was resolved from it.
+type TaskCompute struct {
+	Class    string  `json:"class"`              // "standard" (Lambda) | "heavy" (Fargate) | "gpu" (ECS on EC2)
+	VCPU     float64 `json:"vcpu,omitempty"`     // heavy: requested; gpu: resolved from Instance
+	MemoryMB int     `json:"memoryMb,omitempty"` // standard/heavy: requested; gpu: resolved from Instance
+	Instance string  `json:"instance,omitempty"` // gpu only
+}
+
 // Task is a declared background task. Exposed in the manifest so the platform
-// can provision SQS queues and ECS task definitions on deploy.
+// can provision SQS queues and execution runners on deploy.
 type Task struct {
 	Name        string `json:"name"`
 	MaxDuration string `json:"maxDuration,omitempty"` // e.g. "600s", "10m" — platform sets visibility timeout
 	MaxRetries  int    `json:"maxRetries,omitempty"`  // platform configures DLQ redrive policy
+	// Compute is a POINTER so an undeclared class omits the key entirely:
+	// encoding/json does not omit a zero struct, and a task that predates
+	// WithCompute must keep a byte-identical manifest entry.
+	Compute *TaskCompute `json:"compute,omitempty"`
 }
 
 // Permission is a declared module permission. Exposed in the manifest so the
