@@ -5,6 +5,96 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - 2026-08-06
+
+This release makes module storage an explicit, fail-closed resource and
+provisions each module's per-app contribution store on the deployed request
+plane. Contributions are still delivered only under
+`mirrorstack dev --tunnel`; the registration transport resolves only live
+dev-tunnel sessions. It is a minor release because the exported lifecycle
+handler constructors now accept the contribution registry used to provision
+the per-app contribution store.
+
+### Added
+
+- **Modules must declare storage with `ms.RequireStorage()`.** The declaration
+  is emitted as `resources.storage` in the manifest, giving the platform an
+  auditable gate before it vends credentials. `ms.Storage(ctx)` returns
+  `storage.ErrNotDeclared` when the declaration is absent; there is no
+  undeclared fallback.
+- **Dev storage now has production-shaped isolation.** The SDK exchanges a
+  non-root MinIO parent identity for a short-lived STS session scoped to exactly
+  `apps/<appUUID>/<moduleUUID>/`. Concurrent callers share one bounded,
+  single-flight credential cache, and the SDK never falls back to AWS or an
+  unscoped prefix when local STS is unavailable.
+- **Storage credentials carry `expiresAt`.** Put/get/multipart presigns clamp
+  their lifetime below the credential expiry with a safety margin, and expired
+  credentials fail with `storage.ErrCredentialExpired` rather than producing a
+  URL that will fail later.
+
+### Changed
+
+- **`ms.Storage(ctx)` is plane-neutral and always prefix-scoped.** Deployed
+  requests consume the platform-injected resource; dev requests mint the same
+  bounded shape locally. Compatibility helpers such as `storage.Open` and
+  `Client.ForApp` remain available but cannot widen or replace the vended
+  app/module prefix.
+- **Lifecycle handler constructors accept the contribution registry.**
+  `system.InstallHandler` and `system.UpgradeHandler` now receive the registry
+  needed to provision the module's contribution table inside the target app
+  schema. Normal modules using `ms.Start()` require no call-site change;
+  direct users of these exported constructors must pass the registry.
+- **UI modules opt in to local-network access.** Tunnel-served bundles can load
+  their local development assets without weakening deployed origins.
+
+### Fixed
+
+- **Deployed lifecycle hooks create the per-app contribution store, but
+  contribution delivery remains dev-tunnel-only.** Install and upgrade run the
+  SDK provisioner in the platform's app-schema context before author migrations;
+  advisory locking prevents concurrent provisioning from racing. Reads and
+  writes heal an older install by creating the store and retrying once, only on
+  PostgreSQL 42P01. A deployed host therefore sees an empty contribution slot
+  instead of an undefined-table error. Delivery is the half that is still
+  missing: the platform's install-time reconcile both reads the contributor's
+  declared `contributesTo` and POSTs it into the host's slot over a transport
+  that resolves only live `mirrorstack dev --tunnel` WebSocket sessions, so the
+  push is skipped whenever EITHER module is deployed — recorded in the platform
+  server log and nowhere else. Neither module sees an error, so an empty slot on
+  the deployed plane means "nothing was ever delivered", not "nothing was
+  contributed".
+- **`ms.Emit` authenticates with the module service secret**, matching the
+  already authenticated usage and notification callbacks.
+- **`ms.Call` authenticates inter-module requests with the module service
+  secret.** Dispatch can now distinguish a module caller from a browser caller
+  before it injects the bounded internal identity, and the credential is
+  omitted when it is not configured and never included in returned errors.
+- **A declared UI without a bundle fails startup** instead of advertising a
+  surface that can only 404 at runtime.
+- Multipart uploads can be aborted through the same exact-prefix resource
+  contract used for their parts.
+
+### Upgrade notes
+
+- Add `ms.RequireStorage()` during module registration before calling
+  `ms.Storage(ctx)`. A module that used implicit environment-based storage will
+  now fail closed until it declares the resource.
+- Deployed storage requires the paired api-platform resource-vending release;
+  upgrade the platform before rebuilding storage-using modules on v0.4.0.
+- Direct callers of `system.InstallHandler` or `system.UpgradeHandler` must pass
+  the module contribution registry as the new argument.
+- **Do not deploy a module whose behavior depends on receiving contributions.**
+  The store exists on the deployed plane; the registration transport does not,
+  and the miss is silent on both sides. Deploying a host and its contributor
+  together — e.g. an `auth-provider` slot, which is sign-in — leaves the host
+  with an empty slot and no error anywhere. Keep those modules on
+  `mirrorstack dev --tunnel` until a deployed registration transport ships.
+- Rebuild every storage-using module on v0.4.0; older SDKs do not enforce the
+  declaration or credential-expiry boundary.
+
+Includes app-module-sdk #163, #164, #165, #166, #167, and #170. Part of
+mirrorstack-ai/mirrorstack-core-v2#338.
+
 ## [v0.3.2] - 2026-08-02
 
 **No wire change. Nothing about what this SDK sends is different from v0.3.1** — this release documents and test-pins a contract that already holds, so that the platform can start authenticating *deployed* modules without any module rebuild.
