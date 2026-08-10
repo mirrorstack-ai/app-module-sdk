@@ -141,27 +141,22 @@ Re-adding the permission gate does not restore a caller boundary; it breaks the
 actorless read.
 
 Because the route cannot authenticate its caller, browser-originated `Internal`
-paths must be refused by the platform. Today the platform does not refuse them
-for dev-mounted modules. The dispatch mount is unauthenticated at the HTTP edge,
-and the only namespace it refuses is `__mirrorstack/*`; its other path-shape
-checks do not cover `/internal/`, so `/internal/...` is forwarded to the module.
-The handler injects the module owner's user id and a hardcoded `admin` app-role
-together with the session's internal secret, handing the module a privileged
-identity no caller presented.
+paths must be refused by the platform. Today they are not. The dispatch mount at
+`/module/...` is unauthenticated at the HTTP edge, and the only namespace it
+refuses is `__mirrorstack/*` — its other path-shape checks do not cover
+`/internal/` — so `/internal/...` is forwarded to the module. The handler then
+injects the module owner's user id and a hardcoded `admin` app-role alongside an
+internal secret, handing the module a privileged identity no caller presented.
 
-The five-condition dev gate — app dev-mode, module dev-mode, `dev_mount`, an
-install row, and a live tunnel — controls whether the localhost plane is open.
-It does not establish who is asking. On the dev plane, an `Internal` route is
-not a confidentiality boundary. Do not place behind it anything that would be
-harmful to expose to whoever can reach the module edge on either plane.
+This holds on both planes. The five-condition dev gate — app dev-mode, module
+dev-mode, `dev_mount`, an install row, and a live tunnel — decides whether the
+localhost plane is open, not who is asking; and a module with a deploy row is
+served by a second branch of the same edge that skips those conditions
+altogether and invokes the deployed function with the same fabricated identity.
+The gap belongs to the `/module` browser edge, not to dev-mounting.
 
-The dev-tunnel branch does not serve deployed modules. The same unauthenticated
-`/module` browser edge also has a deployed branch, however. It skips the dev
-conditions and forwards `/internal/*` to the deployed function with the same
-fabricated identity: the owner's user id and `admin` role, plus the platform's
-own internal secret. The gap is therefore a property of the `/module` browser
-edge, not the dev plane, and is present on both the dev-tunnel and deployed
-planes.
+So an `Internal` route is not a confidentiality boundary. Do not put behind it
+anything that would be harmful to expose to whoever can reach that edge.
 
 ## 8. Checklist
 
@@ -176,7 +171,7 @@ planes.
 - [ ] Bounded reads report `hasMore`; the surface says it is capped
 - [ ] No backfill; pre-existing rows read as unknown
 - [ ] `Internal` read not permission-gated; its data is safe to expose to anyone
-  who can reach the module edge on either plane
+  who can reach the `/module` edge, on either plane
 - [ ] Migration embedded through `ms.Config.SQL`; manifest `migration` reflects
   it
 
