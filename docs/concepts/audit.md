@@ -30,10 +30,9 @@ which is the worst outcome available — it looks like an audit trail and destro
 evidence.
 
 **Watch for a `DELETE` that erases the record.** users-roles kept `granted_by`
-on the current row, but revoking was a plain `DELETE`, so the trail was being
-destroyed by design and nobody noticed until someone asked to see it. If your
-"current state" columns are the only provenance you have, a delete is a
-shredder.
+on the assignment row while revoking was a plain `DELETE` — so the revoke
+destroyed the only provenance the module had. If your "current state" columns
+are the only provenance you have, a delete is a shredder.
 
 ## 2. Provenance is two fields, never one
 
@@ -74,9 +73,10 @@ the operation because provenance is unavailable takes a control away from
 someone who legitimately holds it. Record what you know, say what you do not.
 
 **Validate against the column type before writing.** `revoked_by` is a `uuid`,
-and the SDK's local-dev bypass injects a synthetic non-UUID identity — writing
-it unchecked failed with `22P02`, which left the session live while the route
-reported 500 and rolled an enclosing transaction back. So:
+and the SDK's local-dev bypass mints the synthetic identity `local-dev-user`,
+which is not one. Writing it unchecked failed at the database with `22P02`: the
+session stayed live and the route answered 500, and on the path where the same
+write ran inside `ms.Tx` it took the enclosing transaction down with it. So:
 
 1. no identity → NULL actor, real `via`;
 2. identity present but unusable for the column → NULL actor, real `via`, and log it;
@@ -87,8 +87,11 @@ Never (4): refuse the operation.
 ## 4. Coverage must be structural, not remembered
 
 An enumerated list of call sites is a list that goes stale. users-roles has
-**eleven** call sites mutating one table across five logical paths, one of them
-outside `internal/` entirely — the kind that is missed.
+**eleven** call sites mutating `user_roles`, spread over **four files**:
+`internal/handlers/routes.go` (4),
+`internal/handlers/approval_transition.go` (3),
+`internal/handlers/self_service.go` (3), and `declare/default_role.go` (1) —
+the last one outside `internal/` entirely.
 
 So put the audit write **in the statement that does the mutation**: a
 data-modifying CTE whose `RETURNING` feeds the audit `INSERT`. A new writer then
@@ -127,50 +130,50 @@ count: only the producer knows its own page size.
   a lie in the one place lies are most costly. "We started recording this on
   date X" is a fine thing for a UI to say.
 
-## 7. Do not gate the read on an actorless transport
+## 7. Keep Internal reads honest
 
-Do not put `RequirePermission` on an `Internal` read — not because it would deny
-the service call, but because it would not deny anything.
+**Do not put `RequirePermission` on an `Internal` read.**
+`Module.RequirePermission(name)` returns `auth.RequireRoles(admin, ...declared)`:
+it decides from the app role on the request identity, and admin passes whatever
+the permission declares. `auth.RequireRoles` answers 401 `authentication
+required` when there is no identity or its `AppRole` is empty, and 403
+`forbidden` on a role miss. But an Internal hop is actorless: `ms.Call` carries
+a verified actor only to a canonical `/platform` path, so a Public or Internal
+call stays a service call even when it originates inside a Platform handler. The
+gate is therefore not evaluating your caller. It is deciding about the absence
+of one, on whatever identity the platform edge did or did not attach — which
+makes it read like a control in the source without being one.
 
-`ms.Call` is actorless: the hop carries the app id and the calling module's
-service secret, and dispatch injects the target module's internal secret. No
-caller identity travels with it. What *does* travel with it is a role the
-platform invents — every forward through the `/module` edge stamps
-`X-MS-App-Role: admin`, on the dev-tunnel branch and the deployed-Lambda branch
-alike. `RequirePermission` compiles to `auth.RequireRoles(admin, …declared)`,
-and admin always passes. So the gate does not reject the service identity: it
-admits it, and admits everything else that reaches the same edge, while reading
-in the source like a control. Silent admission is the failure here, not a
-denial.
+**Do not take the edge's behaviour from prose, including this page's.** Two
+characterization suites exist precisely because design documents about this kept
+asserting the opposite of the code, and they are the executable answer. In this
+repo, [`auth_scope_truth_test.go`](../../auth_scope_truth_test.go) —
+`TestCharacterization_RequirePermissionAdmitsAdminRegardlessOfDeclaredRoles` and
+`TestCharacterization_RoleGateReturns401WithoutActor_403OnRoleMiss` pin the gate
+described above. In api-platform,
+`internal/dispatch/handler/module_edge_truth_test.go` and
+`module_edge_router_wiring_test.go` — `TestModuleEdge_RouteClassTrustMatrix`,
+`TestModuleEdge_StampsNoFabricatedRole` and
+`TestModuleEdgeIsMountedWithoutAuthMiddleware` pin what the edge hands a module,
+per route class. Read them before writing anything about this, and cite them
+instead of paraphrasing them. Both files say the same thing about themselves:
+changing an assertion there is a security decision, not test fixup.
 
-The read can still fail, and the caller will not see why. `ms.Call` returns an
-error for any non-2xx, and the edge produces several before the module is ever
-reached: `not_installed` (404), `route_local_off` and `tunnel_offline` (503), a
-resolver fault (500). A host that degrades a failed audit fetch to "no audit
-section" renders each of those as *"this subject has no history"*. Distinguish
-"empty" from "could not load" and say which — an audit surface that cannot tell
-them apart is worse than one that is absent.
+**Distinguish "empty" from "could not load".** `ms.Call` returns an error for
+every non-2xx response. A host that degrades a failed audit fetch into "no audit
+section" renders that failure as *"this subject has no history"* — a security
+ledger vanishing silently, which is the one thing an audit surface must never
+do. Say which of the two happened.
 
-Because the route cannot authenticate its caller, browser-originated `Internal`
-paths must be refused by the platform. Today they are not. The dispatch mount at
-`/module/...` is unauthenticated at the HTTP edge, and the only namespace it
-refuses is `__mirrorstack/*` — its other path-shape checks do not cover
-`/internal/` — so `/internal/...` is forwarded to the module. The handler then
-injects the module owner's user id and a hardcoded `admin` app-role alongside an
-internal secret, handing the module a privileged identity no caller presented.
-
-This holds on both planes. The five-condition dev gate — app dev-mode, module
-dev-mode, `dev_mount`, an install row, and a live tunnel — decides whether the
-localhost plane is open, not who is asking. A module with a deploy row is served
-by a second branch of the same edge that keeps exactly one of those five: the
-deploy is resolved through that app's own `module_install` row, so a missing
-install row (or an un-bootstrapped app schema) still resolves to no transport.
-The four dev conditions are not consulted, and the deployed function is invoked
-with the same fabricated identity. The gap belongs to the `/module` browser
-edge, not to dev-mounting.
-
-So an `Internal` route is not a confidentiality boundary. Do not put behind it
-anything that would be harmful to expose to whoever can reach that edge.
+**Scope is not a confidentiality boundary.** `PlatformAuth` and `InternalAuth`
+read the same secret source, so one internal secret authenticates both scopes —
+`TestCharacterization_InternalSecretSatisfiesPlatformAuth_ScopesAreNotDisjoint`
+pins that. And when no secret source is configured at all and the process is not
+in Lambda, `PlatformAuth` mints a synthetic `local-dev-user` admin while
+`InternalAuth` bypasses its check outright. Design so the answer stops mattering:
+put nothing on an `Internal` route that would be harmful to hand to a caller you
+did not authorize. Real protection lives in the handler, or in what you store —
+never in the scope keyword.
 
 ## 8. Checklist
 
@@ -184,10 +187,14 @@ anything that would be harmful to expose to whoever can reach that edge.
 - [ ] Append-only asserted; no FK to the described entity
 - [ ] Bounded reads report `hasMore`; the surface says it is capped
 - [ ] No backfill; pre-existing rows read as unknown
-- [ ] `Internal` read not permission-gated; its data is safe to expose to anyone
-  who can reach the `/module` edge, on either plane
+- [ ] `Internal` read not permission-gated; its data safe to hand to a caller you
+  did not authorize
+- [ ] Failed read distinguished from empty read at every layer that renders it
 - [ ] Migration embedded through `ms.Config.SQL`; manifest `migration` reflects
   it
 
-See also [scopes](scopes.md), [internal-calls](internal-calls.md),
-[manifest](manifest.md).
+See also [scopes](scopes.md) and [manifest](manifest.md). For what the auth
+model actually does, read the suites rather than the prose:
+[`auth_scope_truth_test.go`](../../auth_scope_truth_test.go) in this repo, and
+`internal/dispatch/handler/module_edge_truth_test.go` plus
+`internal/dispatch/handler/module_edge_router_wiring_test.go` in api-platform.

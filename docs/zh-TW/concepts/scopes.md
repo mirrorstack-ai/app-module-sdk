@@ -53,7 +53,7 @@ SDK 在這層不做使用者認證,但 proxy guard 仍然守在每個 Public rou
 
 Platform 打 module。Request 必須帶 `X-MS-Internal-Secret: <shared secret>`(透過 `MS_INTERNAL_SECRET` 環境變數設定);只要有設定 secret 來源,SDK 就會把沒帶或帶錯的 request 擋掉,回 401。純本機執行、沒有設定 secret 時,SDK 會直接放行,讓 `mirrorstack dev` 可以自己 curl 自己的 route ——`--tunnel` 與部署後的模式都會設定 secret。
 
-**這個 secret 不是呼叫端的邊界。** 它擋得住「直接」打到你的 module(它的 localhost port、它的 function target)而且沒帶 secret 的呼叫端,但擋不住瀏覽器。平台的 `/module/{moduleID}/*` edge 在 HTTP 層是完全沒有驗證的,只會拒絕 `__mirrorstack/*` 這個 namespace,並且會把 `/internal/...` 轉發給你的 module,同時由平台自己補上 internal secret 和寫死的 `admin` app-role。因此只要能打到那個 edge 的人,就能打到 `Internal` route ——參見 [audit trails](../../concepts/audit.md) §7。
+**secret 是 SDK middleware 檢查的 credential。** Forwarder identity header 只會在 secret 驗證通過的路徑被提升,local bypass 或拒絕路徑都不會;空 header 也不會建立 identity。`TestCharacterization_ForwarderIdentityTrustedOnlyOnSecretValidatedPath` 固定了這項行為。誰能透過平台打到某個 route class,是 platform edge 的屬性,由 api-platform 的 `TestModuleEdge_RouteClassTrustMatrix` 固定,不由本頁描述。
 
 用在:
 
@@ -74,17 +74,21 @@ ms.Internal(func(r chi.Router) {
 
 ## Auth 對照表
 
+以下是在真正的 `m.Router()` 上實測的結果:已設定 `MS_INTERNAL_SECRET`,且 process 不在 Lambda 中。「identity headers」指的是 `X-MS-User-ID` / `X-MS-App-ID` / `X-MS-App-Role` 三個全帶:
+
 | Request 帶… | Platform | Public | Internal |
-|---|---|---|---|
-| 什麼都沒帶 | 401 | 200 | 401 |
-| 過期或無效的 session | 401 | 200 | 401 |
-| 有效 session,但角色不符 | 403 | 200 | 401 |
-| 有效 session,角色符合 | 200 | 200 | 401 |
+|---|---:|---:|---:|
+| 什麼都沒帶 | 403 | 403 | 401 |
 | 只帶 internal secret | 401 | 200 | 200 |
+| internal secret + identity headers | 200 | 200 | 200 |
+| 錯誤的 secret + identity headers | 403 | 403 | 401 |
+| 只帶 identity headers,沒有 secret | 403 | 403 | 401 |
 
-這張表只描述有設定 secret 來源時,SDK middleware 獨立運作的結果,不是 reachability 對照表。沒有設定 secret 來源時(純本機執行、獨立單元測試),Platform 會產生一個合成的本機 admin,Internal 則完全略過檢查;而且從平台的 `/module` edge 進來的 request 不論是誰送的,都已經帶好 credential。Public 欄只顯示 user-auth 檢查 — Public route 前面另外還有 proxy guard,未經平台送進來的 request 會收到 `403 not_proxied`,這與每一列描述的 session credential 彼此獨立。
+表中的 403 都是 proxy guard 的 `not_proxied`。只帶 internal secret 時,Platform 的 401 是因為缺少 identity headers,不是 secret。如果沒有設定 secret 來源,每一格都是 200。
 
-SDK 的 middleware 依 scope 各自運作,不接受其他 scope 的 credential:session token 無法通過 `InternalAuth`,internal secret 也無法通過 `PlatformAuth`。這是在描述 middleware,不是 reachability — 上面的 platform edge 會提供 scope 所要求的 credential。Scope 是你組織 surface 的方式;它不是機密性邊界。
+同一個 `X-MS-Internal-Secret` 可以驗證 Internal 與 Platform 兩個 scope:`PlatformAuth` 與 `InternalAuth` 讀取相同的 secret 來源,因此兩者不是互不相交的 credential domain。`TestCharacterization_InternalSecretSatisfiesPlatformAuth_ScopesAreNotDisjoint` 固定了這項行為。Scope 是你組織 surface 的方式;它不是機密性邊界。
+
+[`auth_scope_truth_test.go`](../../../auth_scope_truth_test.go) 是本節的 executable version;修改本節時,也必須修改該檔案。
 
 ## 如何選 scope
 
@@ -92,4 +96,4 @@ SDK 的 middleware 依 scope 各自運作,不接受其他 scope 的 credential:s
 - **平台自己驅動的** → Internal
 - **匿名外部呼叫者需要打的** → Public
 
-不確定時一律放 Internal:它會讓 route 不出現在匿名 public surface,也不會進到 dashboard 以 role gate 控管的 surface,而且它的意圖("由平台驅動")日後最容易讀懂。不要把這誤認為 security decision — `Internal` route 上沒有任何東西會對能打到 `/module` edge 的人隱藏。如果公開這些資料會造成傷害,保護就必須放在 handler 裡,或放在你儲存的內容裡;不能放在 scope 上。
+不確定時一律放 Internal:它會讓 route 不出現在匿名 public surface,也不會進到 dashboard 以 role gate 控管的 surface,而且它的意圖("由平台驅動")日後最容易讀懂。不要把這誤認為 security decision。如果公開這些資料會造成傷害,保護就必須放在 handler 裡,或放在你儲存的內容裡;不能放在 scope 上。
