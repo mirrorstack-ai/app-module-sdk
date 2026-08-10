@@ -143,20 +143,25 @@ actorless read.
 Because the route cannot authenticate its caller, browser-originated `Internal`
 paths must be refused by the platform. Today the platform does not refuse them
 for dev-mounted modules. The dispatch mount is unauthenticated at the HTTP edge,
-and its only path-shape rejection covers the `__mirrorstack` namespace, so
-`/internal/...` is forwarded to the module. The handler injects the module
-owner's user id and a hardcoded `admin` app-role together with the session's
-internal secret, handing the module a privileged identity no caller presented.
+and the only namespace it refuses is `__mirrorstack/*`; its other path-shape
+checks do not cover `/internal/`, so `/internal/...` is forwarded to the module.
+The handler injects the module owner's user id and a hardcoded `admin` app-role
+together with the session's internal secret, handing the module a privileged
+identity no caller presented.
 
 The five-condition dev gate — app dev-mode, module dev-mode, `dev_mount`, an
 install row, and a live tunnel — controls whether the localhost plane is open.
 It does not establish who is asking. On the dev plane, an `Internal` route is
 not a confidentiality boundary. Do not place behind it anything that would be
-harmful to expose to whoever can reach the dev edge.
+harmful to expose to whoever can reach the module edge on either plane.
 
-Production modules are not dev-mounted, so the dev-tunnel branch described here
-does not apply there. That scopes this gap; it does not make `Internal` a caller
-boundary.
+The dev-tunnel branch does not serve deployed modules. The same unauthenticated
+`/module` browser edge also has a deployed branch, however. It skips the dev
+conditions and forwards `/internal/*` to the deployed function with the same
+fabricated identity: the owner's user id and `admin` role, plus the platform's
+own internal secret. The gap is therefore a property of the `/module` browser
+edge, not the dev plane, and is present on both the dev-tunnel and deployed
+planes.
 
 ## 8. Checklist
 
@@ -171,7 +176,7 @@ boundary.
 - [ ] Bounded reads report `hasMore`; the surface says it is capped
 - [ ] No backfill; pre-existing rows read as unknown
 - [ ] `Internal` read not permission-gated; its data is safe to expose to anyone
-  who can reach the dev edge
+  who can reach the module edge on either plane
 - [ ] Migration embedded through `ms.Config.SQL`; manifest `migration` reflects
   it
 
