@@ -53,7 +53,9 @@ The SDK does not run user auth here, but the proxy guard still fronts every Publ
 
 ## Internal
 
-Platform-to-module only. Requests must carry `X-MS-Internal-Secret: <shared secret>` (via `MS_INTERNAL_SECRET` env var). The SDK rejects anything else with 401.
+Platform-to-module. Requests must carry `X-MS-Internal-Secret: <shared secret>` (via `MS_INTERNAL_SECRET` env var); once a secret source is configured the SDK rejects a missing or wrong secret with 401. On a bare local run with no secret configured the SDK bypasses the check so `mirrorstack dev` can curl its own routes — `--tunnel` and deployed mode both configure one.
+
+**The secret is what the SDK middleware checks.** Forwarder identity headers are promoted only on the secret-validated path, never on the local bypass or a rejection; empty headers never mint an identity. `TestCharacterization_ForwarderIdentityTrustedOnlyOnSecretValidatedPath` pins that behavior. Who can reach a given route class through the platform is a property of the platform edge, pinned by api-platform's `TestModuleEdge_RouteClassTrustMatrix`, not by this page.
 
 Used for:
 
@@ -74,15 +76,21 @@ ms.Internal(func(r chi.Router) {
 
 ## The auth matrix
 
-| Request has… | Platform | Public | Internal |
-|---|---|---|---|
-| Nothing | 401 | 200 | 401 |
-| Expired / invalid session | 401 | 200 | 401 |
-| Valid session, wrong role | 403 | 200 | 401 |
-| Valid session, right role | 200 | 200 | 401 |
-| Internal secret only | 401 | 200 | 200 |
+Measured on the real `m.Router()` with `MS_INTERNAL_SECRET` set and the process not in Lambda. "Identity headers" means all three of `X-MS-User-ID` / `X-MS-App-ID` / `X-MS-App-Role`:
 
-Routes in one scope **cannot** be reached by a caller authenticated for another scope — they're disjoint auth domains.
+| Request carries | Platform | Public | Internal |
+|---|---:|---:|---:|
+| Nothing | 403 | 403 | 401 |
+| Internal secret only | 401 | 200 | 200 |
+| Internal secret + identity headers | 200 | 200 | 200 |
+| Wrong secret + identity headers | 403 | 403 | 401 |
+| Identity headers only, no secret | 403 | 403 | 401 |
+
+The 403 responses are the proxy guard's `not_proxied`. The Platform 401 with only the internal secret is caused by missing identity headers, not by the secret. With no secret source configured, every cell is 200.
+
+One `X-MS-Internal-Secret` authenticates both the Internal and Platform scopes: `PlatformAuth` and `InternalAuth` read the same secret source, so they are not disjoint credential domains. `TestCharacterization_InternalSecretSatisfiesPlatformAuth_ScopesAreNotDisjoint` pins this behavior. Scope is how you organize your surface; it is not a confidentiality boundary.
+
+[`auth_scope_truth_test.go`](../../auth_scope_truth_test.go) is the executable version of this section; a change here must change that file too.
 
 ## Picking a scope
 
@@ -90,4 +98,4 @@ Routes in one scope **cannot** be reached by a caller authenticated for another 
 - **Something the platform itself drives** → Internal
 - **Something anonymous external callers need** → Public
 
-If you're unsure, default to Internal. You can expose it later; you can't put auth back after leaking.
+If you're unsure, default to Internal: it keeps the route off the anonymous public surface and out of the dashboard's role-gated one, and its intent ("the platform drives this") is the easiest to read later. Do not mistake that for a security decision. If exposing the data would be harmful, the protection has to live in the handler, or in what you store; not in the scope.

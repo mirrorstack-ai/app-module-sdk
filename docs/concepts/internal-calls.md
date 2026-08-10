@@ -103,11 +103,18 @@ user, err := ms.CallModule[struct{}, UserDTO](
 
 ## 3. Drop CORS on the Internal mount
 
-Today `localDevCORS` is applied **router-wide** in the dev-bypass branch
-(`module.go:151-163`, `m.router.Use(localDevCORS)` when `MS_INTERNAL_SECRET`
-is unset). Internal routes are proxy/lambda-only — a browser never originates
-an Internal call — so CORS there is dead weight and the one bit of genuine
-"web baggage" the RPC camp correctly disliked.
+Today `localDevCORS` is applied **router-wide** — `m.router.Use(localDevCORS)`
+in `internal/core/module.go`, gated on `auth.SecretConfigured()` being false,
+i.e. the bare local run with no secret source at all.
+
+CORS matters only for a browser origin, and every Internal caller the scope is
+built for — proxy, Lambda invoke, cron, event delivery, module-to-module
+`ms.Call` — is not a browser. So the header is dead weight on that mount: the
+one bit of genuine "web baggage" the RPC camp correctly disliked. Whether a
+browser-originated request can reach the Internal route class at all is a
+platform-edge question, pinned by api-platform's
+`TestModuleEdge_RouteClassTrustMatrix`; this design doc does not assert an
+answer to it, and neither should the change below depend on one.
 
 **Change:** apply `localDevCORS` only to the Platform and Public scoped
 subrouters, never to Internal (and never to the system internal routes under
