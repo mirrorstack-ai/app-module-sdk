@@ -129,16 +129,27 @@ count: only the producer knows its own page size.
 
 ## 7. Do not gate the read on an actorless transport
 
-Do not put `RequirePermission` on an `Internal` read. The service call carries
-the app id and credentials, but no caller: `ms.Call` sends no actor, and dispatch
-supplies the target module's internal secret. Without a fabricated role,
-`RequirePermission` returns `401` for that service identity.
+Do not put `RequirePermission` on an `Internal` read — not because it would deny
+the service call, but because it would not deny anything.
 
-That failure is worse than a denied page. A host fetching a contributed audit
-list degrades a failed fetch to "no audit section", so the `401` renders as
-*"this subject has no history"* — a security ledger disappearing in silence.
-Re-adding the permission gate does not restore a caller boundary; it breaks the
-actorless read.
+`ms.Call` is actorless: the hop carries the app id and the calling module's
+service secret, and dispatch injects the target module's internal secret. No
+caller identity travels with it. What *does* travel with it is a role the
+platform invents — every forward through the `/module` edge stamps
+`X-MS-App-Role: admin`, on the dev-tunnel branch and the deployed-Lambda branch
+alike. `RequirePermission` compiles to `auth.RequireRoles(admin, …declared)`,
+and admin always passes. So the gate does not reject the service identity: it
+admits it, and admits everything else that reaches the same edge, while reading
+in the source like a control. Silent admission is the failure here, not a
+denial.
+
+The read can still fail, and the caller will not see why. `ms.Call` returns an
+error for any non-2xx, and the edge produces several before the module is ever
+reached: `not_installed` (404), `route_local_off` and `tunnel_offline` (503), a
+resolver fault (500). A host that degrades a failed audit fetch to "no audit
+section" renders each of those as *"this subject has no history"*. Distinguish
+"empty" from "could not load" and say which — an audit surface that cannot tell
+them apart is worse than one that is absent.
 
 Because the route cannot authenticate its caller, browser-originated `Internal`
 paths must be refused by the platform. Today they are not. The dispatch mount at
@@ -150,10 +161,13 @@ internal secret, handing the module a privileged identity no caller presented.
 
 This holds on both planes. The five-condition dev gate — app dev-mode, module
 dev-mode, `dev_mount`, an install row, and a live tunnel — decides whether the
-localhost plane is open, not who is asking; and a module with a deploy row is
-served by a second branch of the same edge that skips those conditions
-altogether and invokes the deployed function with the same fabricated identity.
-The gap belongs to the `/module` browser edge, not to dev-mounting.
+localhost plane is open, not who is asking. A module with a deploy row is served
+by a second branch of the same edge that keeps exactly one of those five: the
+deploy is resolved through that app's own `module_install` row, so a missing
+install row (or an un-bootstrapped app schema) still resolves to no transport.
+The four dev conditions are not consulted, and the deployed function is invoked
+with the same fabricated identity. The gap belongs to the `/module` browser
+edge, not to dev-mounting.
 
 So an `Internal` route is not a confidentiality boundary. Do not put behind it
 anything that would be harmful to expose to whoever can reach that edge.

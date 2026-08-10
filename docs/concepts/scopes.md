@@ -53,7 +53,9 @@ The SDK does not run user auth here, but the proxy guard still fronts every Publ
 
 ## Internal
 
-Platform-to-module only. Requests must carry `X-MS-Internal-Secret: <shared secret>` (via `MS_INTERNAL_SECRET` env var). The SDK rejects anything else with 401.
+Platform-to-module. Requests must carry `X-MS-Internal-Secret: <shared secret>` (via `MS_INTERNAL_SECRET` env var); once a secret source is configured the SDK rejects a missing or wrong secret with 401. On a bare local run with no secret configured the SDK bypasses the check so `mirrorstack dev` can curl its own routes — `--tunnel` and deployed mode both configure one.
+
+**The secret is not a caller boundary.** It stops a caller that reaches your module *directly* — its localhost port, its function target — without the secret. It does not stop a browser. The platform's `/module/{moduleID}/*` edge is unauthenticated at the HTTP layer, refuses only the `__mirrorstack/*` namespace, and forwards `/internal/...` to your module with the internal secret and a hardcoded `admin` app-role that the platform supplies itself. An `Internal` route is therefore reachable by anyone who can reach that edge — see [audit trails](audit.md) §7.
 
 Used for:
 
@@ -82,7 +84,9 @@ ms.Internal(func(r chi.Router) {
 | Valid session, right role | 200 | 200 | 401 |
 | Internal secret only | 401 | 200 | 200 |
 
-Routes in one scope **cannot** be reached by a caller authenticated for another scope — they're disjoint auth domains.
+This is the SDK middleware in isolation, with a secret source configured. It is not a reachability table. With no secret source configured (a bare local run, a standalone unit test) Platform mints a synthetic local admin and Internal bypasses its check entirely; and a request arriving through the platform's `/module` edge comes pre-credentialed no matter who sent it. The Public column shows the user-auth check only — Public routes are additionally fronted by the proxy guard, which answers `403 not_proxied` to a request that did not come through the platform, orthogonally to the session credential each row describes.
+
+The SDK's middlewares are per-scope and do not accept each other's credentials: a session token does not satisfy `InternalAuth`, and the internal secret does not satisfy `PlatformAuth`. That is a statement about the middleware, not about reachability — the platform edge above supplies whichever credential the scope asks for. Scope is how you organize your surface; it is not a confidentiality boundary.
 
 ## Picking a scope
 
@@ -90,4 +94,4 @@ Routes in one scope **cannot** be reached by a caller authenticated for another 
 - **Something the platform itself drives** → Internal
 - **Something anonymous external callers need** → Public
 
-If you're unsure, default to Internal. You can expose it later; you can't put auth back after leaking.
+If you're unsure, default to Internal: it keeps the route off the anonymous public surface and out of the dashboard's role-gated one, and its intent ("the platform drives this") is the easiest to read later. Do not mistake that for a security decision — nothing on an `Internal` route is hidden from whoever can reach the `/module` edge. If exposing the data would be harmful, the protection has to live in the handler, or in what you store; not in the scope.

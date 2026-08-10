@@ -105,9 +105,14 @@ user, err := ms.CallModule[struct{}, UserDTO](
 
 Today `localDevCORS` is applied **router-wide** in the dev-bypass branch
 (`module.go:151-163`, `m.router.Use(localDevCORS)` when `MS_INTERNAL_SECRET`
-is unset). Internal routes are proxy/lambda-only — a browser never originates
-an Internal call — so CORS there is dead weight and the one bit of genuine
-"web baggage" the RPC camp correctly disliked.
+is unset). A browser CAN reach an Internal route — the platform's
+unauthenticated `/module/{moduleID}/*` edge forwards `/internal/...` through —
+but the module's own CORS headers are never the ones it reads: dispatch writes
+`Access-Control-Allow-Origin` itself on that surface, from the app's
+`allowed_origins`. Every other Internal caller (proxy, lambda invoke, cron,
+event delivery) is not a browser at all. So CORS on the Internal mount is dead
+weight and the one bit of genuine "web baggage" the RPC camp correctly
+disliked.
 
 **Change:** apply `localDevCORS` only to the Platform and Public scoped
 subrouters, never to Internal (and never to the system internal routes under
