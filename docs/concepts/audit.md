@@ -2,8 +2,8 @@
 
 A module that changes who can do what owes an answer to "who did this, and how".
 This page is the rule for producing that answer, and the reasoning behind each
-part of it. Two modules already follow it — users-roles records role grants and
-revocations, oauth-core records session revocations — and they landed on
+part of it. Two modules supply the examples — users-roles records role grants
+and revocations, oauth-core records session revocations — and they landed on
 different shapes for good reasons, which is where this starts.
 
 The failure this exists to prevent is not a missing feature. It is a trail that
@@ -129,16 +129,34 @@ count: only the producer knows its own page size.
 
 ## 7. Do not gate the read on an actorless transport
 
-An `Internal` route is an actorless **service** call: the SDK sends the internal
-secret and the app id, no actor. `RequirePermission` there `401`s for the very
-identity `ms.Call` uses.
+Do not put `RequirePermission` on an `Internal` read. The service call carries
+the app id and credentials, but no caller: `ms.Call` sends no actor, and dispatch
+supplies the target module's internal secret. Without a fabricated role,
+`RequirePermission` returns `401` for that service identity.
 
-That is bad on its own and worse in combination: a host fetching a contributed
-audit list typically degrades a failed fetch to "no audit section", so the 401
-renders as *"this subject has no history"* — a security ledger disappearing in
-silence. Internal scope is itself the boundary; the path is not
-browser-reachable. Gate a browser-reachable read instead, on the Platform scope
-where a real identity exists.
+That failure is worse than a denied page. A host fetching a contributed audit
+list degrades a failed fetch to "no audit section", so the `401` renders as
+*"this subject has no history"* — a security ledger disappearing in silence.
+Re-adding the permission gate does not restore a caller boundary; it breaks the
+actorless read.
+
+Because the route cannot authenticate its caller, browser-originated `Internal`
+paths must be refused by the platform. Today the platform does not refuse them
+for dev-mounted modules. The dispatch mount is unauthenticated at the HTTP edge,
+and its only path-shape rejection covers the `__mirrorstack` namespace, so
+`/internal/...` is forwarded to the module. The handler injects the module
+owner's user id and a hardcoded `admin` app-role together with the session's
+internal secret, handing the module a privileged identity no caller presented.
+
+The five-condition dev gate — app dev-mode, module dev-mode, `dev_mount`, an
+install row, and a live tunnel — controls whether the localhost plane is open.
+It does not establish who is asking. On the dev plane, an `Internal` route is
+not a confidentiality boundary. Do not place behind it anything that would be
+harmful to expose to whoever can reach the dev edge.
+
+Production modules are not dev-mounted, so the dev-tunnel branch described here
+does not apply there. That scopes this gap; it does not make `Internal` a caller
+boundary.
 
 ## 8. Checklist
 
@@ -152,8 +170,10 @@ where a real identity exists.
 - [ ] Append-only asserted; no FK to the described entity
 - [ ] Bounded reads report `hasMore`; the surface says it is capped
 - [ ] No backfill; pre-existing rows read as unknown
-- [ ] Read route not permission-gated on `Internal`
-- [ ] Migration advertised in `ms.Init`'s `Versions` map, or it never runs
+- [ ] `Internal` read not permission-gated; its data is safe to expose to anyone
+  who can reach the dev edge
+- [ ] Migration embedded through `ms.Config.SQL`; manifest `migration` reflects
+  it
 
 See also [scopes](scopes.md), [internal-calls](internal-calls.md),
 [manifest](manifest.md).
