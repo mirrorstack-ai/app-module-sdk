@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -79,13 +80,25 @@ type UIProp struct {
 // The page's nav-rail icon is the module's icon (Config.Icon). Pages
 // don't carry their own icon today — when distinct icons per page are
 // needed, an Icon field will be added back as optional.
+//
+// Title and Description remain the non-localized fallbacks, just as
+// Defaults.Name does for NameLabels. Per-locale values come from catalog keys
+// "ui.pages.<surface>.<route>.title" and ".description"; the main surface is
+// written as "main", and the route is used verbatim. Older modules omit the
+// label maps via omitempty and keep serving the plain strings unchanged.
+//
+// An empty per-locale value means "translation pending, not chosen". Consumers
+// must therefore fall back with logical-OR semantics (value[locale] ||
+// value["en-US"] || ...), never nullish-coalescing semantics.
 type UIPage struct {
-	Route       string `json:"route"`
-	Surface     string `json:"surface,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Icon        string `json:"icon,omitempty"`
-	Export      string `json:"export"`
+	Route             string            `json:"route"`
+	Surface           string            `json:"surface,omitempty"`
+	Title             string            `json:"title"`
+	TitleLabels       map[string]string `json:"titleLabels,omitempty"`
+	Description       string            `json:"description,omitempty"`
+	DescriptionLabels map[string]string `json:"descriptionLabels,omitempty"`
+	Icon              string            `json:"icon,omitempty"`
+	Export            string            `json:"export"`
 }
 
 // Known UIPage.Surface values. Empty string defaults to the main
@@ -226,6 +239,10 @@ func cloneUI(ui ModuleUI) *ModuleUI {
 	out := &ModuleUI{
 		Components:   make([]UIComponent, len(ui.Components)),
 		DefaultPages: slices.Clone(ui.DefaultPages),
+	}
+	for i := range out.DefaultPages {
+		out.DefaultPages[i].TitleLabels = maps.Clone(ui.DefaultPages[i].TitleLabels)
+		out.DefaultPages[i].DescriptionLabels = maps.Clone(ui.DefaultPages[i].DescriptionLabels)
 	}
 	for i, c := range ui.Components {
 		out.Components[i] = UIComponent{

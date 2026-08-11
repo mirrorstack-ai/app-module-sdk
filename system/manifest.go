@@ -138,6 +138,59 @@ const (
 	tagLabelSep   = ","
 )
 
+const (
+	uiPageCatalogPrefix  = "ui.pages"
+	uiPageMainSurfaceKey = "main"
+)
+
+func uiPageCatalogKey(surface, route string) string {
+	if surface == registry.UISurfaceMain {
+		surface = uiPageMainSurfaceKey
+	}
+	return uiPageCatalogPrefix + "." + surface + "." + route
+}
+
+// localizeUIPages fills UIPage title/description label maps from catalog keys
+// "ui.pages.<surface>.<route>.title" and ".description". A page is already
+// identified by its (Surface, Route) pair in validateUI, so the catalog uses
+// that same pair rather than introducing a separate slug. The route is one
+// verbatim JSON key: authors have no transformation rule to remember, and two
+// distinct routes cannot collide. The empty main surface is written as "main":
+//
+//	{"ui":{"pages":{
+//	  "main":     {"/": {"title":"影片"}, "/sessions": {"title":"工作階段"}},
+//	  "settings": {"/": {"title":"影片核心", "description":"設定影片分類與播放預設值。"}}
+//	}}}
+func localizeUIPages(ui *registry.ModuleUI) *registry.ModuleUI {
+	if ui == nil {
+		return nil
+	}
+
+	// Registry.UI already returns a deep copy, so the manifest can safely
+	// enrich these pages in place without cloning them again.
+	for i := range ui.DefaultPages {
+		p := &ui.DefaultPages[i]
+		base := uiPageCatalogKey(p.Surface, p.Route)
+
+		// A non-empty author-set map is more specific and more local, so it
+		// wins over the process-wide catalog.
+		if len(p.TitleLabels) == 0 {
+			if labels := i18n.Lookup(base + ".title"); len(labels) > 0 {
+				p.TitleLabels = labels
+			}
+		}
+		if len(p.DescriptionLabels) == 0 {
+			if labels := i18n.Lookup(base + ".description"); len(labels) > 0 {
+				p.DescriptionLabels = labels
+			}
+		}
+	}
+
+	// Lookup results are emitted verbatim, including empty values: an empty
+	// translation is pending and consumers deliberately fall back with ||.
+	return ui
+}
+
 // ManifestEvents declares which events the module emits and which it subscribes to.
 type ManifestEvents struct {
 	Emits      []string          `json:"emits"`
@@ -222,7 +275,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Resources:         ManifestResources{Storage: reg.StorageRequired()},
 			Metrics:           reg.Metrics(),
 			MCP:               buildManifestMCP(reg),
-			UI:                reg.UI(),
+			UI:                localizeUIPages(reg.UI()),
 			Provides:          contribSlots,
 			ContributesTo:     reg.OutboundContributions(),
 		}
