@@ -7,6 +7,25 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## Unreleased
 
+## [v0.4.1] - 2026-08-16
+
+This release makes `ms.RunTask` a genuinely managed task: a one-shot process
+claims exactly one attempt from the platform task broker, renews its resources,
+and reports exactly one terminal outcome. It is a PATCH release because the
+exported API is purely additive — 54 symbols added, none removed or changed —
+which is the pre-1.0 convention for new SDK surface. Contrast v0.4.0, which took
+a minor because an exported constructor's signature changed.
+
+> [!IMPORTANT]
+> The version step is small; one behaviour change is not. `ms.RunTask` no longer
+> has a synchronous fallback. A DEPLOYED module calling it now enqueues through
+> the managed task plane, and when that plane is not enabled the call returns an
+> error (`503 task_plane_unavailable`) where it previously ran the work inline.
+> It fails loudly rather than silently, and no shipped module is affected today —
+> `video-transcode` is the only caller and it is not released — but do not
+> upgrade a deployed module that relies on inline `RunTask` until the task plane
+> is enabled for it.
+
 ### Added
 
 - `ms.WithEphemeralStorage` for Heavy scratch, `ms.TaskStatus`, idempotent `ms.CancelTask`,
