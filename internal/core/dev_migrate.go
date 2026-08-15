@@ -27,7 +27,7 @@ import (
 const devMigrateEnvVar = "MS_LOCAL_DB_URL"
 
 // devMigrateEnabled returns true when ms.Start() should auto-apply migrations
-// before serving. False in Lambda + task-worker modes (production credentials
+// before serving. False in Lambda + one-shot modes (production credentials
 // arrive per-invocation) and when the dev env var is unset.
 func (m *Module) devMigrateEnabled() bool {
 	if runtime.IsLambda() || runtime.IsTaskWorker() {

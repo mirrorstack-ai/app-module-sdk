@@ -13,7 +13,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"mime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -76,11 +78,52 @@ type Client struct {
 	cdnBase   string // "https://media.mirrorstack.ai"
 	expiresAt time.Time
 	now       func() time.Time
+	provider  CredentialProvider
+	scope     renewableScope
+	mu        sync.Mutex
+}
+
+// renewableScope retains only immutable resource coordinates. Temporary AWS
+// key material must live solely in the AWS credential callback, not in a
+// long-lived client field copied by ForApp.
+type renewableScope struct {
+	bucket  string
+	region  string
+	prefix  string
+	cdnBase string
+}
+
+func scopeFromCredential(credential Credential) renewableScope {
+	return renewableScope{
+		bucket: credential.Bucket, region: credential.Region,
+		prefix: credential.Prefix, cdnBase: credential.CDNBase,
+	}
 }
 
 // NewFromCredential creates a Client from platform-injected STS credentials.
 func NewFromCredential(cred Credential) (*Client, error) {
 	return newClient(cred, "", "")
+}
+
+// NewFromProvider creates a storage client whose AWS credential provider asks
+// for current scoped credentials for operations and presigns. Resource scope
+// fields are immutable; only key material and expiry may rotate.
+func NewFromProvider(ctx context.Context, provider CredentialProvider) (*Client, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("mirrorstack/storage: renewable credential provider is missing")
+	}
+	initial, err := provider.Credential(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack/storage: renewable credential unavailable: %w", err)
+	}
+	if err := initial.validate(); err != nil {
+		return nil, err
+	}
+	c, err := newClientWithAWSProvider(initial, provider)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Open is retained for source compatibility with older SDK consumers. An
@@ -133,20 +176,64 @@ func newClient(cred Credential, internalEndpoint, publicEndpoint string) (*Clien
 	}, nil
 }
 
+type awsRenewableProvider struct {
+	provider CredentialProvider
+	scope    renewableScope
+	client   *Client
+}
+
+func (p *awsRenewableProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	current, err := p.provider.Credential(ctx)
+	if err != nil {
+		return aws.Credentials{}, fmt.Errorf("mirrorstack/storage: renewable credential unavailable: %w", err)
+	}
+	if err := current.validate(); err != nil {
+		return aws.Credentials{}, err
+	}
+	if current.Bucket != p.scope.bucket || current.Region != p.scope.region || current.Prefix != p.scope.prefix || current.CDNBase != p.scope.cdnBase {
+		return aws.Credentials{}, fmt.Errorf("mirrorstack/storage: renewable credential changed storage scope")
+	}
+	if p.client != nil {
+		p.client.mu.Lock()
+		p.client.expiresAt = current.ExpiresAt
+		p.client.mu.Unlock()
+	}
+	return aws.Credentials{
+		AccessKeyID: current.AccessKeyID, SecretAccessKey: current.SecretAccessKey,
+		SessionToken: current.SessionToken, Source: "MirrorStackTaskBroker",
+		CanExpire: !current.ExpiresAt.IsZero(), Expires: current.ExpiresAt,
+	}, nil
+}
+
+func newClientWithAWSProvider(initial Credential, provider CredentialProvider) (*Client, error) {
+	scope := scopeFromCredential(initial)
+	c := &Client{bucket: initial.Bucket, prefix: initial.Prefix, cdnBase: initial.CDNBase, expiresAt: initial.ExpiresAt, now: time.Now, provider: provider, scope: scope}
+	awsProvider := &awsRenewableProvider{provider: provider, scope: scope, client: c}
+	cfg := aws.Config{Region: initial.Region, Credentials: awsProvider}
+	c.s3Client = s3.NewFromConfig(cfg)
+	c.presigner = s3.NewPresignClient(c.s3Client)
+	return c, nil
+}
+
 // ForApp is retained for source compatibility but can no longer rescope a
 // vended credential. Prefix and CDN base are platform-owned because the public
 // CDN path must remain inside the same app/module boundary as the IAM policy.
 //
 // Deprecated: resolve ms.Storage(ctx) separately for each request.
 func (c *Client) ForApp(_, _ string) *Client {
+	c.mu.Lock()
+	expiresAt := c.expiresAt
+	c.mu.Unlock()
 	return &Client{
 		presigner: c.presigner,
 		s3Client:  c.s3Client,
 		bucket:    c.bucket,
 		prefix:    c.prefix,
 		cdnBase:   c.cdnBase,
-		expiresAt: c.expiresAt,
+		expiresAt: expiresAt,
 		now:       c.now,
+		provider:  c.provider,
+		scope:     c.scope,
 	}
 }
 
@@ -172,18 +259,28 @@ func UnderLambda() bool { return lambdaenv.IsSet() }
 
 const credentialExpirySafetyMargin = 30 * time.Second
 
-func (c *Client) presignTTL(requested time.Duration) (time.Duration, error) {
+func (c *Client) presignTTL(ctx context.Context, requested time.Duration) (time.Duration, error) {
 	if requested <= 0 {
 		return 0, fmt.Errorf("mirrorstack/storage: presign expiry must be positive")
 	}
-	if c.expiresAt.IsZero() {
+	if c.provider != nil {
+		// Force retrieval before every presign so its TTL is capped by the same
+		// current credential that signs the request (AWS may otherwise cache it).
+		if _, err := (&awsRenewableProvider{provider: c.provider, scope: c.scope, client: c}).Retrieve(ctx); err != nil {
+			return 0, err
+		}
+	}
+	c.mu.Lock()
+	expiresAt := c.expiresAt
+	c.mu.Unlock()
+	if expiresAt.IsZero() {
 		return requested, nil
 	}
 	now := time.Now
 	if c.now != nil {
 		now = c.now
 	}
-	remaining := c.expiresAt.Sub(now()) - credentialExpirySafetyMargin
+	remaining := expiresAt.Sub(now()) - credentialExpirySafetyMargin
 	if remaining <= 0 {
 		return 0, ErrCredentialExpired
 	}
@@ -202,7 +299,7 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	expires, err := c.presignTTL(expires)
+	expires, err := c.presignTTL(ctx, expires)
 	if err != nil {
 		return "", err
 	}
@@ -220,21 +317,49 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 // PresignGet generates a presigned S3 GET URL for direct download (bypasses CDN).
 // Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignGet(ctx context.Context, key string, expires time.Duration) (string, error) {
+	return c.presignGet(ctx, key, "", expires)
+}
+
+// PresignDownload generates a direct presigned GET whose response is an
+// attachment. The signed response override works across origins and keeps
+// large objects on the direct S3 path.
+func (c *Client) PresignDownload(ctx context.Context, key, filename string, expires time.Duration) (string, error) {
+	filename = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, filename))
+	if filename == "" {
+		filename = "download"
+	}
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if disposition == "" {
+		return "", fmt.Errorf("mirrorstack/storage: invalid download filename")
+	}
+	return c.presignGet(ctx, key, disposition, expires)
+}
+
+func (c *Client) presignGet(ctx context.Context, key, disposition string, expires time.Duration) (string, error) {
 	if err := c.requireCredential(); err != nil {
 		return "", err
 	}
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	expires, err := c.presignTTL(expires)
+	expires, err := c.presignTTL(ctx, expires)
 	if err != nil {
 		return "", err
 	}
 	fullKey := c.prefix + key
-	req, err := c.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(fullKey),
-	}, s3.WithPresignExpires(expires))
+	}
+	if disposition != "" {
+		input.ResponseContentDisposition = aws.String(disposition)
+	}
+	req, err := c.presigner.PresignGetObject(ctx, input, s3.WithPresignExpires(expires))
 	if err != nil {
 		return "", fmt.Errorf("mirrorstack/storage: presign get failed: %w", err)
 	}

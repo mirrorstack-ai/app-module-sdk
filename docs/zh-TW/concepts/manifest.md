@@ -94,7 +94,7 @@ Manifest 是**向後相容、只追加的** wire contract — 新欄位採用 `o
 - **`routes`** — Catalog 看到的「此 module 提供哪些 endpoint」,與實際在 production 掛載的位置無關。
 - **`events`** — Event-bus 連線設定;平台把發出的事件路由到 subscriber 的 path。
 - **`schedules`** — 平台排程器據此建立 cron trigger。
-- **`tasks`** — 部署 pipeline 據此建立 SQS queue 與 ECS task definition。
+- **`tasks`** — 宣告 managed task handler、重試政策與執行資源。
 - **`permissions`** — 安裝畫面會顯示「這個 module 需要這些權限」。
 - **`mcp`** — 聚合後的 MCP server 把這些 tools 與 resources 納入,供 agent 呼叫。
 

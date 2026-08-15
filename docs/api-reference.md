@@ -83,15 +83,26 @@ ms.Cron("cleanup", "0 3 * * *", cleanupHandler)
 
 ## Background tasks
 
-Task registration enables ECS task worker mode — module is also deployed as a long-running process polling SQS.
+Task registration declares a platform-managed background handler. Managed runners claim one attempt from the task broker and exit after one terminal callback.
+Under `mirrorstack dev`, enqueue returns immediately and the handler runs in a process-local executor; the same status and cancellation APIs operate on that local job.
 
 | Function | Purpose |
 |---|---|
 | `ms.OnTask(name, handler)` | Register a task handler (`func(ctx, json.RawMessage) error`). |
-| `ms.RunTask(ctx, name, payload)` | Enqueue a task (returns SQS message ID). |
+| `ms.RunTask(ctx, name, payload)` | Create a managed task job (returns job ID). |
+| `ms.RunTaskWithIdempotencyKey(ctx, name, payload, key)` | Create or recover the same managed task job using a persisted UUID key. |
+| `ms.TaskStatus(ctx, jobID)` | Read an app/module-scoped managed job status. |
+| `ms.CancelTask(ctx, jobID)` | Request idempotent queued/running job cancellation. |
+| `ms.WithCompute(...)` | Declare Standard, Heavy, or platform-admitted GPU compute (`g5g.xlarge`: 4 vCPU, 7168 MiB allocatable). |
+| `ms.WithEphemeralStorage(size)` | Declare whole-GiB Heavy/Fargate scratch (21–200 GiB; 20 GiB is implicit). GPU host scratch is fixed by the platform. |
+| `ms.Permanent(err)` | Mark a returned handler error as non-retryable. |
 
 ```go
-ms.OnTask("transcode", handleTranscode)
+ms.OnTask("transcode", handleTranscode,
+    ms.WithCompute(ms.Heavy(ms.Res{VCPU: 4, MemoryMB: 8192})),
+    ms.WithEphemeralStorage(80 * ms.GiB),
+    ms.WithTimeout(2 * time.Hour),
+)
 ms.RunTask(ctx, "transcode", json.RawMessage(`{"videoId":"abc"}`))
 ```
 

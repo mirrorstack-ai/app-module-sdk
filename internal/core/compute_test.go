@@ -108,8 +108,8 @@ func TestHeavy_RejectsIllegalPairs(t *testing.T) {
 		},
 		{
 			name:  "instance is GPU-only",
-			res:   Res{VCPU: 1, MemoryMB: 2048, Instance: "g5.xlarge"},
-			wants: []string{`"g5.xlarge"`, "Instance is GPU-only"},
+			res:   Res{VCPU: 1, MemoryMB: 2048, Instance: "g5g.xlarge"},
+			wants: []string{`"g5g.xlarge"`, "Instance is GPU-only"},
 		},
 	}
 	for _, test := range tests {
@@ -159,8 +159,8 @@ func TestStandard_RejectsUnhonourableRequests(t *testing.T) {
 		},
 		{
 			name:  "instance is GPU-only",
-			res:   Res{Instance: "g5.xlarge"},
-			wants: []string{`"g5.xlarge"`, "Instance is GPU-only"},
+			res:   Res{Instance: "g5g.xlarge"},
+			wants: []string{`"g5g.xlarge"`, "Instance is GPU-only"},
 		},
 		{
 			name:  "memory below Lambda minimum",
@@ -202,6 +202,9 @@ func TestGPU_AcceptsEveryAllowlistedInstance(t *testing.T) {
 			}
 		})
 	}
+	if got := GPU(Res{Instance: "g5g.xlarge"}); got.vcpu != 4 || got.memoryMB != 7168 {
+		t.Fatalf("g5g.xlarge resolved %v vCPU / %d MB, want 4 / 7168", got.vcpu, got.memoryMB)
+	}
 }
 
 func TestGPU_RejectsContradictoryOrUnsupportedRequests(t *testing.T) {
@@ -213,21 +216,21 @@ func TestGPU_RejectsContradictoryOrUnsupportedRequests(t *testing.T) {
 		wants []string
 	}{
 		{
-			// g5.xlarge IS 4 vCPU / 16 GB. Naming a vCPU alongside it is a
+			// g5g.xlarge exposes 4 vCPU / 7168 MiB to the runner. Naming a vCPU alongside it is a
 			// contradiction the platform would otherwise silently resolve.
 			name:  "vCPU alongside instance",
-			res:   Res{Instance: "g5.xlarge", VCPU: 4},
-			wants: []string{`"g5.xlarge"`, "VCPU: 4", "instance type determines vCPU and memory"},
+			res:   Res{Instance: "g5g.xlarge", VCPU: 4},
+			wants: []string{`"g5g.xlarge"`, "VCPU: 4", "instance type determines vCPU and memory"},
 		},
 		{
 			name:  "memory alongside instance",
-			res:   Res{Instance: "g5.xlarge", MemoryMB: 16384},
-			wants: []string{`"g5.xlarge"`, "MemoryMB: 16384", "instance type determines vCPU and memory"},
+			res:   Res{Instance: "g5g.xlarge", MemoryMB: 8192},
+			wants: []string{`"g5g.xlarge"`, "MemoryMB: 8192", "instance type determines vCPU and memory"},
 		},
 		{
 			name:  "unsupported instance",
 			res:   Res{Instance: "g4dn.99xlarge"},
-			wants: []string{`"g4dn.99xlarge"`, "unsupported instance type", "g4dn.xlarge"},
+			wants: []string{`"g4dn.99xlarge"`, "unsupported instance type", "g5g.xlarge"},
 		},
 		{
 			// Bare metal is deliberately excluded from the allowlist.

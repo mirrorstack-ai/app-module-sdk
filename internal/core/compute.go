@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -118,24 +117,14 @@ type gpuInstance struct {
 // An allowlist rather than "any EC2 type" keeps the platform ceiling meaningful
 // for third-party modules, where "give me the biggest box" is a cost attack.
 //
-// Seeded with the NVENC-capable families available in ap-northeast-1: g4dn
-// (NVIDIA T4) and g5 (NVIDIA A10G). Bare-metal sizes are deliberately excluded
-// — they are whole hosts, and the scale-to-zero story does not hold for them.
+// This wave deliberately exposes only the ARM64 g5g.xlarge declaration. The
+// platform still controls production admission behind its GPU canary.
 var gpuInstances = map[string]gpuInstance{
-	"g4dn.xlarge":   {VCPU: 4, MemoryMB: 16384, GPUs: 1},
-	"g4dn.2xlarge":  {VCPU: 8, MemoryMB: 32768, GPUs: 1},
-	"g4dn.4xlarge":  {VCPU: 16, MemoryMB: 65536, GPUs: 1},
-	"g4dn.8xlarge":  {VCPU: 32, MemoryMB: 131072, GPUs: 1},
-	"g4dn.12xlarge": {VCPU: 48, MemoryMB: 196608, GPUs: 4},
-	"g4dn.16xlarge": {VCPU: 64, MemoryMB: 262144, GPUs: 1},
-	"g5.xlarge":     {VCPU: 4, MemoryMB: 16384, GPUs: 1},
-	"g5.2xlarge":    {VCPU: 8, MemoryMB: 32768, GPUs: 1},
-	"g5.4xlarge":    {VCPU: 16, MemoryMB: 65536, GPUs: 1},
-	"g5.8xlarge":    {VCPU: 32, MemoryMB: 131072, GPUs: 1},
-	"g5.12xlarge":   {VCPU: 48, MemoryMB: 196608, GPUs: 4},
-	"g5.16xlarge":   {VCPU: 64, MemoryMB: 262144, GPUs: 1},
-	"g5.24xlarge":   {VCPU: 96, MemoryMB: 393216, GPUs: 4},
-	"g5.48xlarge":   {VCPU: 192, MemoryMB: 786432, GPUs: 8},
+	// The first GPU wave is ARM64-only. Declaration does not itself enable
+	// production admission; the platform's canary/allowlist remains authoritative.
+	// Reserve 1 GiB of the host's 8 GiB for Bottlerocket and the ECS agent;
+	// 7168 MiB is the runner-enforceable allocation exposed to module authors.
+	"g5g.xlarge": {VCPU: 4, MemoryMB: 7168, GPUs: 1},
 }
 
 // Standard selects AWS Lambda — the default execution class, and the one every
@@ -220,12 +209,13 @@ func Heavy(r Res) Compute {
 // GPU selects ECS on an allowlisted EC2 GPU instance — NVENC transcode and
 // model inference.
 //
-// The INSTANCE is the request: g4dn.xlarge IS 4 vCPU / 16 GB / 1×T4, so
+// The INSTANCE is the request: g5g.xlarge gives the task 4 vCPU / 7168 MiB /
+// 1 GPU (with 1 GiB of host memory reserved for the OS and ECS agent), so
 // accepting VCPU or MemoryMB alongside it would invite a contradiction the
-// platform would have to silently resolve. Pick the instance; its dimensions
-// are resolved into the descriptor for the manifest.
+// platform would have to silently resolve. Pick the instance; its allocatable
+// dimensions are resolved into the descriptor for the manifest.
 //
-//	ms.WithCompute(ms.GPU(ms.Res{Instance: "g4dn.xlarge"}))
+//	ms.WithCompute(ms.GPU(ms.Res{Instance: "g5g.xlarge"}))
 func GPU(r Res) Compute {
 	if r.VCPU != 0 || r.MemoryMB != 0 {
 		panic(fmt.Sprintf(
@@ -236,8 +226,8 @@ func GPU(r Res) Compute {
 	inst, ok := gpuInstances[r.Instance]
 	if !ok {
 		panic(fmt.Sprintf(
-			"mirrorstack: GPU(Res{Instance: %q}) — unsupported instance type; the platform supports %s",
-			r.Instance, strings.Join(slices.Sorted(maps.Keys(gpuInstances)), ", "),
+			"mirrorstack: GPU(Res{Instance: %q}) — unsupported instance type; this SDK wave supports g5g.xlarge only (production admission remains platform-controlled)",
+			r.Instance,
 		))
 	}
 	return Compute{class: classGPU, vcpu: inst.VCPU, memoryMB: inst.MemoryMB, instance: r.Instance}

@@ -94,7 +94,7 @@ The manifest is an **additive wire contract** — new fields land with `omitempt
 - **`routes`** — catalog view of "what endpoints this module exposes," independent of where they're mounted in production.
 - **`events`** — event-bus wiring; platform routes emitted events to subscriber paths.
 - **`schedules`** — platform scheduler provisions cron triggers.
-- **`tasks`** — deploy pipeline provisions SQS queues and ECS task definitions.
+- **`tasks`** — declares managed task handlers, retry policy, and execution resources.
 - **`permissions`** — install screen shows "this module needs these permissions."
 - **`mcp`** — aggregated MCP server ingests tools + resources so agents can call them.
 

@@ -60,7 +60,7 @@ type Schedule struct {
 
 // TaskCompute is a task's declared execution class and size. It exists so the
 // platform can provision the right runner at deploy from the declaration alone
-// — the same mechanism that already provisions the SQS queue.
+// — the same manifest-driven mechanism used by other platform resources.
 //
 // It is equally a GUARDRAIL: "this module wants 4 vCPU / 8 GB" is visible in
 // the manifest, therefore visible at install, therefore approved by the app
@@ -77,15 +77,18 @@ type TaskCompute struct {
 }
 
 // Task is a declared background task. Exposed in the manifest so the platform
-// can provision SQS queues and execution runners on deploy.
+// can provision managed execution runners on deploy.
 type Task struct {
 	Name        string `json:"name"`
-	MaxDuration string `json:"maxDuration,omitempty"` // e.g. "600s", "10m" — platform sets visibility timeout
-	MaxRetries  int    `json:"maxRetries,omitempty"`  // platform configures DLQ redrive policy
+	MaxDuration string `json:"maxDuration,omitempty"`
+	MaxRetries  int    `json:"maxRetries,omitempty"`
 	// Compute is a POINTER so an undeclared class omits the key entirely:
 	// encoding/json does not omit a zero struct, and a task that predates
 	// WithCompute must keep a byte-identical manifest entry.
 	Compute *TaskCompute `json:"compute,omitempty"`
+	// EphemeralStorageMB is omitted for the Fargate default (20 GiB) and for
+	// tasks that predate configurable ephemeral storage.
+	EphemeralStorageMB int `json:"ephemeralStorageMb,omitempty"`
 }
 
 // Permission is a declared module permission. Exposed in the manifest so the

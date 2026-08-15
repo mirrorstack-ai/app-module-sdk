@@ -84,6 +84,7 @@ mod.Start()
 |------------|-------------|-------------------|
 | **Local dev** | HTTP server on `:8080` | HTTP proxy |
 | **AWS Lambda** | Lambda handler | Lambda Invoke SDK (VPC-internal) |
+| **Managed Heavy/GPU task** | Runs one broker-claimed attempt, then exits | Protected one-shot runner handoff |
 
 Port defaults to `8080`. Override with `PORT` env var.
 
@@ -92,8 +93,8 @@ Port defaults to `8080`. Override with `PORT` env var.
 > When `AWS_LAMBDA_FUNCTION_NAME` is unset, `InternalAuth` returns 401
 > (not 503) on a missing secret to keep local tooling friendly. A dev
 > server bound to `0.0.0.0` with no `MS_INTERNAL_SECRET` set will accept
-> platform calls from anyone who can reach the port. Use Lambda or ECS
-> task worker mode for production. For staging, set `MS_INTERNAL_SECRET`
+> platform calls from anyone who can reach the port. Use Lambda or the managed
+> one-shot task plane for production. For staging, set `MS_INTERNAL_SECRET`
 > and put the server behind a VPN or IP allowlist.
 
 ## Database
@@ -298,7 +299,7 @@ app-module-sdk/
     mcp.go                     MCPTool, MCPResource implementation
     cron.go                    Cron job registration + scheduling
     event.go                   OnEvent, Emits event wiring
-    task.go                    OnTask, RunTask for SQS-backed background tasks
+    task.go                    OnTask, RunTask for managed background tasks
     resources.go               System routes (manifest, health, lifecycle)
     [test files]               Unit + integration tests
   internal/

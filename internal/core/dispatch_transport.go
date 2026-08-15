@@ -11,8 +11,10 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 )
 
 // This file is the ONE module->dispatch transport every outbound surface
@@ -47,6 +49,17 @@ func dispatchBase() string {
 	return strings.TrimRight(base, "/")
 }
 
+// dispatchBaseFor resolves routing from the broker-attested one-shot context
+// before consulting process state. A warm Standard Lambda can execute
+// concurrent attempts, so task routing must never be installed through a
+// process-global environment mutation.
+func dispatchBaseFor(ctx context.Context) string {
+	if base := runtime.TaskDispatchURLFrom(ctx); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	return dispatchBase()
+}
+
 // moduleSessionSecret returns the outbound credential that binds this module
 // process to an identity dispatch can verify. This is the outbound
 // module-identity seam already used by dependency_db.go, meter and the CLI's
@@ -63,6 +76,24 @@ func dispatchBase() string {
 // behavioral gain. Empty means "no credential" and callers skip the header
 // rather than sending it blank.
 func moduleSessionSecret() string { return os.Getenv("MS_INTERNAL_SECRET") }
+
+// outboundServiceSecret resolves an attempt-scoped renewable task capability
+// before falling back to the process credential used by normal Lambda/dev
+// requests. A task provider always wins: refresh denial must fail closed and
+// must never fall back to ambient MS_INTERNAL_SECRET.
+func outboundServiceSecret(ctx context.Context, operation string) (string, error) {
+	if provider := runtime.ModuleCallCapabilityProviderFrom(ctx); provider != nil {
+		capability, err := provider.ModuleCallCapability(ctx)
+		if err != nil {
+			return "", fmt.Errorf("mirrorstack: %s: task module-call capability unavailable: %w", operation, err)
+		}
+		if capability.Token == "" || (!capability.ExpiresAt.IsZero() && !capability.ExpiresAt.After(time.Now())) {
+			return "", fmt.Errorf("mirrorstack: %s: task module-call capability is missing or expired", operation)
+		}
+		return capability.Token, nil
+	}
+	return moduleSessionSecret(), nil
+}
 
 // appIDFromContext reads the current app id from the request context — the
 // same identity the SDK injects for handlers. An empty app id is an error

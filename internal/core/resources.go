@@ -7,6 +7,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
@@ -35,8 +36,14 @@ func (m *Module) Cache(ctx context.Context) (cache.Cacher, func(), error) {
 // Production uses ClientCache (refcount-pinned). Dev uses a single shared
 // client (no-op release).
 func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error) {
+	if provider := cache.CredentialProviderFrom(ctx); provider != nil {
+		return m.cacheCache.GetProvider(ctx, provider)
+	}
 	if cred := cache.CredentialFrom(ctx); cred != nil {
 		return m.cacheCache.Get(ctx, *cred)
+	}
+	if runtime.IsOneShot() {
+		return nil, nil, fmt.Errorf("mirrorstack: Cache: one-shot task has no renewable cache credential provider")
 	}
 	m.devCacheOnce.Do(func() {
 		m.devCache, m.devCacheErr = cache.Open(context.Background())
@@ -72,11 +79,17 @@ func (m *Module) RequireStorage() {
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
+	if provider := storage.CredentialProviderFrom(ctx); provider != nil {
+		return storage.NewFromProvider(ctx, provider)
+	}
 	// DEPLOYED: the platform vends a prefix-scoped STS credential per invocation.
 	// No caching — S3 client creation is cheap (no I/O), and STS tokens rotate
 	// frequently. Caching by AccessKeyID risks using stale credentials.
 	if cred := storage.CredentialFrom(ctx); cred != nil {
 		return storage.NewFromCredential(*cred)
+	}
+	if runtime.IsOneShot() {
+		return nil, fmt.Errorf("mirrorstack: Storage: one-shot task has no renewable storage credential provider")
 	}
 	if storage.UnderLambda() {
 		return nil, storage.ErrNotVended
@@ -157,6 +170,12 @@ func (m *Module) Record(ctx context.Context, name string, value float64) error {
 	return m.meterClient.Record(ctx, name, value)
 }
 
+// RecordWithID is Record with a caller-persisted UUID deduplication key. It is
+// intended for transactional outboxes whose retries must remain idempotent.
+func (m *Module) RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return m.meterClient.RecordWithID(ctx, eventID, name, value)
+}
+
 // Package-level convenience wrappers — dispatch to defaultModule.
 
 // Cache returns a scoped cache client on the default module.
@@ -181,4 +200,10 @@ func Meter(name string, opts ...meter.MetricOption) {
 // Record emits a usage event by name on the default module. Panics before Init.
 func Record(ctx context.Context, name string, value float64) error {
 	return mustDefault("Record").Record(ctx, name, value)
+}
+
+// RecordWithID emits a usage event using a caller-persisted UUID deduplication
+// key. Panics before Init, matching Record.
+func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return mustDefault("RecordWithID").RecordWithID(ctx, eventID, name, value)
 }

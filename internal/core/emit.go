@@ -34,7 +34,11 @@ type eventEnvelope struct {
 // in, mirroring resolveCallURL. Emit's marshal/auth/error contract
 // (dispatch_transport.go) stays put.
 func resolveEventBusURL(appID, name string) string {
-	return fmt.Sprintf("%s/apps/%s/events/%s", dispatchBase(), appID, name)
+	return resolveEventBusURLFor(context.Background(), appID, name)
+}
+
+func resolveEventBusURLFor(ctx context.Context, appID, name string) string {
+	return fmt.Sprintf("%s/apps/%s/events/%s", dispatchBaseFor(ctx), appID, name)
 }
 
 // Emit publishes an event to every LIVE module that subscribes to name within
@@ -60,6 +64,10 @@ func (m *Module) Emit(ctx context.Context, name string, payload any) error {
 	if err != nil {
 		return err
 	}
+	secret, err := outboundServiceSecret(ctx, "Emit")
+	if err != nil {
+		return err
+	}
 
 	env := eventEnvelope{
 		ID:             ids.NewUUID(),
@@ -74,8 +82,8 @@ func (m *Module) Emit(ctx context.Context, name string, payload any) error {
 	// points at tunnel liveness rather than at the missing credential it
 	// actually describes. ms.Notify and the dependency read proxy send the same
 	// secret; Emit was the one caller that did not.
-	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURL(appID, name), appID, env, map[string]string{
-		"X-MS-Service-Secret": moduleSessionSecret(),
+	return postDispatchJSON(ctx, "ms.Emit", resolveEventBusURLFor(ctx, appID, name), appID, env, map[string]string{
+		"X-MS-Service-Secret": secret,
 	})
 }
 

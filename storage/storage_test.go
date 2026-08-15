@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/url"
 	"strings"
 	"testing"
@@ -41,18 +42,18 @@ func TestPresignTTLStaysWithinCredentialLifetime(t *testing.T) {
 	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
 	c := &Client{expiresAt: now.Add(10 * time.Minute), now: func() time.Time { return now }}
 
-	got, err := c.presignTTL(15 * time.Minute)
+	got, err := c.presignTTL(context.Background(), 15*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := 10*time.Minute - credentialExpirySafetyMargin; got != want {
 		t.Fatalf("clamped TTL=%v, want %v", got, want)
 	}
-	if got, err := c.presignTTL(time.Minute); err != nil || got != time.Minute {
+	if got, err := c.presignTTL(context.Background(), time.Minute); err != nil || got != time.Minute {
 		t.Fatalf("short TTL=%v err=%v, want 1m", got, err)
 	}
 	c.expiresAt = now.Add(credentialExpirySafetyMargin)
-	if _, err := c.presignTTL(time.Minute); !errors.Is(err, ErrCredentialExpired) {
+	if _, err := c.presignTTL(context.Background(), time.Minute); !errors.Is(err, ErrCredentialExpired) {
 		t.Fatalf("expired credential err=%v, want ErrCredentialExpired", err)
 	}
 }
@@ -78,6 +79,35 @@ func TestMultipartPresignStaysWithinCredentialLifetime(t *testing.T) {
 	}
 	if got, want := parsed.Query().Get("X-Amz-Expires"), "570"; got != want {
 		t.Fatalf("X-Amz-Expires=%q, want %q", got, want)
+	}
+}
+
+func TestPresignDownloadForcesAttachmentWithUnicodeFilename(t *testing.T) {
+	c, err := newClient(Credential{
+		Bucket: "bucket", Region: "ap-northeast-1", Prefix: "apps/app/mod/", CDNBase: "https://cdn.example.com",
+		AccessKeyID: "key", SecretAccessKey: "secret",
+	}, "http://localhost:9000", "http://localhost:9000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.PresignDownload(context.Background(), "videos/id/source.mp4", "課程\r\n.mp4", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disposition := parsed.Query().Get("response-content-disposition")
+	mediaType, params, err := mime.ParseMediaType(disposition)
+	if err != nil {
+		t.Fatalf("parse disposition %q: %v", disposition, err)
+	}
+	if mediaType != "attachment" || params["filename"] != "課程.mp4" {
+		t.Fatalf("disposition=%q filename=%q, want attachment/課程.mp4", mediaType, params["filename"])
+	}
+	if parsed.Query().Get("X-Amz-Signature") == "" {
+		t.Fatal("download response override was not signed")
 	}
 }
 

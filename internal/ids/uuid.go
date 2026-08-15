@@ -6,7 +6,12 @@ package ids
 import (
 	"crypto/rand"
 	"fmt"
+	"regexp"
+	"strings"
 )
+
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+var compactModuleIDPattern = regexp.MustCompile(`^m[0-9a-f]{32}$`)
 
 // NewUUID returns a random UUID v4 string (version 4, variant RFC 4122).
 // Panics if crypto/rand.Read fails — callers cannot recover from entropy
@@ -29,4 +34,33 @@ func NewUUID() string {
 // on the text shape.
 func FormatUUID(b [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// NormalizeModuleID converts the platform's canonical UUID identity to the
+// identifier-safe m<32hex> form used by module schemas and manifests. It also
+// accepts that compact form unchanged. Other legacy/dev IDs are deliberately
+// outside this helper even though Config still accepts them for compatibility.
+func NormalizeModuleID(value string) (string, bool) {
+	if compactModuleIDPattern.MatchString(value) {
+		return value, true
+	}
+	if !canonicalUUIDPattern.MatchString(value) {
+		return "", false
+	}
+	return "m" + strings.ReplaceAll(value, "-", ""), true
+}
+
+// CanonicalModuleID converts an identifier-safe module ID back to the
+// canonical UUID carried in broker claims. Canonical UUID input is returned
+// unchanged so callers can compare identities without depending on transport
+// representation.
+func CanonicalModuleID(value string) (string, bool) {
+	if canonicalUUIDPattern.MatchString(value) {
+		return value, true
+	}
+	if !compactModuleIDPattern.MatchString(value) {
+		return "", false
+	}
+	hex := value[1:]
+	return hex[:8] + "-" + hex[8:12] + "-" + hex[12:16] + "-" + hex[16:20] + "-" + hex[20:], true
 }

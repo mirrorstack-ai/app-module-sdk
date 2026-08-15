@@ -3,9 +3,9 @@ package main
 // CLI flag: --use-ecs
 // Remove this file if the module has no long-running background work.
 //
-// Task registration means the module will also be deployed as an ECS task
-// worker process (polling SQS). See the SDK README for the deploy-time
-// implications of this flag.
+// Task registration declares platform-managed work. Standard runs on the exact
+// installed Lambda version; Heavy/GPU use one-shot managed runners. See the SDK
+// README for the deploy-time implications.
 
 import (
 	"context"

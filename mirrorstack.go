@@ -39,6 +39,12 @@ type TaskHandler = core.TaskHandler
 // TaskOption configures an OnTask registration.
 type TaskOption = core.TaskOption
 
+// PermanentTaskError marks a task failure as non-retryable while preserving Unwrap.
+type PermanentTaskError = core.PermanentTaskError
+
+// TaskJobStatus is the current state of a local-dev or managed task job.
+type TaskJobStatus = core.TaskJobStatus
+
 // Res is the resource request passed to Standard, Heavy or GPU. Each class
 // honours a different subset of its fields and rejects the rest — see core.Res.
 type Res = core.Res
@@ -58,20 +64,33 @@ func Heavy(r Res) Compute { return core.Heavy(r) }
 
 // GPU sizes a task for ECS on an allowlisted EC2 GPU instance. Fargate has no
 // GPU support, so this is a materially different runner. The instance type
-// determines vCPU and memory.
+// determines the task's allocatable vCPU and memory (g5g.xlarge currently
+// resolves to 4 vCPU and 7168 MiB after host overhead).
 func GPU(r Res) Compute { return core.GPU(r) }
 
 // WithCompute selects a task's execution class and size. Omit it to stay on
 // Standard/Lambda — the default never moves.
 func WithCompute(c Compute) TaskOption { return core.WithCompute(c) }
 
-// WithTimeout sets the maximum duration for a task handler, and the SQS
-// visibility timeout the platform provisions from it.
+// WithTimeout sets the maximum duration for a task handler.
 func WithTimeout(d time.Duration) TaskOption { return core.WithTimeout(d) }
 
-// WithMaxRetries sets the SQS retry count before a task message is routed to
-// the DLQ.
+// WithMaxRetries sets the platform-managed retry count.
 func WithMaxRetries(n int) TaskOption { return core.WithMaxRetries(n) }
+
+const (
+	MiB = core.MiB
+	GiB = core.GiB
+)
+
+// WithEphemeralStorage declares Heavy/Fargate runner-local scratch.
+func WithEphemeralStorage(sizeBytes int64) TaskOption { return core.WithEphemeralStorage(sizeBytes) }
+
+// Permanent marks a task failure as non-retryable.
+func Permanent(err error) error { return core.Permanent(err) }
+
+// IsPermanent reports whether err contains a permanent task wrapper.
+func IsPermanent(err error) bool { return core.IsPermanent(err) }
 
 // --- Lifecycle ---
 
@@ -255,6 +274,13 @@ func Record(ctx context.Context, name string, value float64) error {
 	return core.Record(ctx, name, value)
 }
 
+// RecordWithID emits a usage event with a caller-persisted UUID as its
+// idempotency key. Persist the ID with the billable state change and reuse it
+// across ambiguous delivery retries.
+func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return core.RecordWithID(ctx, eventID, name, value)
+}
+
 // --- Inter-module calls ---
 
 // Call makes one server-mediated module-to-module hop through the platform
@@ -283,6 +309,12 @@ func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
 // CallPost is Call specialized to POST with a JSON body on the default module.
 func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return core.CallPost(ctx, targetModuleID, path, body, out)
+}
+
+// CallDependencyPost sends an actorless POST to a declared dependency's
+// Internal surface. producerRef accepts the same stable ref used by DependsOn.
+func CallDependencyPost(ctx context.Context, producerRef, path string, body, out any) error {
+	return core.CallDependencyPost(ctx, producerRef, path, body, out)
 }
 
 // Emit publishes an event to every LIVE module that subscribes to name within
@@ -696,6 +728,22 @@ func OnTask(name string, handler TaskHandler, opts ...TaskOption) {
 // RunTask enqueues a task on the default module.
 func RunTask(ctx context.Context, name string, payload json.RawMessage) (string, error) {
 	return core.RunTask(ctx, name, payload)
+}
+
+// RunTaskWithIdempotencyKey creates or recovers one logical managed task job.
+// Persist and reuse the UUID when retrying after an ambiguous enqueue result.
+func RunTaskWithIdempotencyKey(ctx context.Context, name string, payload json.RawMessage, idempotencyKey string) (string, error) {
+	return core.RunTaskWithIdempotencyKey(ctx, name, payload, idempotencyKey)
+}
+
+// TaskStatus returns a task's current state from the local dev executor or managed platform.
+func TaskStatus(ctx context.Context, jobID string) (TaskJobStatus, error) {
+	return core.TaskStatus(ctx, jobID)
+}
+
+// CancelTask requests monotonic, idempotent cancellation of a local or managed task.
+func CancelTask(ctx context.Context, jobID string) error {
+	return core.CancelTask(ctx, jobID)
 }
 
 // --- Contribution slots ---

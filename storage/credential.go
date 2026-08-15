@@ -8,7 +8,10 @@ import (
 
 type contextKey string
 
-const credentialKey = contextKey("ms-storage-credential")
+const (
+	credentialKey         = contextKey("ms-storage-credential")
+	credentialProviderKey = contextKey("ms-storage-credential-provider")
+)
 
 // Credential holds S3 access details injected by the platform per invocation.
 // STS temp credentials scoped to the app/module S3 prefix.
@@ -27,6 +30,12 @@ type Credential struct {
 	// it; clients preserve that compatibility while newer envelopes use it to
 	// keep presigned URLs within the credential lifetime.
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+}
+
+// CredentialProvider supplies renewable scoped storage credentials. Bucket,
+// Region, Prefix and CDNBase must remain stable for the provider's lifetime.
+type CredentialProvider interface {
+	Credential(context.Context) (Credential, error)
 }
 
 // validate checks that all required fields are populated. Prefix is required
@@ -57,4 +66,15 @@ func WithCredential(ctx context.Context, cred Credential) context.Context {
 func CredentialFrom(ctx context.Context) *Credential {
 	c, _ := ctx.Value(credentialKey).(*Credential)
 	return c
+}
+
+// WithCredentialProvider installs a renewable storage credential source.
+func WithCredentialProvider(ctx context.Context, provider CredentialProvider) context.Context {
+	return context.WithValue(ctx, credentialProviderKey, provider)
+}
+
+// CredentialProviderFrom reads the renewable storage credential source.
+func CredentialProviderFrom(ctx context.Context) CredentialProvider {
+	p, _ := ctx.Value(credentialProviderKey).(CredentialProvider)
+	return p
 }

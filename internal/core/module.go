@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,10 +30,11 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
-	msqs "github.com/mirrorstack-ai/app-module-sdk/internal/sqs"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/taskenv"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -134,8 +134,8 @@ type Module struct {
 	devStorage     *storage.DevMinter
 	devStorageErr  error
 	taskHandlers   map[string]taskEntry // registered task handlers (startup-only writes)
-	sqsClient      *msqs.Client         // nil in dev mode (MS_TASK_QUEUE_URL unset)
-	signingKey     []byte               // HMAC key for TaskMessage signing (MS_TASK_SIGNING_KEY)
+	localTasks     *localTaskRegistry   // dev-only jobs; managed calls never consult this registry
+	taskHTTPClient *http.Client         // managed enqueue transport; replaceable in focused tests
 	meterClient    *meter.Client        // dispatch-HTTP usage transport (dev + prod); never nil
 
 	// devMode is true under `mirrorstack dev` (HTTP serving + dev DB), false in
@@ -213,6 +213,13 @@ func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("mirrorstack: Config.ID is required")
 	}
+	// Generic managed runners receive the broker's canonical catalog UUID,
+	// while module schemas and manifests use the identifier-safe m<32hex>
+	// representation. Normalize at the construction boundary so every internal
+	// consumer sees one stable form. Legacy human-readable dev IDs remain valid.
+	if normalized, ok := ids.NormalizeModuleID(cfg.ID); ok {
+		cfg.ID = normalized
+	}
 	if !moduleIDPattern.MatchString(cfg.ID) {
 		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 36 chars)", cfg.ID, moduleIDPattern)
 	}
@@ -232,7 +239,8 @@ func New(cfg Config) (*Module, error) {
 		poolCache:      db.NewPoolCache(),
 		cacheCache:     cache.NewClientCache(),
 		taskHandlers:   make(map[string]taskEntry),
-		signingKey:     []byte(os.Getenv("MS_TASK_SIGNING_KEY")),
+		localTasks:     newLocalTaskRegistry(),
+		taskHTTPClient: &http.Client{Timeout: 15 * time.Second},
 	}
 
 	// Local-dev CORS: when NO platform-secret source is configured (i.e. the
@@ -274,17 +282,6 @@ func New(cfg Config) (*Module, error) {
 	// every request, both serving paths.
 	configureLogging()
 	m.router.Use(m.requestLogMiddleware)
-
-	// Eagerly initialize SQS client when queue URL is configured.
-	// LoadDefaultConfig may hit IMDS on first cold start in Lambda; acceptable
-	// since this runs once at process init, not per request.
-	if queueURL := os.Getenv("MS_TASK_QUEUE_URL"); queueURL != "" {
-		sqsClient, err := msqs.New(context.Background(), queueURL)
-		if err != nil {
-			return nil, fmt.Errorf("mirrorstack: init sqs client: %w", err)
-		}
-		m.sqsClient = sqsClient
-	}
 
 	// Meter client: dispatch-HTTP transport in both dev and prod (Record POSTs
 	// each usage Event to the dispatch usage ingress, like ms.Emit). The HTTP
@@ -580,7 +577,7 @@ func RequirePermission(name string) func(http.Handler) http.Handler {
 // Start auto-detects the runtime mode and starts serving:
 //
 //   - Lambda (AWS_LAMBDA_FUNCTION_NAME set): wraps the router for Lambda invoke
-//   - Task worker (MS_TASK_WORKER_MODE=true): polls SQS for background tasks
+//   - One-shot task (MS_TASK_ONE_SHOT=1): claims and runs one broker attempt
 //   - Otherwise: HTTP server on :PORT (default 8080) for local development
 //
 // checkUIServable rejects the one combination that is always a mistake:
@@ -621,13 +618,13 @@ func (m *Module) Start() error {
 		if err := requireInternalSecret(); err != nil {
 			return err
 		}
-		handler := runtime.NewLambdaHandler(m.router)
+		handler := runtime.NewLambdaHandlerWithTasks(m.router, m.config.ID, m.config.Slug, m.runtimeTaskEntries())
 		lambda.Start(handler)
 		return nil
 	}
 
-	if runtime.IsTaskWorker() {
-		return m.startTaskWorker()
+	if runtime.IsOneShot() {
+		return m.startOneShot()
 	}
 
 	if err := m.checkUIServable(); err != nil {
@@ -661,98 +658,62 @@ func (m *Module) Start() error {
 	return nil
 }
 
-// startTaskWorker runs the SQS poll loop. Spawns MS_TASK_CONCURRENCY
-// goroutines (default 1). Blocks until the context is cancelled (SIGTERM
-// handling is added in PR 4).
-func (m *Module) startTaskWorker() error {
-	if m.sqsClient == nil {
-		return errors.New("mirrorstack: MS_TASK_QUEUE_URL is required in task worker mode")
-	}
-	if len(m.signingKey) < 32 {
-		return errors.New("mirrorstack: MS_TASK_SIGNING_KEY must be at least 32 bytes in task worker mode")
-	}
+func (m *Module) startOneShot() error {
 	if len(m.taskHandlers) == 0 {
-		return errors.New("mirrorstack: no tasks registered via OnTask — nothing to process")
+		return errors.New("mirrorstack: no tasks registered via OnTask — nothing to execute")
 	}
-
-	concurrency, err := parseTaskConcurrency()
+	brokerURL := os.Getenv(taskenv.BrokerURLVar)
+	jobID := os.Getenv(taskenv.JobIDVar)
+	attemptID := os.Getenv(taskenv.AttemptIDVar)
+	bootstrapToken := os.Getenv(taskenv.BootstrapTokenVar)
+	claimFile := os.Getenv(taskenv.ClaimFileVar)
+	if brokerURL == "" || jobID == "" || attemptID == "" {
+		return errors.New("mirrorstack: one-shot mode requires MS_TASK_BROKER_URL, MS_TASK_JOB_ID, and MS_TASK_ATTEMPT_ID")
+	}
+	if (bootstrapToken == "") == (claimFile == "") {
+		return errors.New("mirrorstack: one-shot mode requires exactly one of MS_TASK_BOOTSTRAP_TOKEN or MS_TASK_CLAIM_FILE")
+	}
+	if !uuidPattern.MatchString(jobID) || !uuidPattern.MatchString(attemptID) {
+		return errors.New("mirrorstack: one-shot job and attempt IDs must be UUIDs")
+	}
+	broker, err := runtime.NewBrokerClient(brokerURL, nil)
 	if err != nil {
 		return err
 	}
-
-	// Build the handler map in the shape the worker loop expects.
-	handlers := make(map[string]runtime.TaskEntry, len(m.taskHandlers))
-	for name, entry := range m.taskHandlers {
-		handlers[name] = runtime.TaskEntry{
-			Handler: runtime.TaskHandlerFunc(entry.handler),
-			Timeout: entry.timeout,
+	var preclaimed *runtime.ClaimResponse
+	if claimFile != "" {
+		claim, err := runtime.LoadClaimFile(claimFile)
+		if err != nil {
+			return err
 		}
+		if err := os.Remove(claimFile); err != nil {
+			return errors.New("mirrorstack: could not remove consumed task claim file")
+		}
+		preclaimed = &claim
+		if err := os.Unsetenv(taskenv.ClaimFileVar); err != nil {
+			return errors.New("mirrorstack: could not clear task claim file environment")
+		}
+	} else if err := os.Unsetenv(taskenv.BootstrapTokenVar); err != nil {
+		return errors.New("mirrorstack: could not clear task bootstrap capability environment")
 	}
+	handlers := m.runtimeTaskEntries()
 
-	cfg := runtime.WorkerConfig{
-		SQSClient:    m.sqsClient,
-		Handlers:     handlers,
-		SigningKey:   m.signingKey,
-		Logger:       m.logger,
-		IsProduction: true, // MS_TASK_QUEUE_URL is set (checked above)
-	}
-
-	m.logger.Printf("%s module (%s) starting task worker (concurrency=%d)", m.config.Name, m.config.ID, concurrency)
-
-	// SIGTERM/SIGINT: stop accepting new messages, drain in-flight handlers.
-	// ECS sends SIGTERM 30s before SIGKILL; we use a 25s drain window to
-	// leave a 5s buffer for Close() and process exit.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-
-	var wg sync.WaitGroup
-	for range concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runtime.PollLoop(ctx, &cfg)
-		}()
-	}
-
-	// Block until shutdown signal.
-	<-ctx.Done()
-	stop() // release signal channel early
-	m.logger.Printf("mirrorstack: shutdown signal received, draining tasks (max 25s)")
-
-	// Wait for all poll goroutines to exit (each exits when ctx.Done fires
-	// and their current message finishes or times out).
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer drainCancel()
-
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-
-	select {
-	case <-done:
-		m.logger.Printf("mirrorstack: all tasks drained cleanly")
-	case <-drainCtx.Done():
-		m.logger.Printf("mirrorstack: drain timeout exceeded — some goroutines may still be running")
-	}
-
-	m.Close()
-	return nil
+	defer m.Close()
+	return runtime.RunOneShot(ctx, runtime.OneShotConfig{
+		Broker: broker, JobID: jobID, AttemptID: attemptID,
+		BootstrapToken: bootstrapToken, Preclaimed: preclaimed,
+		ModuleID: m.config.ID, ModuleRef: m.config.Slug, Handlers: handlers,
+	})
 }
 
-// parseTaskConcurrency reads MS_TASK_CONCURRENCY, defaulting to 1.
-// Returns an error for non-integer or < 1 values.
-func parseTaskConcurrency() (int, error) {
-	s := os.Getenv("MS_TASK_CONCURRENCY")
-	if s == "" {
-		return 1, nil
+func (m *Module) runtimeTaskEntries() map[string]runtime.TaskEntry {
+	handlers := make(map[string]runtime.TaskEntry, len(m.taskHandlers))
+	for name, entry := range m.taskHandlers {
+		handlers[name] = runtime.TaskEntry{Handler: runtime.TaskHandlerFunc(entry.handler), Timeout: entry.timeout}
 	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, fmt.Errorf("mirrorstack: MS_TASK_CONCURRENCY=%q is not a valid integer", s)
-	}
-	if n < 1 {
-		return 0, fmt.Errorf("mirrorstack: MS_TASK_CONCURRENCY=%d must be >= 1", n)
-	}
-	return n, nil
+	return handlers
 }
 
 // requireInternalSecret errors if no platform-secret source is configured —

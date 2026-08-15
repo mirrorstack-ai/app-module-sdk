@@ -73,7 +73,7 @@ func (u *MultipartUpload) PresignPart(ctx context.Context, partNumber int32, exp
 	if partNumber < 1 || partNumber > 10000 {
 		return "", fmt.Errorf("mirrorstack/storage: partNumber must be between 1 and 10000, got %d", partNumber)
 	}
-	expires, err := u.client.presignTTL(expires)
+	expires, err := u.client.presignTTL(ctx, expires)
 	if err != nil {
 		return "", err
 	}
