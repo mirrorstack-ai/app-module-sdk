@@ -60,7 +60,11 @@ type notifyEnvelope struct {
 // dispatch on both planes. What differs between planes is only the CREDENTIAL
 // Notify sends (see moduleSessionSecret), not this URL.
 func resolveNotifyURL(appID string) string {
-	return fmt.Sprintf("%s/apps/%s/notifications", dispatchBase(), appID)
+	return resolveNotifyURLFor(context.Background(), appID)
+}
+
+func resolveNotifyURLFor(ctx context.Context, appID string) string {
+	return fmt.Sprintf("%s/apps/%s/notifications", dispatchBaseFor(ctx), appID)
 }
 
 // Notify sends an in-app notification to the current app's members. It
@@ -92,6 +96,10 @@ func (m *Module) Notify(ctx context.Context, n Notification) error {
 	if err != nil {
 		return err
 	}
+	secret, err := outboundServiceSecret(ctx, "Notify")
+	if err != nil {
+		return err
+	}
 
 	title := n.Title.Resolve()
 	if !hasMessage(title) {
@@ -120,8 +128,8 @@ func (m *Module) Notify(ctx context.Context, n Notification) error {
 		Link:           n.Link,
 		Audience:       audience,
 	}
-	return postDispatchJSON(ctx, "ms.Notify", resolveNotifyURL(appID), appID, env, map[string]string{
-		"X-MS-Service-Secret": moduleSessionSecret(),
+	return postDispatchJSON(ctx, "ms.Notify", resolveNotifyURLFor(ctx, appID), appID, env, map[string]string{
+		"X-MS-Service-Secret": secret,
 	})
 }
 

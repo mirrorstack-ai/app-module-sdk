@@ -67,6 +67,19 @@ func TestManifest_StorageDeclarationIsExplicit(t *testing.T) {
 	}
 }
 
+func TestManifest_TaskRuntimeResourcesRemainInferredAndBackwardCompatible(t *testing.T) {
+	reg := registry.New()
+	reg.AddDependency(registry.Dependency{ID: "video-core", Tables: []string{"videos"}})
+	reg.AddTask(registry.Task{Name: "transcode", Compute: &registry.TaskCompute{Class: "heavy", VCPU: 4, MemoryMB: 8192}})
+	rec := manifestResponse(t, ManifestHandler("video-transcode", "", "Video Transcode", "movie", nil, nil, nil, reg, nil))
+	if !strings.Contains(rec.Body.String(), `"resources":{}`) {
+		t.Fatalf("DB and module-call task resources must remain platform-inferred without widening the manifest: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"database"`) || strings.Contains(rec.Body.String(), `"moduleCalls"`) {
+		t.Fatalf("task resource implementation details leaked into the public manifest: %s", rec.Body.String())
+	}
+}
+
 func TestManifest_SlugSurfaced(t *testing.T) {
 	t.Parallel()
 	got := decodeManifest(t, ManifestHandler("m15c0f543cf164433b524d312dbf68159", "oauth", "Google Sign-In", "vpn_key", nil, nil, nil, registry.New(), nil))

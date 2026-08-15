@@ -20,7 +20,9 @@ package meter
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -49,6 +51,41 @@ const devDispatchFallback = "http://host.docker.internal:8083"
 // inter-module call timeout (core.callTimeout); metering is best-effort and must
 // never hang a handler.
 const meterTimeout = 15 * time.Second
+
+type serviceCredentialProviderKey struct{}
+type dispatchURLKey struct{}
+
+// ServiceCredentialProvider supplies renewable outbound module authority.
+// Managed one-shot tasks install one so Record never falls back to an ambient
+// process credential that the task runtime intentionally does not receive.
+type ServiceCredentialProvider interface {
+	ServiceCredential(context.Context) (string, error)
+}
+
+// WithServiceCredentialProvider installs an attempt-scoped credential source.
+func WithServiceCredentialProvider(ctx context.Context, provider ServiceCredentialProvider) context.Context {
+	return context.WithValue(ctx, serviceCredentialProviderKey{}, provider)
+}
+
+// WithDispatchURL installs a broker-attested dispatch base for one managed
+// task attempt. It avoids mutating MS_DISPATCH_URL in warm Lambda processes.
+func WithDispatchURL(ctx context.Context, dispatchURL string) context.Context {
+	return context.WithValue(ctx, dispatchURLKey{}, dispatchURL)
+}
+
+func serviceCredential(ctx context.Context) (string, error) {
+	if provider, ok := ctx.Value(serviceCredentialProviderKey{}).(ServiceCredentialProvider); ok && provider != nil {
+		secret, err := provider.ServiceCredential(ctx)
+		if err != nil {
+			return "", fmt.Errorf("mirrorstack/meter: task service credential unavailable: %w", err)
+		}
+		if secret == "" {
+			return "", errors.New("mirrorstack/meter: task service credential is empty")
+		}
+		return secret, nil
+	}
+	return os.Getenv("MS_INTERNAL_SECRET"), nil
+}
 
 // reservedPrefixes are the platform-owned metric namespaces. A module may not
 // declare or self-report a metric under these — they belong to platform-side
@@ -385,6 +422,20 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 // any transport retry of the same call) so the platform's ON CONFLICT(event_id)
 // dedupe holds and a retried delivery is not double-counted.
 func (c *Client) Record(ctx context.Context, name string, value float64) error {
+	return c.record(ctx, ids.NewUUID(), name, value)
+}
+
+// RecordWithID emits a usage event with a caller-owned, persisted UUID as its
+// deduplication key. Persist eventID with the billable state transition and
+// reuse it for every delivery retry.
+func (c *Client) RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	if err := validateEventID(eventID); err != nil {
+		return err
+	}
+	return c.record(ctx, eventID, name, value)
+}
+
+func (c *Client) record(ctx context.Context, eventID, name string, value float64) error {
 	c.mu.RLock()
 	decl, declared := c.metrics[name]
 	moduleID := c.moduleID
@@ -418,7 +469,7 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 	// manifest/catalog is authoritative.
 	event := Event{
 		V:              envelopeVersion,
-		EventID:        ids.NewUUID(),
+		EventID:        eventID,
 		AppIDHint:      appID,
 		ModuleIDHint:   moduleID,
 		Metric:         decl.Name,
@@ -426,6 +477,29 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 		RecordedAtHint: time.Now().UTC(),
 	}
 	return c.dispatch(ctx, appID, event)
+}
+
+// validateEventID accepts one canonical lowercase RFC 4122 text spelling.
+// Billing's idempotency key is textual, so case variants must not create two
+// keys for the same UUID.
+func validateEventID(eventID string) error {
+	if len(eventID) != 36 || eventID[8] != '-' || eventID[13] != '-' || eventID[18] != '-' || eventID[23] != '-' {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a canonical lowercase RFC 4122 UUID")
+	}
+	compact := strings.ReplaceAll(eventID, "-", "")
+	decoded, err := hex.DecodeString(compact)
+	if err != nil || len(decoded) != 16 || compact != strings.ToLower(compact) {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a canonical lowercase RFC 4122 UUID")
+	}
+	allZero := true
+	for _, value := range decoded {
+		allZero = allZero && value == 0
+	}
+	version := decoded[6] >> 4
+	if allZero || version == 0 || version > 8 || decoded[8]&0xc0 != 0x80 {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a non-zero RFC 4122 UUID with a version and variant")
+	}
+	return nil
 }
 
 // resolveUsageURL builds the platform-dispatch usage-ingress URL the Event is
@@ -453,7 +527,14 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 // dispatch. Its only failure mode — an unset MS_DISPATCH_URL in an environment
 // with no local stack — is a connection error the caller already reports.
 func resolveUsageURL(appID string) string {
-	base := os.Getenv("MS_DISPATCH_URL")
+	return resolveUsageURLFor(context.Background(), appID)
+}
+
+func resolveUsageURLFor(ctx context.Context, appID string) string {
+	base, _ := ctx.Value(dispatchURLKey{}).(string)
+	if base == "" {
+		base = os.Getenv("MS_DISPATCH_URL")
+	}
 	if base == "" {
 		base = devDispatchFallback
 	}
@@ -473,7 +554,7 @@ func (c *Client) dispatch(ctx context.Context, appID string, event Event) error 
 		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)
 	}
 
-	u := resolveUsageURL(appID)
+	u := resolveUsageURLFor(ctx, appID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -503,17 +584,19 @@ func (c *Client) dispatch(ctx context.Context, appID string, event Event) error 
 	// Send it VERBATIM. Dispatch does a constant-time byte compare, so any
 	// trimming, case-folding or re-encoding here is a silent 403 in production.
 	//
-	// Read directly rather than through internal/core's moduleSessionSecret
-	// because meter is a separate package and this does not warrant a new
-	// exported API. Best-effort, not fatal: metering must never break a
-	// module's request path, and dispatch is the fail-closed enforcement point.
-	// An empty value is skipped, never written as a blank header — dispatch
-	// reads a blank as "no credential", and on the wire a blank header is
-	// indistinguishable from an authentication bug.
+	// Managed one-shot tasks install a renewable attempt-scoped provider. Its
+	// presence is authoritative: refresh denial must fail closed and must never
+	// fall back to MS_INTERNAL_SECRET. Normal Lambda/dev calls retain the ambient
+	// per-module credential for backward compatibility. An empty ambient value is
+	// skipped, never written as a blank header.
 	//
 	// NEVER log this value and never put it in an error. The non-2xx path below
 	// deliberately reports req.URL.Path and the response body only.
-	if secret := os.Getenv("MS_INTERNAL_SECRET"); secret != "" {
+	secret, err := serviceCredential(ctx)
+	if err != nil {
+		return err
+	}
+	if secret != "" {
 		req.Header.Set("X-MS-Service-Secret", secret)
 	}
 

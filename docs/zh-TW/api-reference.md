@@ -79,12 +79,19 @@ ms.Cron("cleanup", "0 3 * * *", cleanupHandler)
 
 ## Background tasks
 
-註冊 task 會讓 module 額外以 ECS task worker mode 部署(一個長時間運作的 process 輪詢 SQS)。
+註冊 task 會宣告由平台管理的背景 handler。Runner 每次只向 task broker claim 一個 attempt，回報終態後即結束。
+在 `mirrorstack dev` 下，enqueue 會立即回傳並由 process-local executor 執行 handler；相同的狀態查詢與取消 API 會操作該 local job。
 
 | Function | 用途 |
 |---|---|
 | `ms.OnTask(name, handler)` | 註冊 task handler(`func(ctx, json.RawMessage) error`)。 |
-| `ms.RunTask(ctx, name, payload)` | 把 task 放入佇列(回傳 SQS message ID)。 |
+| `ms.RunTask(ctx, name, payload)` | 建立 managed task job（回傳 job ID）。 |
+| `ms.RunTaskWithIdempotencyKey(ctx, name, payload, key)` | 使用持久化的 UUID key 建立或取回同一個 managed task job。 |
+| `ms.TaskStatus(ctx, jobID)` | 讀取限定於目前 app/module 的 job 狀態。 |
+| `ms.CancelTask(ctx, jobID)` | 以冪等方式取消等待中或執行中的 job。 |
+| `ms.WithCompute(...)` | 宣告 Standard、Heavy 或平台核准的 GPU 運算（`g5g.xlarge`：4 vCPU、7168 MiB 可用記憶體）。 |
+| `ms.WithEphemeralStorage(size)` | 以整 GiB 宣告 Heavy（21–200 GiB，20 GiB 為預設）暫存空間；GPU 主機暫存空間由平台固定。 |
+| `ms.Permanent(err)` | 將 handler 錯誤標記為不可重試。 |
 
 ```go
 ms.OnTask("transcode", handleTranscode)

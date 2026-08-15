@@ -87,6 +87,59 @@ func NewFromCredential(ctx context.Context, cred Credential) (*Client, error) {
 	return &Client{rdb: rdb}, nil
 }
 
+// NewFromProvider creates a Redis client that reacquires credentials whenever
+// go-redis authenticates a new connection. Endpoint/username are pinned to the
+// first credential so renewal cannot silently cross a resource boundary.
+func NewFromProvider(ctx context.Context, provider CredentialProvider) (*Client, error) {
+	opts, err := optionsFromProvider(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	rdb := redis.NewClient(opts)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		rdb.Close()
+		return nil, fmt.Errorf("mirrorstack/cache: credential rejected by Redis: %w", err)
+	}
+	return &Client{rdb: rdb}, nil
+}
+
+func optionsFromProvider(ctx context.Context, provider CredentialProvider) (*redis.Options, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("mirrorstack/cache: renewable credential provider is missing")
+	}
+	initial, err := provider.Credential(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mirrorstack/cache: renewable credential unavailable: %w", err)
+	}
+	if err := initial.validate(); err != nil {
+		return nil, err
+	}
+	// Retain only immutable routing coordinates. Keeping the full initial
+	// credential in this closure would keep its short-lived token reachable for
+	// the lifetime of the Redis client even after the provider rotates it.
+	initialEndpoint := initial.Endpoint
+	initialUsername := initial.Username
+	initial = Credential{}
+	opts := &redis.Options{
+		Addr:      initialEndpoint,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		CredentialsProviderContext: func(ctx context.Context) (string, string, error) {
+			current, err := provider.Credential(ctx)
+			if err != nil {
+				return "", "", fmt.Errorf("mirrorstack/cache: renewable credential unavailable: %w", err)
+			}
+			if err := current.validate(); err != nil {
+				return "", "", err
+			}
+			if current.Endpoint != initialEndpoint || current.Username != initialUsername {
+				return "", "", fmt.Errorf("mirrorstack/cache: renewable credential changed connection scope")
+			}
+			return current.Username, current.Token, nil
+		},
+	}
+	return opts, nil
+}
+
 // ForApp returns a new Client sharing the same Redis connection but with an
 // app-scoped key prefix. Key pattern: {appID}:{moduleID}:{key}
 // Validates both IDs to prevent colon injection breaking prefix boundary.

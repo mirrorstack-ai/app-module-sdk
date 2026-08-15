@@ -6,19 +6,15 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/taskenv"
 )
 
-func TestIsSet(t *testing.T) {
-	t.Setenv(taskenv.VarName, "")
-	if taskenv.IsSet() {
-		t.Error("IsSet() = true when MS_TASK_WORKER_MODE is unset")
+func TestIsSetRequiresCanonicalOneShotValue(t *testing.T) {
+	for _, value := range []string{"", "true", "0"} {
+		t.Setenv(taskenv.OneShotVar, value)
+		if taskenv.IsSet() {
+			t.Fatalf("IsSet() = true for %q", value)
+		}
 	}
-
-	t.Setenv(taskenv.VarName, "false")
-	if taskenv.IsSet() {
-		t.Error("IsSet() = true when MS_TASK_WORKER_MODE is 'false'")
-	}
-
-	t.Setenv(taskenv.VarName, "true")
+	t.Setenv(taskenv.OneShotVar, "1")
 	if !taskenv.IsSet() {
-		t.Error("IsSet() = false when MS_TASK_WORKER_MODE is 'true'")
+		t.Fatal("IsSet() = false for canonical value 1")
 	}
 }

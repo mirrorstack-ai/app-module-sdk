@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +87,22 @@ type LambdaResponse struct {
 	Body       string              `json:"body"`
 }
 
+// LambdaTaskEvent is the platform-owned Standard-task pointer. Payload,
+// resources, actor identity, and authority are intentionally absent: the SDK
+// exchanges this one-attempt bootstrap capability with the broker.
+type LambdaTaskEvent struct {
+	Version int               `json:"v"`
+	Task    LambdaTaskPointer `json:"task"`
+}
+
+type LambdaTaskPointer struct {
+	BrokerURL      string `json:"brokerUrl"`
+	JobID          string `json:"jobId"`
+	AttemptID      string `json:"attemptId"`
+	BootstrapToken string `json:"bootstrapToken"`
+	OneShot        bool   `json:"oneShot"`
+}
+
 func jsonError(code int, msg string) LambdaResponse {
 	b, _ := json.Marshal(httputil.ErrorResponse{Error: msg})
 	return LambdaResponse{
@@ -120,7 +138,50 @@ func isStrippedIdentityHeader(k string) bool {
 // NewLambdaHandler wraps an http.Handler into a function compatible with
 // aws-lambda-go's lambda.Start().
 func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessage) (LambdaResponse, error) {
+	return NewLambdaHandlerWithTasks(handler, "", "", nil)
+}
+
+// NewLambdaHandlerWithTasks multiplexes normal HTTP Lambda requests and the
+// platform's typed Standard-task pointer. Task envelopes are recognized before
+// HTTP decoding and execute one broker attempt; they never enter the router.
+func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string, handlers map[string]TaskEntry) func(context.Context, json.RawMessage) (LambdaResponse, error) {
 	return func(ctx context.Context, payload json.RawMessage) (LambdaResponse, error) {
+		isTask, taskEvent, err := decodeLambdaTaskEvent(payload)
+		if isTask {
+			// Once the top-level task key identifies the privileged Standard-task
+			// wire, clear the mutable Lambda Invoke buffer on every path. In
+			// particular, malformed envelopes may still contain a real bootstrap
+			// capability and must not leave it resident in a warm Lambda.
+			for i := range payload {
+				payload[i] = 0
+			}
+			if err != nil {
+				return LambdaResponse{}, err
+			}
+			task := taskEvent.Task
+			taskEvent = LambdaTaskEvent{}
+			if moduleID == "" || len(handlers) == 0 {
+				task.BootstrapToken = ""
+				return LambdaResponse{}, errors.New("mirrorstack: Standard task event reached a module with no registered task runtime")
+			}
+			broker, err := NewBrokerClient(task.BrokerURL, nil)
+			if err != nil {
+				return LambdaResponse{}, err
+			}
+			err = RunOneShot(ctx, OneShotConfig{
+				Broker: broker, JobID: task.JobID, AttemptID: task.AttemptID,
+				BootstrapToken: task.BootstrapToken, ModuleID: moduleID, ModuleRef: moduleRef, ExpectedClass: "standard", Handlers: handlers,
+			})
+			task.BootstrapToken = ""
+			if err != nil {
+				return LambdaResponse{}, err
+			}
+			return LambdaResponse{StatusCode: http.StatusNoContent}, nil
+		}
+		if err != nil {
+			return LambdaResponse{}, err
+		}
+
 		var req LambdaRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return jsonError(400, "invalid request payload"), nil
@@ -190,4 +251,29 @@ func NewLambdaHandler(handler http.Handler) func(context.Context, json.RawMessag
 			Body:       rec.Body.String(),
 		}, nil
 	}
+}
+
+func decodeLambdaTaskEvent(payload json.RawMessage) (bool, LambdaTaskEvent, error) {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &keys); err != nil {
+		return false, LambdaTaskEvent{}, nil // normal HTTP decoder returns its canonical 400
+	}
+	if _, ok := keys["task"]; !ok {
+		return false, LambdaTaskEvent{}, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	var event LambdaTaskEvent
+	if err := dec.Decode(&event); err != nil {
+		return true, LambdaTaskEvent{}, errors.New("mirrorstack: malformed Standard task envelope")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return true, LambdaTaskEvent{}, errors.New("mirrorstack: Standard task envelope must contain exactly one JSON value")
+	}
+	if event.Version != 1 || !event.Task.OneShot || event.Task.BrokerURL == "" ||
+		!taskUUIDPattern.MatchString(event.Task.JobID) || !taskUUIDPattern.MatchString(event.Task.AttemptID) || event.Task.BootstrapToken == "" {
+		return true, LambdaTaskEvent{}, errors.New("mirrorstack: incomplete or unsupported Standard task envelope")
+	}
+	return true, event, nil
 }

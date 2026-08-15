@@ -3,9 +3,14 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
@@ -59,6 +64,72 @@ func TestNewLambdaHandler_InvalidPayload(t *testing.T) {
 
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestNewLambdaHandlerWithTasksRunsStandardPointerOnce(t *testing.T) {
+	claim := validClaim()
+	claim.Workload.Class = "standard"
+	claim.Resources.ModuleCalls = &ModuleCallCapability{Token: "task-service-cap", ExpiresAt: time.Now().Add(time.Minute)}
+	recorder := &brokerRecorder{claim: claim}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+	var taskCalls, routerCalls atomic.Int32
+	router := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { routerCalls.Add(1) })
+	handler := NewLambdaHandlerWithTasks(router, testModuleID, testModuleRef, map[string]TaskEntry{
+		"work": {Handler: func(ctx context.Context, _ json.RawMessage) error {
+			taskCalls.Add(1)
+			provider := ModuleCallCapabilityProviderFrom(ctx)
+			if provider == nil {
+				return errors.New("missing Standard-task module-call provider")
+			}
+			capability, err := provider.ModuleCallCapability(ctx)
+			if err != nil {
+				return err
+			}
+			if capability.Token != "task-service-cap" {
+				return errors.New("wrong Standard-task module-call capability")
+			}
+			return nil
+		}},
+	})
+	payload := mustMarshal(t, LambdaTaskEvent{Version: 1, Task: LambdaTaskPointer{
+		BrokerURL: server.URL, JobID: testJobID, AttemptID: testAttemptID,
+		BootstrapToken: "bootstrap-secret", OneShot: true,
+	}})
+	wantEnvelope := fmt.Sprintf(`{"v":1,"task":{"brokerUrl":%q,"jobId":%q,"attemptId":%q,"bootstrapToken":"bootstrap-secret","oneShot":true}}`, server.URL, testJobID, testAttemptID)
+	if string(payload) != wantEnvelope {
+		t.Fatalf("Standard task envelope=%s want=%s", payload, wantEnvelope)
+	}
+	resp, err := handler(context.Background(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNoContent || taskCalls.Load() != 1 || routerCalls.Load() != 0 {
+		t.Fatalf("response=%+v taskCalls=%d routerCalls=%d", resp, taskCalls.Load(), routerCalls.Load())
+	}
+	if len(recorder.paths) != 2 || !strings.HasSuffix(recorder.paths[0], "/claim") || !strings.HasSuffix(recorder.paths[1], "/complete") {
+		t.Fatalf("broker paths=%v", recorder.paths)
+	}
+	for i, b := range payload {
+		if b != 0 {
+			t.Fatalf("raw Standard task event was not cleared at byte %d", i)
+		}
+	}
+}
+
+func TestNewLambdaHandlerWithTasksRejectsAuthorityFields(t *testing.T) {
+	handler := NewLambdaHandlerWithTasks(http.NotFoundHandler(), testModuleID, testModuleRef, map[string]TaskEntry{
+		"work": {Handler: func(context.Context, json.RawMessage) error { return nil }},
+	})
+	payload := json.RawMessage(`{"v":1,"task":{"brokerUrl":"https://broker.example","jobId":"11111111-1111-4111-8111-111111111111","attemptId":"22222222-2222-4222-8222-222222222222","bootstrapToken":"secret","oneShot":true,"payload":{"forged":true}}}`)
+	if _, err := handler(context.Background(), payload); err == nil {
+		t.Fatal("task envelope with payload authority was accepted")
+	}
+	for i, b := range payload {
+		if b != 0 {
+			t.Fatalf("malformed Standard task event was not cleared at byte %d", i)
+		}
 	}
 }
 

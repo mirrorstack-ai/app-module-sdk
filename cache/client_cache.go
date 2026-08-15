@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/refcache"
 )
@@ -34,6 +35,31 @@ func (c *ClientCache) Get(ctx context.Context, cred Credential) (*Client, func()
 	}
 	return c.cache.Get(cred.cacheKey(), func() (*Client, error) {
 		return NewFromCredential(ctx, cred)
+	})
+}
+
+// GetProvider returns a client backed by renewable authentication.
+func (c *ClientCache) GetProvider(ctx context.Context, provider CredentialProvider) (*Client, func(), error) {
+	if provider == nil {
+		return nil, nil, fmt.Errorf("mirrorstack/cache: renewable credential provider is missing")
+	}
+	initial, err := provider.Credential(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := initial.validate(); err != nil {
+		return nil, nil, err
+	}
+	keyed, ok := provider.(CredentialProviderKey)
+	if !ok || keyed.CredentialProviderKey() == "" {
+		client, err := NewFromProvider(ctx, provider)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client, func() { _ = client.Close() }, nil
+	}
+	return c.cache.Get(initial.cacheKey()+"|renewable|"+keyed.CredentialProviderKey(), func() (*Client, error) {
+		return NewFromProvider(ctx, provider)
 	})
 }
 

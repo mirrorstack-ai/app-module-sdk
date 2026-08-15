@@ -77,3 +77,28 @@ func TestNewUUID_VersionAndVariantBits(t *testing.T) {
 		t.Errorf("variant nibble = %c, want 8/9/a/b (RFC 4122)", variant)
 	}
 }
+
+func TestModuleIDRepresentationsRoundTrip(t *testing.T) {
+	const canonical = "5ae96278-18b7-4bd1-ae23-031455822070"
+	const compact = "m5ae9627818b74bd1ae23031455822070"
+	if got, ok := ids.NormalizeModuleID(canonical); !ok || got != compact {
+		t.Fatalf("NormalizeModuleID(%q) = %q, %v", canonical, got, ok)
+	}
+	if got, ok := ids.NormalizeModuleID(compact); !ok || got != compact {
+		t.Fatalf("NormalizeModuleID(%q) = %q, %v", compact, got, ok)
+	}
+	if got, ok := ids.CanonicalModuleID(compact); !ok || got != canonical {
+		t.Fatalf("CanonicalModuleID(%q) = %q, %v", compact, got, ok)
+	}
+	if got, ok := ids.CanonicalModuleID(canonical); !ok || got != canonical {
+		t.Fatalf("CanonicalModuleID(%q) = %q, %v", canonical, got, ok)
+	}
+	for _, bad := range []string{"media", "m5ae96278-18b7-4bd1-ae23-031455822070", "M5AE9627818B74BD1AE23031455822070", "5ae9627818b74bd1ae23031455822070"} {
+		if _, ok := ids.NormalizeModuleID(bad); ok {
+			t.Errorf("NormalizeModuleID accepted %q", bad)
+		}
+		if _, ok := ids.CanonicalModuleID(bad); ok {
+			t.Errorf("CanonicalModuleID accepted %q", bad)
+		}
+	}
+}

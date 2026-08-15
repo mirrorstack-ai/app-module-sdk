@@ -5,6 +5,44 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `ms.WithEphemeralStorage` for Heavy scratch, `ms.TaskStatus`, idempotent `ms.CancelTask`,
+  renewable task resource providers, and explicit permanent task failures via
+  `ms.Permanent`.
+
+### Changed
+
+- `ms.RunTask` now uses authenticated managed enqueue with idempotent retries.
+  Task processes execute one broker-claimed attempt (including the runner's
+  protected preclaimed-file handoff), renew resources, and report one terminal
+  outcome. The legacy credential-bearing SQS/HMAC worker has been removed.
+- CLI dev mode now runs tasks asynchronously in a process-local, idempotent
+  executor. `TaskStatus` and `CancelTask` use the same local job state while
+  deployed calls continue to use only the authenticated managed task plane.
+- In CLI dev mode, declared dependency calls try the secure app-scoped ingress
+  first and use a live co-located module route only when that ingress is not
+  deployed yet and returns 404. Authorization failures never fall back.
+- GPU declarations are restricted to the ARM64 `g5g.xlarge` shape (4 vCPU,
+  7168 MiB allocatable memory after host overhead) for this wave; declaration
+  does not enable production admission.
+
+### Fixed
+
+- **A managed task claim is matched on the module UUID, not the slug.** The slug
+  is a mutable display label and renaming a module is supported, so asserting
+  equality on it made every in-flight task of a renamed module fail identity
+  validation — in the one branch that also skips the terminal failure callback,
+  so the job hung until the watchdog expired it, once per retry.
+- **Canonical call-path classification looks at the path, never the query.** A
+  query value legitimately carries `%2f`/`%2e` (an encoded `redirect_uri`, a
+  base64 blob, a signed token). Scanning the whole request target let one of
+  those veto classification, which silently dropped the actor delegation header
+  on `ms.Call` and hard-rejected `ms.CallDependency` — it hit the OAuth
+  authorize-url hop, whose query is an encoded redirect URI, every time.
+
 ## [v0.4.0] - 2026-08-06
 
 This release makes module storage an explicit, fail-closed resource and
@@ -133,6 +171,9 @@ Part of mirrorstack-ai/mirrorstack-core-v2#338 (step 6). Closes core-v2#337 defe
 Cross-module reads resolve **locally** when the producer runs in the same `mirrorstack dev --tunnel` session. The premise the dev plane was built on — "a dev module holds no socket to the platform DB" — is true of a *remote* producer and false of a *co-located* one: under `mirrorstack dev` the producer and the consumer are two processes sharing one Postgres and one app schema. Routing a co-located read over the platform proxy therefore returned the producer's **production** rows to a consumer whose own rows are local, which is wrong data rather than slow data.
 
 ### Added
+- **A task can now declare the compute class it needs — `ms.WithCompute(ms.Heavy(ms.Res{VCPU: 4, MemoryMB: 8192}))`.** Tasks execute through the platform-managed task plane. Standard retains Lambda's 15-minute ceiling; Heavy selects Fargate; GPU declarations are platform-admitted. The request rides the manifest at `tasks[].compute`, and omitting it preserves the old manifest byte shape and Standard default.
+- **The sizing rules are enforced at declaration, not at deploy.** A resource request that only fails during a deploy is the worst of both worlds, so `Standard`/`Heavy`/`GPU` validate eagerly and panic at startup like `ms.ExposeTable`, naming both the offending value and the rule that rejected it. `VCPU` on `Standard` is a panic rather than a silent no-op because Lambda *derives* vCPU from memory and cannot honour it. `Heavy` is checked against Fargate's real CPU/memory matrix, which is not free-form — `ms.Heavy(ms.Res{VCPU: 0.5, MemoryMB: 512})` is rejected, because 512 MB is legal at 0.25 vCPU and nowhere else. `GPU` rejects `VCPU`/`MemoryMB` alongside its instance declaration; the current SDK wave exposes only the ARM64 `g5g.xlarge` shape, while the platform remains authoritative for production admission.
+- **`ms.WithTimeout` and `ms.WithMaxRetries` are reachable from the `ms` package.** Both existed and both were advertised by `OnTask`'s own doc comment, but neither was re-exported through the facade, so the documented call did not compile.
 - **Co-located dev reads resolve locally.** Under `mirrorstack dev --tunnel`, `ms.DependencyDB(...).Select(...)` against a producer running in the *same* session reads that producer's tables directly from the local Postgres — same sanitized dynamic SELECT, same `READ ONLY` transaction, same SQLSTATE-to-sentinel mapping the deployed plane uses, and the same JSON-shaped row values the proxy returns (a `uuid` column arrives as a canonical `8-4-4-4-12` string, not as pgx's raw 16-byte form, at any nesting depth including `uuid[]` and jsonb/composite values). **Strictly additive**: a producer absent from the directory keeps the read-exposed proxy path byte-for-byte unchanged, so a genuinely remote producer, an unauthenticated session, and a deployed invoke all behave exactly as before. Discovery rides a dev-only `public.ms_dev_module_directory` table each module publishes itself into at boot — the database is the carrier because `mirrorstack dev` clears the child environment down to four keys and `MS_LOCAL_DB_URL` is the only guaranteed cross-module channel among them. A directory row is a **lease**, not a record: it is heartbeated while the process lives, dropped on a clean shutdown, and ignored once it ages out, so "the directory says co-located" means "co-located *right now*" and a producer you stopped degrades to the proxy instead of silently serving its abandoned tables.
 - **Cross-plane parity is now stated where you can see it.** The first co-located read of each producer logs one line naming the gaps, and `ms.ErrNotExposed`'s doc comment carries the same warning — see below for what they say.
 - **A contribution slot now publishes the SHAPE of its payload, not just its name.** `ms.Provide[T](key)` derives the full recursive JSON Schema of `T` and the manifest carries it at `provides[].payload`. The slot's real validator is a closure built where `T` is in scope, so it has only ever existed inside the host's own process: a contributor could discover that `user-detail-blocks` exists and still have no way to learn it wants `{title, bodyUrl}` short of reading the host's source — which a third-party author cannot do at all. Cyclic payload types are emitted through `$defs` rather than inlined, because inlining them recurses until the module **stack-overflows at boot**; the schema is also byte-stable across derivations so a redeployed manifest diffs clean.
@@ -305,7 +346,7 @@ Work prior to [#82] was shipped without a changelog. Grouped below by theme.
 
 ### Events, crons, tasks
 - `ms.OnEvent` / `ms.Emits` / `ms.Cron` ([#9])
-- `ms.OnTask` / `ms.RunTask` — SQS-backed task worker with HMAC signing and SIGTERM graceful shutdown ([#32], [#34])
+- `ms.OnTask` / `ms.RunTask` — background task API (the legacy queue/HMAC runtime has since been retired in favor of managed enqueue and one-shot broker claims) ([#32], [#34])
 
 ### Data
 - `ms.DB` / `ms.Tx` with per-app credentials ([#3])

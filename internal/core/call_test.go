@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,6 +82,15 @@ func TestResolveCallURL_Building(t *testing.T) {
 	}
 }
 
+func TestResolveDependencyCallURL_Building(t *testing.T) {
+	t.Setenv("MS_DISPATCH_URL", "http://dispatch:8083")
+	got := resolveDependencyCallURL("app slug", "consumer/ref", "video-transcode", "/internal/jobs/start?retry=1")
+	want := "http://dispatch:8083/internal/apps/app%20slug/module-calls/consumer%2Fref/video-transcode/internal/jobs/start?retry=1"
+	if got != want {
+		t.Fatalf("resolveDependencyCallURL() = %q, want %q", got, want)
+	}
+}
+
 func TestIsPlatformCallPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -103,6 +114,425 @@ func TestIsPlatformCallPath(t *testing.T) {
 				t.Errorf("isPlatformCallPath(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsInternalCallPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/internal", want: true},
+		{path: "/internal/", want: true},
+		{path: "/internal/jobs?retry=1", want: true},
+		{path: "/public/jobs", want: false},
+		{path: "/platform/jobs", want: false},
+		{path: "/internalish/jobs", want: false},
+		{path: "/internal/../platform/jobs", want: false},
+		{path: "/internal/%2e%2e/platform/jobs", want: false},
+		{path: "/internal/jobs%2fadmin", want: false},
+		{path: "/internal/jobs%5cescape", want: false},
+		{path: "/internal/jobs\\escape", want: false},
+		{path: "https://example.test/internal/jobs", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := isInternalCallPath(tc.path); got != tc.want {
+				t.Errorf("isInternalCallPath(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCallDependency_UsesAuthenticatedActorlessInternalIngress(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotAppID, gotSecret string
+	var gotDelegation []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAppID = r.Header.Get("X-MS-App-ID")
+		gotSecret = r.Header.Get("X-MS-Service-Secret")
+		gotDelegation = r.Header.Values(actor.HeaderDelegation)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+	const appID = "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+	const consumerID = "m14b4db3ac7f34e6a880ebc763cb3ca55"
+	m, err := New(Config{ID: consumerID})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: appID})
+	ctx = actor.WithDelegation(ctx, "msa1.must-not-cross.signature")
+	if err := m.CallDependencyPost(ctx, "@mirrorstack/video-transcode@^0.1", "/internal/jobs/start?retry=1", map[string]string{"videoId": "v1"}, nil); err != nil {
+		t.Fatalf("CallDependencyPost: %v", err)
+	}
+
+	wantPath := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs/start"
+	if gotMethod != http.MethodPost || gotPath != wantPath || gotQuery != "retry=1" {
+		t.Fatalf("request = %s %s?%s, want POST %s?retry=1", gotMethod, gotPath, gotQuery, wantPath)
+	}
+	if gotAppID != appID || gotSecret != "caller-session-secret" {
+		t.Errorf("identity headers app=%q secret=%q", gotAppID, gotSecret)
+	}
+	if len(gotDelegation) != 0 {
+		t.Errorf("actor delegation leaked to dependency: %q", gotDelegation)
+	}
+}
+
+func TestCallDependency_DevSecureIngressWins(t *testing.T) {
+	var gotPath string
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+	const appID = "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+	const consumerID = "m14b4db3ac7f34e6a880ebc763cb3ca55"
+	m, err := New(Config{ID: consumerID, Slug: "consumer"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.devMode = true
+	m.DependsOn("video-transcode")
+	lookups := 0
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		lookups++
+		return devModuleEntry{ModuleID: "m5ae9627818b74bd1ae23031455822070", Slug: "video-transcode"}, true, nil
+	}
+
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: appID})
+	if err := m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", nil, nil); err != nil {
+		t.Fatalf("CallDependencyPost: %v", err)
+	}
+	want := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
+	if requests != 1 || gotPath != want {
+		t.Fatalf("secure ingress requests=%d path=%q, want one request to %q", requests, gotPath, want)
+	}
+	if lookups != 0 {
+		t.Fatalf("secure ingress success consulted dev directory %d time(s)", lookups)
+	}
+}
+
+func TestCallDependency_Dev404UsesDeclaredColocatedDirectRoute(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotAppID, gotSecret, gotPlatformToken, gotProducer string
+	var gotDelegation []string
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/internal/apps/") {
+			http.NotFound(w, r)
+			return
+		}
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAppID = r.Header.Get("X-MS-App-ID")
+		gotSecret = r.Header.Get("X-MS-Service-Secret")
+		gotPlatformToken = r.Header.Get(auth.HeaderPlatformToken)
+		gotDelegation = r.Header.Values(actor.HeaderDelegation)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_LOCAL_MODULE_PROXY_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+	tokenDir := t.TempDir()
+	callerTokenFile := filepath.Join(tokenDir, "ms-platform-token-consumer")
+	if err := os.WriteFile(callerTokenFile, []byte("caller-platform-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "ms-platform-token-video-transcode"), []byte("producer-platform-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MS_PLATFORM_TOKEN_FILE", callerTokenFile)
+
+	const appID = "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+	const producerID = "m5ae9627818b74bd1ae23031455822070"
+	m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55", Slug: "consumer"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.devMode = true
+	m.DependsOn("@mirrorstack/video-transcode@^0.1")
+	m.devDir.lookup = func(_ context.Context, ref string) (devModuleEntry, bool, error) {
+		gotProducer = ref
+		return devModuleEntry{ModuleID: producerID, Slug: "video-transcode"}, true, nil
+	}
+
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: appID})
+	ctx = actor.WithDelegation(ctx, "msa1.must-not-cross.signature")
+	if err := m.CallDependencyPost(ctx, "@mirrorstack/video-transcode@^0.2", "/internal/jobs/start?retry=1", map[string]string{"videoId": "v1"}, nil); err != nil {
+		t.Fatalf("CallDependencyPost: %v", err)
+	}
+
+	if gotProducer != "video-transcode" {
+		t.Fatalf("directory lookup ref = %q, want video-transcode", gotProducer)
+	}
+	wantPath := "/_m/video-transcode/internal/jobs/start"
+	if gotMethod != http.MethodPost || gotPath != wantPath || gotQuery != "retry=1" {
+		t.Fatalf("request = %s %s?%s, want POST %s?retry=1", gotMethod, gotPath, gotQuery, wantPath)
+	}
+	if gotAppID != appID || gotSecret != "" || gotPlatformToken != "producer-platform-token" {
+		t.Errorf("identity headers app=%q service_secret=%q platform_token=%q", gotAppID, gotSecret, gotPlatformToken)
+	}
+	if len(gotDelegation) != 0 {
+		t.Errorf("actor delegation leaked to direct dependency: %q", gotDelegation)
+	}
+
+	before := len(paths)
+	oversized := map[string]string{"value": strings.Repeat("x", maxDependencyCallBody)}
+	if err := m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", oversized, nil); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("oversized direct-call error = %v", err)
+	}
+	if len(paths) != before {
+		t.Fatalf("oversized direct call reached network: requests %d -> %d", before, len(paths))
+	}
+	wantSecurePath := "/internal/apps/" + appID + "/module-calls/m14b4db3ac7f34e6a880ebc763cb3ca55/video-transcode/internal/jobs/start"
+	if len(paths) != 2 || paths[0] != wantSecurePath || paths[1] != wantPath {
+		t.Fatalf("fallback requests = %q, want [%q %q]", paths, wantSecurePath, wantPath)
+	}
+}
+
+func TestCallDependency_Dev404FromIngressOrProducerNeverFallsBack(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		routed      bool
+		routedValue string
+	}{
+		{
+			name:        "module not installed structured 404",
+			contentType: "application/json",
+			body:        `{"error":{"code":"module_not_found","message":"dependency module is not installed"}}`,
+		},
+		{
+			name:        "forwarded producer default-looking 404",
+			contentType: legacyRouteMissContentType,
+			body:        legacyRouteMissBody,
+			routed:      true,
+			routedValue: "1",
+		},
+		{
+			name:        "even an empty routed marker proves ingress ownership",
+			contentType: legacyRouteMissContentType,
+			body:        legacyRouteMissBody,
+			routed:      true,
+		},
+		{
+			name:        "arbitrary plain-text 404",
+			contentType: legacyRouteMissContentType,
+			body:        "route not found\n",
+		},
+		{
+			name:        "default-looking body with non-router content type",
+			contentType: "application/octet-stream",
+			body:        legacyRouteMissBody,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", test.contentType)
+				if test.routed {
+					w.Header().Set(dependencyCallRoutedHeader, test.routedValue)
+				}
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer srv.Close()
+			t.Setenv("MS_DISPATCH_URL", srv.URL)
+			t.Setenv("MS_LOCAL_MODULE_PROXY_URL", srv.URL)
+			t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+			m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55", Slug: "consumer"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			m.devMode = true
+			m.DependsOn("video-transcode")
+			lookups := 0
+			m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+				lookups++
+				return devModuleEntry{ModuleID: "m5ae9627818b74bd1ae23031455822070", Slug: "video-transcode"}, true, nil
+			}
+
+			ctx := auth.Set(context.Background(), auth.Identity{AppID: "a722a8a8-d413-435b-b21b-f4cbacb5ef73"})
+			err = m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", map[string]string{"videoId": "v1"}, nil)
+			if err == nil || !callStatusIs(err, http.StatusNotFound) {
+				t.Fatalf("CallDependencyPost error = %v, want preserved 404", err)
+			}
+			if requests != 1 || lookups != 0 {
+				t.Fatalf("404 replayed/consulted direct route: requests=%d lookups=%d", requests, lookups)
+			}
+		})
+	}
+}
+
+func TestResolveDevModuleURL_DoesNotReuseProductionDispatch(t *testing.T) {
+	t.Setenv("MS_DISPATCH_URL", "https://api.mirrorstack.example/dispatch")
+	t.Setenv("MS_LOCAL_MODULE_PROXY_URL", "http://127.0.0.1:18080/")
+
+	got := resolveDevModuleURL("video-transcode", "/internal/jobs?retry=1")
+	want := "http://127.0.0.1:18080/_m/video-transcode/internal/jobs?retry=1"
+	if got != want {
+		t.Fatalf("resolveDevModuleURL = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "api.mirrorstack.example") {
+		t.Fatalf("local module endpoint reused production dispatch: %q", got)
+	}
+}
+
+func TestCallDependency_DevUndeclaredRejectedBeforeDirectoryOrNetwork(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+	m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55", Slug: "consumer"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.devMode = true
+	lookups := 0
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		lookups++
+		return devModuleEntry{ModuleID: "m5ae9627818b74bd1ae23031455822070", Slug: "video-transcode"}, true, nil
+	}
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a722a8a8-d413-435b-b21b-f4cbacb5ef73"})
+	err = m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("undeclared call error = %v", err)
+	}
+	if lookups != 0 || requests != 0 {
+		t.Fatalf("undeclared call performed I/O: lookups=%d requests=%d", lookups, requests)
+	}
+}
+
+func TestCallDependency_DevUnauthorizedNeverFallsBack(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+	m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55", Slug: "consumer"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.devMode = true
+	m.DependsOn("video-transcode")
+	lookups := 0
+	m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+		lookups++
+		return devModuleEntry{ModuleID: "m5ae9627818b74bd1ae23031455822070", Slug: "video-transcode"}, true, nil
+	}
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a722a8a8-d413-435b-b21b-f4cbacb5ef73"})
+	err = m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", nil, nil)
+	if err == nil || !callStatusIs(err, http.StatusUnauthorized) {
+		t.Fatalf("unauthorized error = %v", err)
+	}
+	if requests != 1 || lookups != 0 {
+		t.Fatalf("unauthorized call requests=%d lookups=%d, want one secure request and no lookup", requests, lookups)
+	}
+}
+
+func TestCallDependency_DevDirectoryMissOrErrorPreservesIngress404(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		lookupErr error
+	}{
+		{name: "missing or expired lease"},
+		{name: "directory unavailable", lookupErr: errors.New("local database unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+			t.Setenv("MS_DISPATCH_URL", srv.URL)
+			t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+			const consumerID = "m14b4db3ac7f34e6a880ebc763cb3ca55"
+			m, err := New(Config{ID: consumerID, Slug: "consumer"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			m.devMode = true
+			m.DependsOn("video-transcode")
+			m.devDir.lookup = func(context.Context, string) (devModuleEntry, bool, error) {
+				return devModuleEntry{}, false, test.lookupErr
+			}
+			const appID = "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+			ctx := auth.Set(context.Background(), auth.Identity{AppID: appID})
+			err = m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", nil, nil)
+			if err == nil || !callStatusIs(err, http.StatusNotFound) {
+				t.Fatalf("CallDependencyPost error = %v, want preserved ingress 404", err)
+			}
+			want := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
+			if len(paths) != 1 || paths[0] != want {
+				t.Fatalf("requests = %q, want only %q", paths, want)
+			}
+		})
+	}
+}
+
+func TestCallDependency_DevDeclarationNormalizesUUIDAndModuleID(t *testing.T) {
+	m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.DependsOn("m5ae9627818b74bd1ae23031455822070")
+	if !m.declaresDependencyRef("5ae96278-18b7-4bd1-ae23-031455822070") {
+		t.Fatal("dashed UUID did not match its declared m<hex> module ID")
+	}
+}
+
+func TestCallDependency_RejectsUnsafeInputAndOversizedBody(t *testing.T) {
+	m, err := New(Config{ID: "consumer_id"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app-id"})
+	for _, path := range []string{"/public/jobs", "/platform/jobs", "/internal/../platform/jobs", "/internal/jobs%2fadmin", "/internal/jobs\\escape"} {
+		if err := m.CallDependencyPost(ctx, "video-transcode", path, nil, nil); err == nil || !strings.Contains(err.Error(), "canonical /internal") {
+			t.Errorf("CallDependencyPost(%q) error = %v, want internal-path rejection", path, err)
+		}
+	}
+	for _, producer := range []string{"", "@owner/", "owner/producer", "producer name"} {
+		if err := m.CallDependencyPost(ctx, producer, "/internal/jobs", nil, nil); err == nil {
+			t.Errorf("CallDependencyPost producer %q unexpectedly succeeded", producer)
+		}
+	}
+	if err := m.CallDependencyPost(context.Background(), "video-transcode", "/internal/jobs", nil, nil); err == nil || !strings.Contains(err.Error(), "no app scope") {
+		t.Fatalf("missing-app error = %v", err)
+	}
+
+	oversized := map[string]string{"value": strings.Repeat("x", maxDependencyCallBody)}
+	if err := m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", oversized, nil); err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("oversized-body error = %v", err)
 	}
 }
 

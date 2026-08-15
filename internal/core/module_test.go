@@ -151,6 +151,16 @@ func TestNew_AcceptsValidID(t *testing.T) {
 	}
 }
 
+func TestNew_NormalizesCanonicalModuleUUID(t *testing.T) {
+	m, err := New(Config{ID: "5ae96278-18b7-4bd1-ae23-031455822070"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := m.Config().ID, "m5ae9627818b74bd1ae23031455822070"; got != want {
+		t.Fatalf("Config.ID = %q, want normalized %q", got, want)
+	}
+}
+
 func TestNew_AcceptsEmptySlug(t *testing.T) {
 	t.Parallel()
 	if _, err := New(Config{ID: "media"}); err != nil {

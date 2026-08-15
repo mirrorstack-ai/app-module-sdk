@@ -67,9 +67,16 @@ func TestDevSessionPolicyShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(policy), &got); err != nil {
 		t.Fatal(err)
 	}
-	wantResource := "arn:aws:s3:::media/apps/app-uuid/module_id/*"
-	if len(got.Statement) != 1 || got.Statement[0].Resource != wantResource || strings.Join(got.Statement[0].Action, ",") != "s3:GetObject,s3:PutObject,s3:AbortMultipartUpload" {
+	wantObjectResource := "arn:aws:s3:::media/apps/app-uuid/module_id/*"
+	if len(got.Statement) != 2 {
 		t.Fatalf("unexpected policy: %s", policy)
+	}
+	objects, list := got.Statement[0], got.Statement[1]
+	if objects.Sid != "OwnPrefixObjects" || objects.Resource != wantObjectResource || strings.Join(objects.Action, ",") != "s3:GetObject,s3:PutObject,s3:DeleteObject,s3:AbortMultipartUpload" {
+		t.Fatalf("unexpected object policy: %s", policy)
+	}
+	if list.Sid != "ListOwnPrefix" || list.Resource != "arn:aws:s3:::media" || strings.Join(list.Action, ",") != "s3:ListBucket" || list.Condition == nil || list.Condition.StringLike["s3:prefix"] != "apps/app-uuid/module_id/*" {
+		t.Fatalf("unexpected list policy: %s", policy)
 	}
 }
 
@@ -234,9 +241,13 @@ func TestDevMintPolicyContainsNoWildcardBeyondTheFinalSegment(t *testing.T) {
 	if err := json.Unmarshal([]byte(aws.ToString(fake.inputs[0].Policy)), &policy); err != nil {
 		t.Fatal(err)
 	}
-	resource := policy.Statement[0].Resource
-	if strings.Count(resource, "*") != 1 || !strings.HasSuffix(resource, "*") {
-		t.Fatalf("resource=%q, want exactly one wildcard as the final character", resource)
+	objectResource := policy.Statement[0].Resource
+	listPrefix := policy.Statement[1].Condition.StringLike["s3:prefix"]
+	if strings.Count(objectResource, "*") != 1 || !strings.HasSuffix(objectResource, "*") {
+		t.Fatalf("resource=%q, want exactly one wildcard as the final character", objectResource)
+	}
+	if strings.Count(listPrefix, "*") != 1 || !strings.HasSuffix(listPrefix, "*") {
+		t.Fatalf("list prefix=%q, want exactly one wildcard as the final character", listPrefix)
 	}
 }
 

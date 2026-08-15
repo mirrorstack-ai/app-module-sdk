@@ -2,11 +2,13 @@ package core
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
 
@@ -63,7 +65,7 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 // resolvePool returns the per-app credential pool (production) or the dev
 // pool (dev mode). See resolvePoolFor for the shared logic.
 func (m *Module) resolvePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
-	return m.resolvePoolFor(ctx, db.CredentialFrom)
+	return m.resolvePoolFor(ctx, db.CredentialFrom, db.CredentialProviderFrom)
 }
 
 // seedConn resolves an app-schema-scoped connection for system.SeedHandler
@@ -101,9 +103,15 @@ func (m *Module) seedConn(ctx context.Context) (*pgxpool.Conn, func(), error) {
 // pool from the cache. Dev mode falls through to the single dev pool, which
 // is shared across all scopes — schema isolation in dev happens at the
 // AcquireScoped layer via WithSchema, not at the pool level.
-func (m *Module) resolvePoolFor(ctx context.Context, getCred func(context.Context) *db.Credential) (*pgxpool.Pool, func(), error) {
+func (m *Module) resolvePoolFor(ctx context.Context, getCred func(context.Context) *db.Credential, getProvider func(context.Context) db.CredentialProvider) (*pgxpool.Pool, func(), error) {
+	if provider := getProvider(ctx); provider != nil {
+		return m.poolCache.GetProvider(ctx, provider)
+	}
 	if cred := getCred(ctx); cred != nil {
 		return m.poolCache.Get(ctx, *cred)
+	}
+	if runtime.IsOneShot() {
+		return nil, nil, fmt.Errorf("mirrorstack: database access in one-shot mode requires a renewable credential provider")
 	}
 	m.devDBOnce.Do(func() {
 		m.devDB, m.devDBErr = db.Open(context.Background())
@@ -177,7 +185,7 @@ func (m *Module) ModuleTx(ctx context.Context, fn func(q db.Querier) error) erro
 // resolveModulePool reads the per-module credential instead of the per-app
 // one. See resolvePoolFor for the shared logic.
 func (m *Module) resolveModulePool(ctx context.Context) (*pgxpool.Pool, func(), error) {
-	return m.resolvePoolFor(ctx, db.ModuleCredentialFrom)
+	return m.resolvePoolFor(ctx, db.ModuleCredentialFrom, db.ModuleCredentialProviderFrom)
 }
 
 // moduleSchemaFor returns the Postgres schema (search_path target) for this

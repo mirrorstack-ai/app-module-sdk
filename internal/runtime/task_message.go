@@ -1,87 +1,121 @@
 package runtime
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
-	"fmt"
+	"time"
+
+	"github.com/mirrorstack-ai/app-module-sdk/cache"
+	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
-// TaskMessage is the SQS message envelope for background tasks dispatched
-// via Module.RunTask. It mirrors the LambdaRequest shape for credential
-// transport but uses a different delivery channel (SQS instead of Lambda
-// Invoke). The Signature field provides HMAC integrity verification so the
-// task worker can reject forged messages.
-type TaskMessage struct {
-	TaskID    string          `json:"taskId"`
-	Name      string          `json:"name"`
-	Payload   json.RawMessage `json:"payload"`
-	Resources *Resources      `json:"resources,omitempty"`
-	UserID    string          `json:"userId,omitempty"`
-	AppID     string          `json:"appId,omitempty"`
-	AppRole   string          `json:"appRole,omitempty"`
-	AppSchema string          `json:"appSchema,omitempty"`
-	Signature string          `json:"sig,omitempty"`
+type moduleCallCapabilityKey struct{}
+type taskAppRefKey struct{}
+
+// ModuleCallCapability is a short-lived, task-attempt-scoped credential for
+// authenticated module-to-platform operations.
+type ModuleCallCapability struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// Sign computes an HMAC-SHA256 over the message content (excluding the sig
-// field itself) and sets the Signature field. The key should come from
-// MS_TASK_SIGNING_KEY. A nil or empty key is a no-op — dev mode skips signing.
-func (m *TaskMessage) Sign(key []byte) {
-	if len(key) == 0 {
-		return
-	}
-	m.Signature = ""
-	m.Signature = computeHMAC(key, m.signingPayload())
+// ModuleCallCapabilityProvider renews the outbound attempt capability.
+type ModuleCallCapabilityProvider interface {
+	ModuleCallCapability(context.Context) (ModuleCallCapability, error)
 }
 
-// Verify checks the HMAC signature. Returns an error if the key is non-empty
-// and the signature is missing or invalid. A nil/empty key always passes —
-// dev mode skips verification.
-func (m *TaskMessage) Verify(key []byte) error {
-	if len(key) == 0 {
-		return nil
-	}
-	if m.Signature == "" {
-		return fmt.Errorf("mirrorstack: task message missing signature")
-	}
-	expected := computeHMAC(key, m.signingPayload())
-	if !hmac.Equal([]byte(m.Signature), []byte(expected)) {
-		return fmt.Errorf("mirrorstack: task message signature mismatch")
-	}
-	return nil
+func WithModuleCallCapabilityProvider(ctx context.Context, provider ModuleCallCapabilityProvider) context.Context {
+	return context.WithValue(ctx, moduleCallCapabilityKey{}, provider)
 }
 
-// signingPayload returns a deterministic JSON representation of the message
-// fields that are covered by the signature (everything except sig itself).
-func (m *TaskMessage) signingPayload() []byte {
-	// Use a shadow struct to exclude Signature from marshaling.
-	type shadow struct {
-		TaskID    string          `json:"taskId"`
-		Name      string          `json:"name"`
-		Payload   json.RawMessage `json:"payload"`
-		Resources *Resources      `json:"resources,omitempty"`
-		UserID    string          `json:"userId,omitempty"`
-		AppID     string          `json:"appId,omitempty"`
-		AppRole   string          `json:"appRole,omitempty"`
-		AppSchema string          `json:"appSchema,omitempty"`
-	}
-	b, _ := json.Marshal(shadow{
-		TaskID:    m.TaskID,
-		Name:      m.Name,
-		Payload:   m.Payload,
-		Resources: m.Resources,
-		UserID:    m.UserID,
-		AppID:     m.AppID,
-		AppRole:   m.AppRole,
-		AppSchema: m.AppSchema,
-	})
-	return b
+func ModuleCallCapabilityProviderFrom(ctx context.Context) ModuleCallCapabilityProvider {
+	provider, _ := ctx.Value(moduleCallCapabilityKey{}).(ModuleCallCapabilityProvider)
+	return provider
 }
 
-func computeHMAC(key, data []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(data)
-	return hex.EncodeToString(mac.Sum(nil))
+// withTaskAppRef records the broker-resolved app reference used only for
+// managed task job routes. Business APIs continue to see the immutable AppID
+// through auth.Identity.
+func withTaskAppRef(ctx context.Context, appRef string) context.Context {
+	return context.WithValue(ctx, taskAppRefKey{}, appRef)
+}
+
+// TaskAppRefFrom returns the broker-resolved app route reference for nested
+// task enqueue/status/cancel calls.
+func TaskAppRefFrom(ctx context.Context) string {
+	appRef, _ := ctx.Value(taskAppRefKey{}).(string)
+	return appRef
+}
+
+// BrokerCapability is the short-lived, attempt-scoped lease capability.
+type BrokerCapability struct {
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	RefreshAfter time.Time `json:"refreshAfter"`
+}
+
+// BrokerResources is the typed renewable resource snapshot returned by claim
+// and refresh. ModuleCalls is deliberately opaque and never projected as an
+// ambient module/platform secret.
+type BrokerResources struct {
+	Database    *db.Credential        `json:"database,omitempty"`
+	Storage     *storage.Credential   `json:"storage,omitempty"`
+	Cache       *cache.Credential     `json:"cache,omitempty"`
+	ModuleCalls *ModuleCallCapability `json:"moduleCalls,omitempty"`
+}
+
+type BrokerJob struct {
+	ID        string    `json:"id"`
+	AttemptID string    `json:"attemptId"`
+	Handler   string    `json:"handler"`
+	Deadline  time.Time `json:"deadline"`
+}
+
+type BrokerWorkload struct {
+	AppID              string `json:"appId"`
+	AppRef             string `json:"appRef"`
+	ModuleID           string `json:"moduleId"`
+	ModuleRef          string `json:"moduleRef"`
+	DispatchURL        string `json:"dispatchUrl"`
+	VersionID          string `json:"versionId"`
+	Version            string `json:"version"`
+	AppSchema          string `json:"appSchema"`
+	ModulePrefix       string `json:"modulePrefix"`
+	Class              string `json:"class"`
+	CPUUnits           int    `json:"cpuUnits"`
+	MemoryMB           int    `json:"memoryMb"`
+	EphemeralStorageMB int    `json:"ephemeralStorageMb"`
+	GPUModel           string `json:"gpuModel"`
+	GPUCount           int    `json:"gpuCount"`
+}
+
+type BrokerArtifact struct {
+	URL       string `json:"url"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+type ClaimResponse struct {
+	Version    int              `json:"v"`
+	Job        BrokerJob        `json:"job"`
+	Workload   BrokerWorkload   `json:"workload"`
+	Payload    json.RawMessage  `json:"payload"`
+	Artifact   BrokerArtifact   `json:"artifact"`
+	Resources  BrokerResources  `json:"resources"`
+	Capability BrokerCapability `json:"capability"`
+}
+
+type HeartbeatResponse struct {
+	Version    int               `json:"v"`
+	Cancelled  bool              `json:"cancelled"`
+	Deadline   time.Time         `json:"deadline"`
+	Capability *BrokerCapability `json:"capability,omitempty"`
+}
+
+type RefreshResponse struct {
+	Version    int               `json:"v"`
+	Cancelled  bool              `json:"cancelled"`
+	Resources  BrokerResources   `json:"resources"`
+	Capability *BrokerCapability `json:"capability,omitempty"`
 }

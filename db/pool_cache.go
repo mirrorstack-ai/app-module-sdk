@@ -17,6 +17,7 @@ const (
 	defaultMaxConnsPerApp    = 2
 	defaultIdleTimeout       = 5 * time.Minute
 	defaultMaxConnLifetime   = 30 * time.Minute
+	renewableMaxConnLifetime = 10 * time.Minute
 	defaultHealthCheckPeriod = 30 * time.Second
 	defaultResetTimeout      = 2 * time.Second
 )
@@ -27,6 +28,33 @@ const (
 // is implemented in refcache.
 type PoolCache struct {
 	cache *refcache.Cache[*pgxpool.Pool]
+}
+
+// GetProvider returns a pool whose BeforeConnect hook asks provider for a
+// credential on every new physical connection. The connection scope is pinned
+// by the first credential; a provider may rotate only the token/expiry.
+func (c *PoolCache) GetProvider(ctx context.Context, provider CredentialProvider) (*pgxpool.Pool, func(), error) {
+	if provider == nil {
+		return nil, nil, fmt.Errorf("mirrorstack/db: renewable credential provider is missing")
+	}
+	initial, err := provider.Credential(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("mirrorstack/db: renewable credential unavailable: %w", err)
+	}
+	if err := initial.validate(); err != nil {
+		return nil, nil, err
+	}
+	keyed, ok := provider.(CredentialProviderKey)
+	if !ok || keyed.CredentialProviderKey() == "" {
+		pool, err := createPoolWithProvider(ctx, initial, provider)
+		if err != nil {
+			return nil, nil, err
+		}
+		return pool, pool.Close, nil
+	}
+	return c.cache.Get(initial.cacheKey()+"|renewable|"+keyed.CredentialProviderKey(), func() (*pgxpool.Pool, error) {
+		return createPoolWithProvider(ctx, initial, provider)
+	})
 }
 
 // NewPoolCache creates a PoolCache with default settings.
@@ -71,6 +99,24 @@ func configurePoolDefaults(cfg *pgxpool.Config) {
 // directly on cfg.ConnConfig.Password instead of being interpolated into a
 // DSN string, so a parse error wrapped with %w cannot leak it to logs.
 func createPool(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
+	cfg, err := createPoolConfig(cred, nil)
+	if err != nil {
+		return nil, err
+	}
+	return connectPool(ctx, cfg, cred)
+}
+
+func createPoolWithProvider(ctx context.Context, initial Credential, provider CredentialProvider) (*pgxpool.Pool, error) {
+	cfg, err := createPoolConfig(initial, provider)
+	if err != nil {
+		return nil, err
+	}
+	return connectPool(ctx, cfg, initial)
+}
+
+// createPoolConfig is factored from connection I/O so renewal and scope
+// stability can be tested deterministically without a live PostgreSQL server.
+func createPoolConfig(cred Credential, provider CredentialProvider) (*pgxpool.Config, error) {
 	// DSN intentionally excludes the password — any wrapped ParseConfig error
 	// would otherwise echo the full connection string into CloudWatch.
 	// sslmode defaults to require (prod: the RDS Proxy endpoint mandates TLS);
@@ -93,7 +139,31 @@ func createPool(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
 	cfg.MaxConns = defaultMaxConnsPerApp
 	cfg.MinConns = 0
 	configurePoolDefaults(cfg)
+	if provider != nil {
+		cfg.MaxConnLifetime = renewableMaxConnLifetime
+		cfg.BeforeConnect = func(ctx context.Context, connCfg *pgx.ConnConfig) error {
+			current, err := provider.Credential(ctx)
+			if err != nil {
+				return fmt.Errorf("mirrorstack/db: renewable credential unavailable: %w", err)
+			}
+			if err := current.validate(); err != nil {
+				return err
+			}
+			if current.Host != cred.Host || current.Port != cred.Port || current.Database != cred.Database || current.Username != cred.Username {
+				return fmt.Errorf("mirrorstack/db: renewable credential changed connection scope")
+			}
+			connCfg.Password = current.Token
+			return nil
+		}
+		// The provider supplies every physical connection password. Do not keep
+		// the bootstrap token in pgxpool's long-lived base config after installing
+		// that hook; each connection copy is populated immediately before dial.
+		cfg.ConnConfig.Password = ""
+	}
+	return cfg, nil
+}
 
+func connectPool(ctx context.Context, cfg *pgxpool.Config, cred Credential) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mirrorstack/db: failed to connect to %s:%d: %w", cred.Host, cred.Port, err)

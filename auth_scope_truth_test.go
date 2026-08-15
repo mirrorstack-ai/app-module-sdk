@@ -40,7 +40,6 @@ func setCharacterizationAuthSecret(t *testing.T, internalSecret string) {
 func clearCharacterizationModuleEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("MS_LOCAL_DB_URL", "")
-	t.Setenv("MS_TASK_QUEUE_URL", "")
 	t.Setenv("MS_DISPATCH_URL", "")
 }
 

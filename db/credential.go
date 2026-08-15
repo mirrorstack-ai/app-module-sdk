@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -10,10 +11,12 @@ import (
 type contextKey string
 
 const (
-	schemaKey           = contextKey("ms-app-schema")
-	prefixKey           = contextKey("ms-table-prefix")
-	credentialKey       = contextKey("ms-db-credential")
-	moduleCredentialKey = contextKey("ms-db-module-credential")
+	schemaKey                   = contextKey("ms-app-schema")
+	prefixKey                   = contextKey("ms-table-prefix")
+	credentialKey               = contextKey("ms-db-credential")
+	moduleCredentialKey         = contextKey("ms-db-module-credential")
+	credentialProviderKey       = contextKey("ms-db-credential-provider")
+	moduleCredentialProviderKey = contextKey("ms-db-module-credential-provider")
 )
 
 // Credential holds per-invocation database credentials injected by the
@@ -22,11 +25,26 @@ const (
 // moduleCredentialKey). Different DB usernames separate pool cache keys
 // naturally — no flag on the struct is needed.
 type Credential struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Database string `json:"database"`
-	Username string `json:"username"`
-	Token    string `json:"token"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	Database  string    `json:"database"`
+	Username  string    `json:"username"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt,omitzero"`
+}
+
+// CredentialProvider supplies renewable database credentials. Implementations
+// must keep Host, Port, Database and Username stable for their lifetime.
+type CredentialProvider interface {
+	Credential(context.Context) (Credential, error)
+}
+
+// CredentialProviderKey may be implemented by a job-scoped provider to allow
+// safe pool reuse within that provider's lifetime. Providers without a key are
+// never shared: endpoint/user equality alone is not enough because it could
+// attach a later task attempt to an earlier attempt's renewal capability.
+type CredentialProviderKey interface {
+	CredentialProviderKey() string
 }
 
 // validate checks that all required fields are populated.
@@ -88,6 +106,17 @@ func CredentialFrom(ctx context.Context) *Credential {
 	return c
 }
 
+// WithCredentialProvider installs a renewable per-app database credential source.
+func WithCredentialProvider(ctx context.Context, provider CredentialProvider) context.Context {
+	return context.WithValue(ctx, credentialProviderKey, provider)
+}
+
+// CredentialProviderFrom reads the renewable per-app credential source.
+func CredentialProviderFrom(ctx context.Context) CredentialProvider {
+	p, _ := ctx.Value(credentialProviderKey).(CredentialProvider)
+	return p
+}
+
 // WithModuleCredential returns a context with the per-module DB credential
 // set. Used by the platform's Lambda invoke shim for handlers that touch
 // the module's cross-app shared schema (mod_<id>). The use cases live on
@@ -100,6 +129,17 @@ func WithModuleCredential(ctx context.Context, cred Credential) context.Context 
 func ModuleCredentialFrom(ctx context.Context) *Credential {
 	c, _ := ctx.Value(moduleCredentialKey).(*Credential)
 	return c
+}
+
+// WithModuleCredentialProvider installs a renewable module-database source.
+func WithModuleCredentialProvider(ctx context.Context, provider CredentialProvider) context.Context {
+	return context.WithValue(ctx, moduleCredentialProviderKey, provider)
+}
+
+// ModuleCredentialProviderFrom reads the renewable module-database source.
+func ModuleCredentialProviderFrom(ctx context.Context) CredentialProvider {
+	p, _ := ctx.Value(moduleCredentialProviderKey).(CredentialProvider)
+	return p
 }
 
 // EnvBaseCredential returns the Host/Port/Database derived from the SDK's

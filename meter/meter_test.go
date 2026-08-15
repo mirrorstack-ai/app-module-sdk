@@ -3,6 +3,7 @@ package meter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -184,6 +185,47 @@ func TestRecord_PostsEventToUsageIngress(t *testing.T) {
 	}
 }
 
+func TestRecordWithID_ReusesCallerPersistedEventID(t *testing.T) {
+	c, capture := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+	const eventID = "b9c6a0f0-1234-4abc-8def-0123456789ab"
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := c.RecordWithID(appCtx("a-456"), eventID, "transcode.minutes", 12); err != nil {
+			t.Fatalf("RecordWithID attempt %d: %v", attempt+1, err)
+		}
+		var got Event
+		if err := json.Unmarshal(capture.get().body, &got); err != nil {
+			t.Fatalf("decode attempt %d: %v", attempt+1, err)
+		}
+		if got.EventID != eventID {
+			t.Errorf("attempt %d EventID=%q, want persisted %q", attempt+1, got.EventID, eventID)
+		}
+	}
+	if got := capture.get().hits; got != 2 {
+		t.Fatalf("usage ingress hit %d times, want 2 retries with one dedup key", got)
+	}
+}
+
+func TestRecordWithID_RejectsNonCanonicalUUIDWithoutHTTP(t *testing.T) {
+	c, capture := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+	for _, eventID := range []string{
+		"", "not-a-uuid", "B9C6A0F0-1234-4ABC-8DEF-0123456789AB",
+		"00000000-0000-0000-0000-000000000000",
+		"b9c6a0f0-1234-0abc-8def-0123456789ab",
+		"b9c6a0f0-1234-9abc-8def-0123456789ab",
+		"b9c6a0f0-1234-4abc-7def-0123456789ab",
+	} {
+		if err := c.RecordWithID(appCtx("a-456"), eventID, "transcode.minutes", 1); err == nil {
+			t.Errorf("RecordWithID(%q) succeeded, want validation error", eventID)
+		}
+	}
+	if got := capture.get().hits; got != 0 {
+		t.Fatalf("invalid IDs caused %d HTTP calls, want 0", got)
+	}
+}
+
 // The usage ingress is the billable one: dispatch requires this header to match
 // the module's live tunnel session, so dropping it makes every ms.Record under
 // `mirrorstack dev --tunnel` 403 and silently stop metering.
@@ -218,6 +260,49 @@ func TestRecord_WithoutModuleSessionSecretStillPosts(t *testing.T) {
 	if len(got.secret) != 0 {
 		t.Errorf("X-MS-Service-Secret values = %q, want no header", got.secret)
 	}
+}
+
+type testServiceCredentialProvider struct {
+	secret string
+	err    error
+}
+
+func (p testServiceCredentialProvider) ServiceCredential(context.Context) (string, error) {
+	return p.secret, p.err
+}
+
+func TestRecord_TaskProviderOverridesAmbientCredentialAndFailsClosed(t *testing.T) {
+	t.Run("provider wins", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "ambient-must-not-win")
+		c, cap := newDispatchStub(t, http.StatusAccepted)
+		declareCounter(t, c, "transcode.minutes")
+		ctx := WithServiceCredentialProvider(appCtx("a-456"), testServiceCredentialProvider{secret: "attempt-capability"})
+
+		if err := c.Record(ctx, "transcode.minutes", 1); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		if got := cap.get().secret; len(got) != 1 || got[0] != "attempt-capability" {
+			t.Fatalf("X-MS-Service-Secret values = %q, want attempt capability", got)
+		}
+	})
+
+	t.Run("refresh denial never falls back", func(t *testing.T) {
+		t.Setenv("MS_INTERNAL_SECRET", "ambient-must-not-win")
+		c, cap := newDispatchStub(t, http.StatusAccepted)
+		declareCounter(t, c, "transcode.minutes")
+		ctx := WithServiceCredentialProvider(appCtx("a-456"), testServiceCredentialProvider{err: errors.New("refresh denied")})
+
+		err := c.Record(ctx, "transcode.minutes", 1)
+		if err == nil || !strings.Contains(err.Error(), "task service credential unavailable") {
+			t.Fatalf("Record error = %v", err)
+		}
+		if cap.get().hits != 0 {
+			t.Fatal("usage ingress was reached after task credential refresh denial")
+		}
+		if strings.Contains(err.Error(), "ambient-must-not-win") {
+			t.Fatalf("error leaked ambient credential: %v", err)
+		}
+	})
 }
 
 func TestRecord_EmptyAppContextErrorsWithoutHTTP(t *testing.T) {
