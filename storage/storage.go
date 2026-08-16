@@ -26,9 +26,21 @@ import (
 )
 
 // Storer is the interface for storage operations.
+//
+// Adding a method here is source-breaking for any implementation or test double
+// outside this package, which is why an optional capability stays OFF it and is
+// offered as a separate interface instead — see PrefixDeleter in delete.go. Get
+// is on it deliberately rather than by oversight: ms.Storage hands every module
+// this interface, and reading your own object is as fundamental as writing one,
+// so a module should not need a type assertion to do it. Pre-1.0, and *Client is
+// the only implementation in the workspace.
 type Storer interface {
 	PresignPut(ctx context.Context, key string, expires time.Duration) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
+	// Get reads an object the MODULE needs, over the S3 API. Distinct from
+	// PresignGet, which builds a URL for a VIEWER against the client-facing
+	// endpoint — an address the module itself may not be able to reach.
+	Get(ctx context.Context, key string) ([]byte, error)
 	URL(key string) (string, error)
 	CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error)
 }
