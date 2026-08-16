@@ -5,6 +5,46 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.3] - 2026-08-16
+
+Additive only — 3 exported symbols added (`storage.Client.Get`,
+`storage.MaxGetBytes`, `storage.ErrObjectTooLarge`) plus one method on the
+`Storer` interface; none removed and none changed, so this is a PATCH per the
+pre-1.0 convention. (Verified by diffing the exported surface, not by intent.)
+
+⚠️ The new `Storer.Get` method is source-breaking for any implementation of that
+interface outside this repository. `*storage.Client` is the only implementation
+in the workspace, and modules receive the interface from `ms.Storage` rather than
+implementing it, so nothing here breaks — but the rule is now written down in
+`storage.go` so the next capability lands on the interface or beside it on
+purpose (`PrefixDeleter` stays beside it).
+
+### Added
+
+- **`ms.Storage(ctx).Get(ctx, key)`** — read one of the module's own objects over
+  the S3 API, returning its bytes.
+
+  The SDK had no server-side read: a module that needed its own object had to
+  `PresignGet` and then fetch that URL over HTTP. That is not just a wasted round
+  trip to your own storage — it is wrong. A presigned URL is signed against the
+  **client-facing** endpoint, an address the module itself need not be able to
+  reach. In the dev container it resolves to the container, so every read failed
+  with `dial tcp [::1]:9000: connect: connection refused` and surfaced in the
+  browser as a CORS error on `master.m3u8` — about as far from the cause as an
+  error can land. `Get` uses the module's own credential and the endpoint that
+  credential was minted for, so it is correct from wherever the module runs.
+
+  Rule of thumb, stated in the doc comment: bytes **you** need → `Get`; bytes the
+  **viewer** needs → `PresignGet` or `Delivery`.
+
+  Capped at `MaxGetBytes` (8 MiB) because this is for small module-owned control
+  files — playlists, manifests, sidecars — so a mistyped key cannot turn a 4 GB
+  source video into an OOM. Exceeding the cap returns `ErrObjectTooLarge` rather
+  than truncating: a truncated playlist is a subtly broken video, which is far
+  worse to debug than a refusal.
+
+  video-core needs this tag to read HLS playlists it must rewrite before serving.
+
 ## [v0.4.2] - 2026-08-16
 
 Additive only — 4 exported symbols added (`ms.DeliveryURL`, `ms.Delivery`,
