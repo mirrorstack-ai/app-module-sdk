@@ -7,6 +7,45 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## Unreleased
 
+Additive only — 4 exported symbols added (`ms.DeliveryURL`, `ms.Delivery`,
+`ms.DeliveryTicket`, `ms.GatedKeyPrefix`), none removed and none changed — so
+the release PR carrying this should be **v0.4.2**, a PATCH, per the pre-1.0
+convention. (Verified by diffing `go doc -all`, not by intent.)
+
+### Added
+
+- **Gated CDN delivery.** `ms.DeliveryURL(ctx, key, ttl)` returns the CDN URL for
+  one gated object with a short-lived, platform-minted delivery credential
+  attached; `ms.Delivery(ctx, prefix, ttl)` mints ONE credential covering a whole
+  prefix and returns a `ms.DeliveryTicket` whose `URL` method builds a URL per
+  object. Objects opt in by living under `ms.GatedKeyPrefix` (`_gated/`) inside
+  the module's own storage prefix.
+
+  This replaces per-request presigned S3 URLs for the bytes it covers. A
+  presigned URL is unique per request and therefore uncacheable by construction,
+  so every viewer paid a full S3 GET plus egress for every object; a delivery
+  token rides the query string, which the CDN excludes from its cache key, so one
+  cached object serves every entitled viewer.
+
+  **The module owns the entitlement decision, the platform owns the credential.**
+  Call this only after deciding the viewer is entitled. The signing key never
+  reaches the module, the token is unexported on the ticket, and the module id in
+  the token comes from the calling module's credential — never from anything the
+  module sends — so a token minted for one module is worthless against another
+  module's objects in the same app.
+
+  > [!IMPORTANT]
+  > **There is no unsigned fallback.** Every failure — mint refused, dispatch
+  > unreachable, a 200 carrying an empty token — returns an error and no URL.
+  > Do not "fix" a failing mint by emitting the bare CDN URL: unsigned URLs for
+  > gated content are public, they look exactly like a working feature, and they
+  > land in viewers' playlists where a rollback cannot reach them.
+  >
+  > Requires the platform mint endpoint (`POST /apps/{appRef}/cdn-tokens`) and a
+  > CDN edge that validates the token. **The edge validation must be deployed
+  > before any module emits a CDN URL** — the reverse order makes every gated
+  > object public.
+
 ## [v0.4.1] - 2026-08-16
 
 This release makes `ms.RunTask` a genuinely managed task: a one-shot process

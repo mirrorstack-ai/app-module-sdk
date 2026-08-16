@@ -117,6 +117,18 @@ func appIDFromContext(ctx context.Context, op string) (string, error) {
 // trusts an envelope assertion. A non-2xx response is returned as an error
 // prefixed with op ("ms.Emit", "ms.Notify"), body truncated to ~2 KB.
 func postDispatchJSON(ctx context.Context, op, url, appID string, payload any, extraHeaders map[string]string) error {
+	return postDispatchJSONInto(ctx, op, url, appID, payload, nil, extraHeaders)
+}
+
+// postDispatchJSONInto is postDispatchJSON for a surface that needs the
+// RESPONSE, decoding a 2xx body into out (pass nil to discard it, which is what
+// postDispatchJSON does). Everything else — base headers, the opt-in credential
+// rule, the non-2xx error contract — is shared, so a response-reading surface
+// cannot drift from a fire-and-forget one.
+//
+// A decode failure is an error, never a partially-populated out: a surface that
+// returns a CREDENTIAL must not proceed on half a response.
+func postDispatchJSONInto(ctx context.Context, op, url, appID string, payload, out any, extraHeaders map[string]string) error {
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -141,6 +153,12 @@ func postDispatchJSON(ctx context.Context, op, url, appID string, payload any, e
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("%s %s -> %d: %s", op, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("%s %s: decode response: %w", op, req.URL.Path, err)
 	}
 	return nil
 }

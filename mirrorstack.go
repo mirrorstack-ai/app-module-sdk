@@ -198,6 +198,54 @@ func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(
 // credentials only to modules whose manifest contains this declaration.
 func RequireStorage() { core.RequireStorage() }
 
+// --- Gated CDN delivery ---
+
+// GatedKeyPrefix is the module-relative storage-key prefix that opts an object
+// into token-gated CDN delivery. Write gated objects under it (and store that
+// same key), then hand viewers a URL from ms.DeliveryURL or ms.Delivery.
+//
+// Objects NOT under it are served by the CDN with no credential at all, so this
+// prefix is the whole difference between a public asset and a paywalled one.
+const GatedKeyPrefix = core.GatedKeyPrefix
+
+// DeliveryTicket is one minted delivery credential and the CDN origin it is
+// valid against, covering every object under its Prefix. Get one from
+// ms.Delivery and call its URL method per object.
+type DeliveryTicket = core.DeliveryTicket
+
+// DeliveryURL returns the CDN URL for ONE gated object, with a freshly minted,
+// short-lived delivery credential attached. key is relative to this module's
+// storage prefix (the same key space ms.Storage uses) and must live under
+// ms.GatedKeyPrefix. ttl is a proposal the platform clamps.
+//
+// Call it only AFTER deciding the viewer is entitled. The module owns that
+// decision — was the credit charged, is the role held — and the platform owns
+// the credential; the signing key never reaches the module.
+//
+// 🔴 An error means NO URL. It never degrades to an unsigned CDN URL: that
+// would serve paywalled bytes to anyone with the link while looking like a
+// working feature, and those URLs end up in viewers' playlists where a rollback
+// cannot reach them.
+//
+// One mint per call. For many objects under one prefix — a video's segments —
+// use ms.Delivery once and reuse the ticket.
+func DeliveryURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	return core.DeliveryURL(ctx, key, ttl)
+}
+
+// Delivery mints ONE delivery credential covering every object under prefix,
+// relative to this module's storage prefix. Scope it to what the entitlement
+// decision actually covered — for video that is one transcode job, i.e. one
+// video across all its renditions — never to bare "_gated/", which authorises
+// everything private the module owns.
+//
+// ttl is a proposal; read ExpiresIn on the returned ticket for the lifetime
+// actually granted, and propose no more than the entitlement's own remaining
+// life. Fails closed: an error yields a zero ticket, which cannot produce a URL.
+func Delivery(ctx context.Context, prefix string, ttl time.Duration) (DeliveryTicket, error) {
+	return core.Delivery(ctx, prefix, ttl)
+}
+
 // MetricOption configures a metric at declaration. The KIND is itself an option
 // (Counter / Gauge), alongside Unit and Price.
 type MetricOption = meter.MetricOption
