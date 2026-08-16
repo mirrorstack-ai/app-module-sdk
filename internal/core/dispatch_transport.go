@@ -23,6 +23,10 @@ import (
 // envelope construction and its resolve*URL path building, so the #146 prod
 // transport lands here (and in the per-surface resolvers' path logic) instead
 // of being swapped in N copies.
+//
+// dispatchTTLSeconds is here for the same reason: "ttl is a PROPOSAL, sent as
+// whole seconds, absent when unset" is one wire convention shared by every mint
+// surface (Delivery, MintMemberAssertion), not a fact about any one of them.
 
 // dispatchFallbackWarn keeps the unset-MS_DISPATCH_URL warning to one line per
 // process, so a module that makes many calls does not spam its log.
@@ -93,6 +97,29 @@ func outboundServiceSecret(ctx context.Context, operation string) (string, error
 		return capability.Token, nil
 	}
 	return moduleSessionSecret(), nil
+}
+
+// dispatchTTLSeconds turns a Duration proposal into the wire field shared by
+// every dispatch mint envelope.
+//
+// nil means "unset", which the platform reads as its default. A negative ttl is
+// a caller bug and is rejected rather than quietly defaulted — silently turning
+// a wrong lifetime into an hour hides the bug at the one place it is cheap to
+// see. A positive sub-second ttl rounds UP to 1s so it stays an explicit
+// proposal (the platform then clamps it to its floor) instead of truncating to
+// 0 and reading as "unset".
+func dispatchTTLSeconds(ttl time.Duration) (*int64, error) {
+	switch {
+	case ttl < 0:
+		return nil, fmt.Errorf("ttl must not be negative (got %s)", ttl)
+	case ttl == 0:
+		return nil, nil
+	}
+	seconds := int64(ttl / time.Second)
+	if ttl%time.Second != 0 {
+		seconds++
+	}
+	return &seconds, nil
 }
 
 // appIDFromContext reads the current app id from the request context — the

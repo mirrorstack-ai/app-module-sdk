@@ -246,6 +246,46 @@ func Delivery(ctx context.Context, prefix string, ttl time.Duration) (DeliveryTi
 	return core.Delivery(ctx, prefix, ttl)
 }
 
+// --- Member identity assertions ---
+
+// MemberAssertion is one short-lived, platform-signed statement that a named
+// member is acting. Attach Token to a module request as
+// `Authorization: Bearer <token>` and dispatch turns it back into
+// ms.UserID(ctx) for the module that serves it.
+//
+// Token is a bearer credential — anyone holding it acts as that member until it
+// expires — so keep it server-side. Renew off ExpiresIn, which is the lifetime
+// the platform actually granted, not the ttl you proposed.
+type MemberAssertion = core.MemberAssertion
+
+// MintMemberAssertion exchanges a decision THIS module already made — "this
+// request belongs to member userID" — for a platform-signed assertion every
+// other module can trust.
+//
+// Only the module hosting the `auth-provider` slot may call it: the platform
+// checks the caller against a fact recorded at install, so any other module gets
+// an error whatever it sends. You own WHO the member is; the platform only
+// notarises it, which is what lets other modules read ms.UserID(ctx) without
+// ever holding a credential that can act as that member.
+//
+// 🔴 No app role is in the claims. Identity is not authorization: an assertion
+// says who, never what they may do, and every consuming module still asks its
+// own policy question.
+//
+// 🔴 An error means NO assertion. It never degrades to an anonymous or empty
+// token — an empty token on a request is indistinguishable from no token, so the
+// degraded return would show a signed-in member the signed-out answer while
+// every audit row for their actions names no actor.
+//
+// ttl is a proposal the platform clamps (5 minutes today); zero takes the
+// platform default.
+//
+// NOT AVAILABLE YET: the mint endpoint ships with #518 PR 1. Until a platform
+// carrying it is deployed, every call returns an error.
+func MintMemberAssertion(ctx context.Context, userID string, ttl time.Duration) (MemberAssertion, error) {
+	return core.MintMemberAssertion(ctx, userID, ttl)
+}
+
 // MetricOption configures a metric at declaration. The KIND is itself an option
 // (Counter / Gauge), alongside Unit and Price.
 type MetricOption = meter.MetricOption
