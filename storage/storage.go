@@ -29,6 +29,10 @@ import (
 type Storer interface {
 	PresignPut(ctx context.Context, key string, expires time.Duration) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
+	// Get reads an object the MODULE needs, over the S3 API. Distinct from
+	// PresignGet, which builds a URL for a VIEWER against the client-facing
+	// endpoint — an address the module itself may not be able to reach.
+	Get(ctx context.Context, key string) ([]byte, error)
 	URL(key string) (string, error)
 	CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error)
 }
