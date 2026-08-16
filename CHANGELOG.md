@@ -5,7 +5,7 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [v0.4.4] - 2026-08-17
 
 Additive only — 2 exported symbols added (`ms.MintMemberAssertion`,
 `ms.MemberAssertion`), none removed and none changed, so this is a PATCH per the
