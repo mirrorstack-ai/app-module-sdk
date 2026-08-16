@@ -189,7 +189,7 @@ func Delivery(ctx context.Context, prefix string, ttl time.Duration) (DeliveryTi
 	if err := validateDeliveryPrefix(prefix); err != nil {
 		return DeliveryTicket{}, fmt.Errorf("ms.Delivery: %w", err)
 	}
-	ttlSeconds, err := deliveryTTLSeconds(ttl)
+	ttlSeconds, err := dispatchTTLSeconds(ttl)
 	if err != nil {
 		return DeliveryTicket{}, fmt.Errorf("ms.Delivery: %w", err)
 	}
@@ -349,26 +349,4 @@ func validateDeliveryRelativeKey(key string) error {
 		return fmt.Errorf("key %q must contain only [A-Za-z0-9._/-]", key)
 	}
 	return nil
-}
-
-// deliveryTTLSeconds turns a Duration proposal into the wire field.
-//
-// nil means "unset", which the platform reads as its default. A negative ttl is
-// a caller bug and is rejected rather than quietly defaulted — silently turning
-// a wrong lifetime into an hour hides the bug at the one place it is cheap to
-// see. A positive sub-second ttl rounds UP to 1s so it stays an explicit
-// proposal (the platform then clamps it to its floor) instead of truncating to
-// 0 and reading as "unset".
-func deliveryTTLSeconds(ttl time.Duration) (*int64, error) {
-	switch {
-	case ttl < 0:
-		return nil, fmt.Errorf("ttl must not be negative (got %s)", ttl)
-	case ttl == 0:
-		return nil, nil
-	}
-	seconds := int64(ttl / time.Second)
-	if ttl%time.Second != 0 {
-		seconds++
-	}
-	return &seconds, nil
 }

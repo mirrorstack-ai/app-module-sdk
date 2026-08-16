@@ -5,6 +5,81 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Additive only — 2 exported symbols added (`ms.MintMemberAssertion`,
+`ms.MemberAssertion`), none removed and none changed, so this is a PATCH per the
+pre-1.0 convention. (Verified by diffing `go doc -all` between `origin/main` and
+this branch: 2 added lines, 0 removed. Measured, not asserted.)
+
+⚠️ **Inert until api-platform ships the mint endpoint.** `POST
+/apps/{appID}/member-assertions` is PR 1 of #518 and exists in no deployed
+platform yet; until it does, every call returns an error. That is the intended
+sequencing — nothing changes behaviour until an app actually sends an assertion —
+but it also means a green test here proves nothing about the real endpoint. The
+tests fake dispatch with `httptest`, so the wire contract (path, field names,
+status codes) must be diffed against the platform handler's source before either
+side merges.
+
+### Added
+
+- **`ms.MintMemberAssertion(ctx, userID, ttl)`** — exchange a decision the
+  auth-provider module already made ("this request belongs to member U") for a
+  short-lived platform-signed assertion, returned as `ms.MemberAssertion`.
+  Attach its `Token` to a module request as `Authorization: Bearer <token>` and
+  dispatch turns it back into `ms.UserID(ctx)` for the module that serves it.
+
+  This closes the hole behind #518: dispatch builds a caller with literally zero
+  identity for every non-platform, non-internal path, so a module's `/public/*`
+  handler has never been able to see who is asking. An entitlement gate that
+  reads `userID == ""` denies a signed-in member correctly and uselessly — there
+  was simply nobody standing behind it.
+
+  The alternative — each consuming module calls the auth module to resolve a
+  session itself — was rejected for two structural reasons, not for speed. It
+  breaks the audit rule (*actor from ctx ONLY*): an actor a module fetched for
+  itself is not one the platform can guarantee, so the first module that forgets
+  writes a row claiming a system actor for a human action. And it hands every
+  module a credential that can act **as** that member later, for anything.
+  Notarising keeps `ms.UserID(ctx)` uniformly true and keeps the member's own
+  credential inside the module that owns members.
+
+  Only the module hosting the `auth-provider` slot may mint; the platform checks
+  the caller against a fact recorded at install. That check is what makes the
+  endpoint safe to expose at all — a delivery token can only ever address the
+  caller's own storage prefix, but an identity assertion names *somebody else*
+  and has no naturally bounded scope.
+
+  **No app role is in the claims.** Identity is not authorization: an assertion
+  says who, never what they may do, and every consuming module still asks its own
+  policy question. That separation is what keeps a member from being mistaken for
+  an operator by a module that only checked "is someone there".
+
+  🔴 Fails closed, and here the degraded return is the dangerous one. An empty or
+  malformed token attached to a request is indistinguishable at the far end from
+  no token at all: every downstream module would see an **anonymous** caller
+  while the auth module believed it had signed someone in — the member gets the
+  signed-out answer and their audit rows name no actor. So an empty token, a
+  non-positive lifetime, or a token that is not header-safe is an error, and
+  every error path returns the zero `MemberAssertion`.
+
+  Unlike `DeliveryTicket`, the credential is **exported**: handing the string
+  onward to the app's server side is the entire point, so there is nothing to
+  hide it behind. That costs the second fail-closed layer `DeliveryTicket` gets
+  from its `armed` check, which is why the response screening is pinned by its own
+  test rather than only through the mint path.
+
+  A `ttl` is a proposal the platform clamps (5 minutes today); read `ExpiresIn`
+  for what was actually granted and renew off that, never off your own proposal.
+
+### Changed
+
+- `deliveryTTLSeconds` → `dispatchTTLSeconds`, moved to `dispatch_transport.go`.
+  Internal only, no exported surface affected. "ttl is a proposal, sent as whole
+  seconds, absent when unset" is now one wire convention shared by two mint
+  surfaces, so it should not keep living in one surface's file under one
+  surface's name.
+
 ## [v0.4.3] - 2026-08-16
 
 Additive only — 3 exported symbols added (`storage.Client.Get`,
