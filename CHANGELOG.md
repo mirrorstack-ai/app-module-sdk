@@ -5,12 +5,12 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [v0.4.2] - 2026-08-16
 
 Additive only — 4 exported symbols added (`ms.DeliveryURL`, `ms.Delivery`,
-`ms.DeliveryTicket`, `ms.GatedKeyPrefix`), none removed and none changed — so
-the release PR carrying this should be **v0.4.2**, a PATCH, per the pre-1.0
-convention. (Verified by diffing `go doc -all`, not by intent.)
+`ms.DeliveryTicket`, `ms.GatedKeyPrefix`), none removed and none changed, so
+this is a PATCH per the pre-1.0 convention. (Verified by diffing `go doc -all`,
+not by intent.)
 
 ### Added
 
