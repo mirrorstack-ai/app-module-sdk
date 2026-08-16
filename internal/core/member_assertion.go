@@ -44,6 +44,14 @@ import (
 // so this must move in lockstep with the endpoint.
 const memberAssertionEnvelopeVersion = 1
 
+// maxAssertionLifetime is the sanity ceiling on the lifetime a mint response may
+// claim. Deliberately far above the platform's 5-minute clamp — the SDK must not
+// second-guess a policy dispatch owns, and a future longer clamp must not need
+// an SDK release — and far below anything that could be mistaken for correct.
+// Its job is to catch a BROKEN response (a unit mix-up, a garbage integer), not
+// to enforce policy.
+const maxAssertionLifetime = 24 * time.Hour
+
 // memberAssertionUserID mirrors the platform's rule that an asserted principal
 // is a UUID. The point is not formatting: it is that a module must not be able
 // to assert a FREE-FORM principal — "admin", "*", or another module's internal
@@ -203,16 +211,32 @@ func MintMemberAssertion(ctx context.Context, userID string, ttl time.Duration) 
 // surface: a CR/LF would let a hostile or broken response append headers of its
 // own to every request the assertion is attached to.
 func newMemberAssertion(resp memberAssertionResponse) (MemberAssertion, error) {
+	// 🔴 SCREEN THE VALUE THE CALLER ACTUALLY GETS, not the wire integer.
+	// time.Duration is nanoseconds, so anything above ~9.2e9 seconds OVERFLOWS
+	// and wraps NEGATIVE — and a platform that returned MILLISECONDS by mistake,
+	// the single most common unit bug in a field shaped like this, passes a
+	// `resp.ExpiresIn <= 0` screen and hands back a negative Duration. This
+	// type's whole contract is "renew off ExpiresIn, not your own proposal", so
+	// a negative value is either a timer that fires immediately (a renewal storm
+	// against the mint endpoint) or a deadline already in the past. Both are a
+	// hollow 200 that looks live, which is the one thing this function exists to
+	// prevent.
+	expiresIn := time.Duration(resp.ExpiresIn) * time.Second
 	switch {
 	case resp.Token == "":
 		return MemberAssertion{}, fmt.Errorf("ms.MintMemberAssertion: platform returned no assertion")
 	case !actor.ValidTransportValue(resp.Token):
 		return MemberAssertion{}, fmt.Errorf("ms.MintMemberAssertion: platform returned an assertion that is not header-safe")
-	case resp.ExpiresIn <= 0:
+	case resp.ExpiresIn <= 0 || expiresIn <= 0:
 		return MemberAssertion{}, fmt.Errorf("ms.MintMemberAssertion: platform returned a non-positive assertion lifetime (%ds)", resp.ExpiresIn)
+	case expiresIn > maxAssertionLifetime:
+		// A ceiling on top of the overflow guard, because a value can be absurd
+		// without wrapping: 1e9 seconds is 31 years, positive, and still not a
+		// lifetime any platform grants. The platform clamps to 5 minutes, so
+		// anything past a day is a broken response, not a generous one.
+		return MemberAssertion{}, fmt.Errorf("ms.MintMemberAssertion: platform returned an implausible assertion lifetime (%ds)", resp.ExpiresIn)
 	}
 
-	expiresIn := time.Duration(resp.ExpiresIn) * time.Second
 	// expiresAt is a convenience, not the authority: expiresIn is the clamped
 	// number the platform actually granted. An unparseable timestamp must not
 	// fail a mint that succeeded, so derive it rather than reject.

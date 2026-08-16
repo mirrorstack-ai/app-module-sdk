@@ -10,7 +10,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 Additive only — 2 exported symbols added (`ms.MintMemberAssertion`,
 `ms.MemberAssertion`), none removed and none changed, so this is a PATCH per the
 pre-1.0 convention. (Verified by diffing `go doc -all` between `origin/main` and
-this branch: 2 added lines, 0 removed. Measured, not asserted.)
+this branch, both with `GOWORK=off`: 2 added SYMBOLS across 36 added doc lines,
+0 removed. The symbol count is the number that decides the bump; the line count
+is larger because `go doc -all` prints each symbol's full doc comment. Measured,
+not asserted — and it reconciles when re-run.)
 
 ⚠️ **Inert until api-platform ships the mint endpoint.** `POST
 /apps/{appID}/member-assertions` is PR 1 of #518 and exists in no deployed
@@ -60,8 +63,25 @@ side merges.
   no token at all: every downstream module would see an **anonymous** caller
   while the auth module believed it had signed someone in — the member gets the
   signed-out answer and their audit rows name no actor. So an empty token, a
-  non-positive lifetime, or a token that is not header-safe is an error, and
-  every error path returns the zero `MemberAssertion`.
+  token that is not header-safe, or a lifetime that is not usable is an error,
+  and every error path returns the zero `MemberAssertion`.
+
+  "Not usable" screens the value the CALLER gets, not the wire integer.
+  `time.Duration` is nanoseconds, so a response above ~9.2e9 seconds overflows
+  and wraps **negative** — which is exactly what a platform returning
+  milliseconds by mistake would produce, and it sails past a check that only
+  looks at the JSON number. A negative lifetime means a renewal timer that fires
+  immediately or a deadline already in the past, i.e. a hollow 200 that looks
+  live. There is also a 24h sanity ceiling on top: far above the platform's
+  5-minute clamp (the SDK does not enforce a policy dispatch owns, and a future
+  longer clamp must not need an SDK release) and far below anything that could
+  be mistaken for correct.
+
+  Inside a **task attempt** the mint uses the broker-attested, attempt-scoped
+  capability, never the ambient `MS_INTERNAL_SECRET`; a denied or expired
+  capability is an error with no request made. A revoked attempt must not go on
+  minting identity assertions under a process-wide secret the broker already
+  declined to renew.
 
   Unlike `DeliveryTicket`, the credential is **exported**: handing the string
   onward to the app's server side is the entire point, so there is nothing to

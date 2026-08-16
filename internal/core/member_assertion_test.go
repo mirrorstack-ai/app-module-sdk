@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -115,7 +116,12 @@ func TestMintMemberAssertion_MintsAndSendsAnIdentityFreeEnvelope(t *testing.T) {
 	})
 	t.Setenv("MS_INTERNAL_SECRET", "module-credential")
 
-	got, err := MintMemberAssertion(assertionCtx(), testAssertionUserID, 5*time.Minute)
+	// The PROPOSAL is an hour; okAssertionResponse grants 300s. The two numbers
+	// must DIFFER, or an implementation that echoed the caller's proposal back
+	// instead of reading the response would pass this test identically — and the
+	// documented contract ("renew off ExpiresIn, not your own proposal") would be
+	// asserted by a comment rather than by the test.
+	got, err := MintMemberAssertion(assertionCtx(), testAssertionUserID, time.Hour)
 	if err != nil {
 		t.Fatalf("MintMemberAssertion: %v", err)
 	}
@@ -124,7 +130,7 @@ func TestMintMemberAssertion_MintsAndSendsAnIdentityFreeEnvelope(t *testing.T) {
 		t.Errorf("Token = %q, want %q", got.Token, testAssertionToken)
 	}
 	if got.ExpiresIn != 5*time.Minute {
-		t.Errorf("ExpiresIn = %s, want 5m (the CLAMPED value the platform granted)", got.ExpiresIn)
+		t.Errorf("ExpiresIn = %s, want 5m — the CLAMPED value the platform granted, not the 1h proposed", got.ExpiresIn)
 	}
 	if got.ExpiresAt.IsZero() {
 		t.Error("ExpiresAt is zero; a holder cannot schedule a renewal")
@@ -141,19 +147,29 @@ func TestMintMemberAssertion_MintsAndSendsAnIdentityFreeEnvelope(t *testing.T) {
 	if rec.secret != "module-credential" {
 		t.Errorf("X-MS-Service-Secret = %q, want the module credential", rec.secret)
 	}
-	if rec.body.V != memberAssertionEnvelopeVersion {
-		t.Errorf("envelope v = %d, want %d", rec.body.V, memberAssertionEnvelopeVersion)
-	}
-	if rec.body.UserID != testAssertionUserID {
-		t.Errorf("envelope userId = %q, want %q", rec.body.UserID, testAssertionUserID)
-	}
-	// A module id in the envelope would let any module claim the auth-provider
-	// right; an app id would let it assert into another app. Neither field may
-	// exist on the wire at all — identity comes from the credential and the URL.
+	// 🔴 ASSERTED ON THE RAW JSON, WITH LITERALS.
+	//
+	// `rec.body` is decoded through memberAssertionRequest — the SAME struct the
+	// production code encodes with — so a JSON tag rename changes both sides at
+	// once and no assertion over it can ever see the drift. Comparing the decoded
+	// V against memberAssertionEnvelopeVersion is worse still: it compares the
+	// constant to itself. The platform 400s a wrong `v` loudly and 400s an
+	// unknown field name just as hard, so a one-character drift here is a 100%
+	// mint failure in production against a fully green SDK suite. Every field
+	// name and the version LITERAL are therefore pinned by bytes.
 	var raw map[string]any
 	if err := json.Unmarshal(rec.rawBody, &raw); err != nil {
 		t.Fatalf("unmarshal envelope: %v", err)
 	}
+	if v, ok := raw["v"]; !ok || v != float64(1) {
+		t.Errorf(`envelope["v"] = %v (present=%v), want the literal 1`, v, ok)
+	}
+	if u, ok := raw["userId"]; !ok || u != testAssertionUserID {
+		t.Errorf(`envelope["userId"] = %v (present=%v), want %q`, u, ok, testAssertionUserID)
+	}
+	// A module id in the envelope would let any module claim the auth-provider
+	// right; an app id would let it assert into another app. Neither field may
+	// exist on the wire at all — identity comes from the credential and the URL.
 	for _, forbidden := range []string{"module", "moduleID", "moduleId", "app", "appID", "appId"} {
 		if _, ok := raw[forbidden]; ok {
 			t.Errorf("envelope carries %q; identity must come from the credential and the URL only", forbidden)
@@ -165,6 +181,47 @@ func TestMintMemberAssertion_MintsAndSendsAnIdentityFreeEnvelope(t *testing.T) {
 		if _, ok := raw[forbidden]; ok {
 			t.Errorf("envelope carries %q; an assertion says WHO, never what they may do", forbidden)
 		}
+	}
+}
+
+// 🔴 THE RESPONSE CONTRACT, PINNED BY BYTES.
+//
+// Every other test in this file decodes the platform's reply through
+// memberAssertionResponse — the same struct the production code reads with — so
+// renaming `token` to `assertion` or `expiresIn` to `ttl` changes both halves
+// together and nothing notices. This one serves a LITERAL body: the exact JSON
+// the platform handler emits (internal/dispatch/handler/member_assertion_router.go,
+// memberAssertionResponse), copied field-for-field rather than generated from
+// this package's own types.
+//
+// If this test starts failing after a platform change, the answer is not to edit
+// the literal until it passes — it is that the wire contract moved and both
+// sides need a version.
+func TestMintMemberAssertion_ReadsThePlatformsLiteralWireResponse(t *testing.T) {
+	const platformBody = `{"token":"msm1.eyJ0eXAiOiJtZW1iZXJfYXNzZXJ0aW9uIn0.c2ln","expiresAt":"2026-08-16T13:04:05Z","expiresIn":300}`
+
+	newAssertionServer(t, func(w http.ResponseWriter, _ *assertionRecord) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(platformBody))
+	})
+	t.Setenv("MS_INTERNAL_SECRET", "module-credential")
+
+	got, err := MintMemberAssertion(assertionCtx(), testAssertionUserID, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("MintMemberAssertion on the platform's literal response: %v", err)
+	}
+	if got.Token != "msm1.eyJ0eXAiOiJtZW1iZXJfYXNzZXJ0aW9uIn0.c2ln" {
+		t.Errorf("Token = %q; the `token` field is not being read", got.Token)
+	}
+	if got.ExpiresIn != 5*time.Minute {
+		t.Errorf("ExpiresIn = %s, want 5m; the `expiresIn` field is not being read", got.ExpiresIn)
+	}
+	want := time.Date(2026, 8, 16, 13, 4, 5, 0, time.UTC)
+	if !got.ExpiresAt.Equal(want) {
+		// A misread expiresAt falls back to now+expiresIn rather than erroring,
+		// so only comparing the actual instant can see it.
+		t.Errorf("ExpiresAt = %s, want %s; the `expiresAt` field is not being read", got.ExpiresAt, want)
 	}
 }
 
@@ -298,6 +355,19 @@ func TestNewMemberAssertion_RejectsAnUnusableMintResponse(t *testing.T) {
 		{name: "token exactly at the transport cap is fine", mutate: func(r *memberAssertionResponse) { r.Token = strings.Repeat("a", 4096) }},
 		{name: "zero lifetime", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = 0 }, wantErr: "non-positive assertion lifetime"},
 		{name: "negative lifetime", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = -1 }, wantErr: "non-positive assertion lifetime"},
+		// 🔴 A POSITIVE WIRE INTEGER THAT BECOMES A NEGATIVE DURATION. Duration is
+		// nanoseconds, so anything past ~9.2e9 seconds wraps. A platform that
+		// returned MILLISECONDS by mistake lands squarely here, passes a screen
+		// that only looks at resp.ExpiresIn, and hands the caller a deadline in
+		// the past — a renewal storm, or an assertion the holder believes is dead
+		// the instant it arrives.
+		{name: "lifetime that overflows a Duration", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = 1 << 34 }, wantErr: "assertion lifetime"},
+		{name: "lifetime that overflows harder", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = 1 << 40 }, wantErr: "assertion lifetime"},
+		// Positive, non-overflowing, and still not a lifetime any platform grants.
+		{name: "absurd but non-overflowing lifetime", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = 1_000_000_000 }, wantErr: "implausible assertion lifetime"},
+		// The ceiling must not clip a plausible grant: the SDK does not enforce
+		// the platform's clamp, only catches a broken response.
+		{name: "an hour is well within the sanity ceiling", mutate: func(r *memberAssertionResponse) { r.ExpiresIn = 3600 }},
 		// The token FORMAT is deliberately not pinned: dispatch owns it, and
 		// asserting msm1 here would make a future msm2 a breaking SDK change.
 		{name: "a future token version is accepted, not second-guessed",
@@ -455,6 +525,86 @@ func TestMintMemberAssertion_RequiresAnAppScopedContext(t *testing.T) {
 	}
 	if rec.calls != 0 {
 		t.Errorf("made %d mint call(s) with no app scope, want 0", rec.calls)
+	}
+}
+
+// stubCapabilityProvider is a task attempt's broker-attested outbound
+// credential source.
+type stubCapabilityProvider struct {
+	capability runtime.ModuleCallCapability
+	err        error
+	calls      int
+}
+
+func (s *stubCapabilityProvider) ModuleCallCapability(context.Context) (runtime.ModuleCallCapability, error) {
+	s.calls++
+	return s.capability, s.err
+}
+
+// 🔴 INSIDE A TASK ATTEMPT THE BROKER'S CREDENTIAL WINS, AND A DENIED ONE FAILS
+// CLOSED.
+//
+// outboundServiceSecret exists so that a denied or expired broker capability is
+// an ERROR, never a fall back to ambient MS_INTERNAL_SECRET — its own doc
+// comment says so. Nothing measured it: every other test in this file sets
+// MS_INTERNAL_SECRET and takes the fallback branch, so collapsing the whole call
+// to moduleSessionSecret() left the suite green. This is the exact sibling of
+// the dispatchBaseFor blind spot that TestResolveMemberAssertionURL_TaskRoutingBeatsProcessState
+// closes for routing; the consequence is worse for the credential, because a
+// REVOKED attempt would go on minting identity assertions naming arbitrary
+// members under a process-wide secret the broker had already declined to renew.
+func TestMintMemberAssertion_TaskCapabilityBeatsProcessCredentialAndFailsClosed(t *testing.T) {
+	t.Run("an attempt-scoped capability is what goes on the wire", func(t *testing.T) {
+		rec := newAssertionServer(t, func(w http.ResponseWriter, _ *assertionRecord) {
+			writeAssertion(w, http.StatusOK, okAssertionResponse())
+		})
+		t.Setenv("MS_INTERNAL_SECRET", "ambient-process-secret")
+		provider := &stubCapabilityProvider{capability: runtime.ModuleCallCapability{
+			Token: "attempt-scoped", ExpiresAt: time.Now().Add(time.Hour),
+		}}
+		ctx := runtime.WithModuleCallCapabilityProvider(assertionCtx(), provider)
+
+		if _, err := MintMemberAssertion(ctx, testAssertionUserID, 5*time.Minute); err != nil {
+			t.Fatalf("MintMemberAssertion: %v", err)
+		}
+		if rec.secret != "attempt-scoped" {
+			t.Errorf("X-MS-Service-Secret = %q, want the attempt-scoped capability, not process state", rec.secret)
+		}
+		if provider.calls == 0 {
+			t.Error("the capability provider was never consulted")
+		}
+	})
+
+	// Each of these is a credential the broker has refused to vouch for. The
+	// ambient MS_INTERNAL_SECRET is set in every case and must never be reached.
+	for _, tc := range []struct {
+		name     string
+		provider *stubCapabilityProvider
+	}{
+		{"refresh denied", &stubCapabilityProvider{err: errors.New("attempt revoked")}},
+		{"empty capability token", &stubCapabilityProvider{capability: runtime.ModuleCallCapability{ExpiresAt: time.Now().Add(time.Hour)}}},
+		{"expired capability", &stubCapabilityProvider{capability: runtime.ModuleCallCapability{
+			Token: "attempt-scoped", ExpiresAt: time.Now().Add(-time.Second),
+		}}},
+	} {
+		t.Run(tc.name+" fails closed", func(t *testing.T) {
+			rec := newAssertionServer(t, func(w http.ResponseWriter, _ *assertionRecord) {
+				writeAssertion(w, http.StatusOK, okAssertionResponse())
+			})
+			t.Setenv("MS_INTERNAL_SECRET", "ambient-process-secret")
+			ctx := runtime.WithModuleCallCapabilityProvider(assertionCtx(), tc.provider)
+
+			got, err := MintMemberAssertion(ctx, testAssertionUserID, 5*time.Minute)
+			if err == nil {
+				t.Fatalf("MintMemberAssertion succeeded on a refused capability and returned %+v", got)
+			}
+			if got.Token != "" {
+				t.Errorf("returned token %q on a refused capability", got.Token)
+			}
+			if rec.calls != 0 {
+				t.Errorf("made %d mint call(s) after the broker refused the credential; the ambient secret must never be a fallback", rec.calls)
+			}
+		})
 	}
 }
 
