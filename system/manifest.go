@@ -40,12 +40,16 @@ type ManifestPayload struct {
 	// text), resolved from the module's i18n catalog (ms.Config.DescriptionLabel).
 	// Omitted when the module declared none, in which case the platform falls
 	// back to Description. Mirrors Permission.Descriptions / MetricDecl.Labels.
-	DescriptionLabels map[string]string                   `json:"descriptionLabels,omitempty"`
-	Dependencies      []registry.Dependency               `json:"dependencies"`
-	Migration         MigrationVersions                   `json:"migration"`
-	Versions          map[string]MigrationVersions        `json:"versions"`
-	Routes            map[registry.Scope][]registry.Route `json:"routes"`
-	Events            ManifestEvents                      `json:"events"`
+	DescriptionLabels map[string]string `json:"descriptionLabels,omitempty"`
+	// Client declares the module-local source and build-output directories for
+	// the optional custom-app client. The CLI consumes these paths during local
+	// development; package identity and versioning remain platform-owned.
+	Client       *ClientSpec                         `json:"client,omitempty"`
+	Dependencies []registry.Dependency               `json:"dependencies"`
+	Migration    MigrationVersions                   `json:"migration"`
+	Versions     map[string]MigrationVersions        `json:"versions"`
+	Routes       map[registry.Scope][]registry.Route `json:"routes"`
+	Events       ManifestEvents                      `json:"events"`
 	// Exposes lists the tables this module marks readable (SELECT-eligible)
 	// by a depending module (ms.ExposeTable). The platform catalog issues
 	// GRANT SELECT against the depending module's DB role after the app
@@ -78,6 +82,15 @@ type ManifestPayload struct {
 	// the registration after app-owner approval. Always present; empty
 	// array when the module contributes nothing.
 	ContributesTo []registry.OutboundContribution `json:"contributesTo"`
+}
+
+// ClientSpec identifies the module-local client project and its compiled
+// output. Both paths are canonical, slash-separated paths relative to their
+// containing project: Dir is relative to the module root and OutputDir is
+// relative to Dir. Module construction validates this contract.
+type ClientSpec struct {
+	Dir       string `json:"dir"`
+	OutputDir string `json:"outputDir"`
 }
 
 // ManifestResources is the module's opt-in runtime-resource contract. Empty is
@@ -231,6 +244,17 @@ func buildManifestMCP(reg *registry.Registry) ManifestMCP {
 // contribReg is the module's contribution-slot registry. Pass nil to omit
 // declared contributions from the manifest entirely (e.g. tests).
 func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry) http.HandlerFunc {
+	return manifestHandler(id, slug, name, icon, tags, sqlFS, versions, reg, contribReg, nil)
+}
+
+// ManifestHandlerWithClient is the client-aware manifest entry used by the
+// SDK's module wiring. ManifestHandler remains unchanged for source
+// compatibility with callers that construct a manifest handler directly.
+func ManifestHandlerWithClient(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry, client *ClientSpec) http.HandlerFunc {
+	return manifestHandler(id, slug, name, icon, tags, sqlFS, versions, reg, contribReg, client)
+}
+
+func manifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry, client *ClientSpec) http.HandlerFunc {
 	if versions == nil {
 		versions = map[string]MigrationVersions{}
 	}
@@ -263,6 +287,7 @@ func ManifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
 			Description:       reg.Description(),
 			DescriptionLabels: reg.DescriptionLabels(),
+			Client:            client,
 			Dependencies:      reg.Dependencies(),
 			Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},
 			Versions:          versions,

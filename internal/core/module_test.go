@@ -115,6 +115,70 @@ func TestNew_EmptyID(t *testing.T) {
 	}
 }
 
+func TestNew_AcceptsCanonicalClientPaths(t *testing.T) {
+	t.Parallel()
+
+	client := &system.ClientSpec{Dir: "packages/user-core/client", OutputDir: "dist/browser"}
+	m, err := New(Config{ID: "media", Client: client})
+	if err != nil {
+		t.Fatalf("New() rejected canonical client paths: %v", err)
+	}
+	if m.Config().Client == nil || *m.Config().Client != *client {
+		t.Errorf("Config.Client = %+v, want %+v", m.Config().Client, client)
+	}
+}
+
+func TestNew_RejectsUnsafeClientPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		dir         string
+		outputDir   string
+		wantInError string
+	}{
+		{name: "empty dir", dir: "", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "dot dir", dir: ".", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "absolute dir", dir: "/client", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "Windows absolute dir", dir: `C:/client`, outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "Windows drive-relative dir", dir: `C:client`, outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "traversal dir", dir: "../client", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "nested traversal dir", dir: "packages/../client", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "backslash dir", dir: `client\src`, outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "dot segment dir", dir: "client/./src", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "trailing slash dir", dir: "client/", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "NUL dir", dir: "client\x00src", outputDir: "dist", wantInError: "Client.Dir"},
+		{name: "empty output", dir: "client", outputDir: "", wantInError: "Client.OutputDir"},
+		{name: "dot output", dir: "client", outputDir: ".", wantInError: "Client.OutputDir"},
+		{name: "absolute output", dir: "client", outputDir: "/dist", wantInError: "Client.OutputDir"},
+		{name: "Windows absolute output", dir: "client", outputDir: `C:/dist`, wantInError: "Client.OutputDir"},
+		{name: "traversal output", dir: "client", outputDir: "../dist", wantInError: "Client.OutputDir"},
+		{name: "backslash output", dir: "client", outputDir: `dist\browser`, wantInError: "Client.OutputDir"},
+		{name: "duplicate separator output", dir: "client", outputDir: "dist//browser", wantInError: "Client.OutputDir"},
+		{name: "trailing slash output", dir: "client", outputDir: "dist/", wantInError: "Client.OutputDir"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := New(Config{
+				ID: "media",
+				Client: &system.ClientSpec{
+					Dir:       tt.dir,
+					OutputDir: tt.outputDir,
+				},
+			})
+			if err == nil {
+				t.Fatal("New() accepted an unsafe client path")
+			}
+			if !strings.Contains(err.Error(), tt.wantInError) {
+				t.Errorf("New() error = %q, want it to name %s", err, tt.wantInError)
+			}
+		})
+	}
+}
+
 func TestNew_RejectsBadID(t *testing.T) {
 	bad := []string{
 		"Media",                                 // uppercase
@@ -631,6 +695,30 @@ func TestManifest_Returns200WithSecret(t *testing.T) {
 	}
 	if got.ID != "media" || got.Defaults.Name != "Media" || got.Defaults.Icon != "perm_media" {
 		t.Errorf("manifest identity wrong: %+v", got)
+	}
+	if got.Client != nil || strings.Contains(rec.Body.String(), `"client"`) {
+		t.Errorf("undeclared client must be omitted from the authenticated manifest: %s", rec.Body.String())
+	}
+}
+
+func TestManifest_ClientFromConfig(t *testing.T) {
+	t.Setenv("MS_INTERNAL_SECRET", "secret")
+	client := &system.ClientSpec{Dir: "client", OutputDir: "dist"}
+	m, err := New(Config{ID: "media", Name: "Media", Client: client})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if got.Client == nil || *got.Client != *client {
+		t.Errorf("manifest client = %+v, want %+v", got.Client, client)
 	}
 }
 

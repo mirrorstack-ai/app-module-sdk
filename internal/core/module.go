@@ -96,6 +96,12 @@ type Config struct {
 	// route can dynamically import the named exports declared in
 	// RegisterUI.DefaultPages. Optional — when empty, the /web route 404s.
 	WebDir string
+
+	// Client declares an optional custom-app client project. Dir is relative to
+	// the module root; OutputDir is relative to Dir. The CLI builds and publishes
+	// this output during `mirrorstack dev --tunnel`. Package identity, versions,
+	// registry details, and the build command are controlled by MirrorStack.
+	Client *system.ClientSpec
 }
 
 // Module is the core SDK instance.
@@ -208,6 +214,23 @@ var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 // the real gate; this regex catches obvious shape errors at New() time.
 var moduleSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,15}$`)
 
+func validateClientPath(field, value string) error {
+	if value == "" || value == "." || strings.ContainsAny(value, "\\:\x00") || !fs.ValidPath(value) {
+		return fmt.Errorf("mirrorstack: Config.Client.%s %q must be a non-empty canonical relative path using forward slashes", field, value)
+	}
+	return nil
+}
+
+func validateClientSpec(client *system.ClientSpec) error {
+	if client == nil {
+		return nil
+	}
+	if err := validateClientPath("Dir", client.Dir); err != nil {
+		return err
+	}
+	return validateClientPath("OutputDir", client.OutputDir)
+}
+
 // New creates a new Module.
 func New(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
@@ -225,6 +248,9 @@ func New(cfg Config) (*Module, error) {
 	}
 	if cfg.Slug != "" && !moduleSlugPattern.MatchString(cfg.Slug) {
 		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must match %s (lowercase, starts with letter, hyphens allowed, max 16 chars)", cfg.Slug, moduleSlugPattern)
+	}
+	if err := validateClientSpec(cfg.Client); err != nil {
+		return nil, err
 	}
 	m := &Module{
 		config:         cfg,
@@ -811,9 +837,9 @@ func (m *Module) mountSystemRoutes() {
 			// http.MaxBytesReader wraps only ever shrinks the effective limit
 			// to the smaller of the two.
 			smallBody := httputil.MaxBytes(64 * 1024)
-			r.With(smallBody).Get("/manifest", system.ManifestHandler(
+			r.With(smallBody).Get("/manifest", system.ManifestHandlerWithClient(
 				m.config.ID, m.config.Slug, m.config.Name, m.config.Icon, m.config.Tags,
-				m.config.SQL, m.config.Versions, m.registry, m.contribReg,
+				m.config.SQL, m.config.Versions, m.registry, m.contribReg, m.config.Client,
 			))
 			r.Route("/lifecycle", func(r chi.Router) {
 				// App and module migrations are separate tracks on disjoint
