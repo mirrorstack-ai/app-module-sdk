@@ -46,6 +46,54 @@ func TestManifest_IDAndDefaults(t *testing.T) {
 	}
 }
 
+func TestManifest_ClientDeclaration(t *testing.T) {
+	t.Parallel()
+
+	client := &ClientSpec{Dir: "client", OutputDir: "dist"}
+	handler := ManifestHandlerWithClient(
+		"media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil, client,
+	)
+	rec := manifestResponse(t, handler)
+	got := decodeManifest(t, handler)
+
+	if got.Client == nil {
+		t.Fatal("client declaration missing from manifest")
+	}
+	if *got.Client != *client {
+		t.Errorf("client = %+v, want %+v", *got.Client, *client)
+	}
+	if !strings.Contains(rec.Body.String(), `"client":{"dir":"client","outputDir":"dist"}`) {
+		t.Errorf("manifest client wire shape is not exact: %s", rec.Body.String())
+	}
+
+	withoutClient := manifestResponse(t, ManifestHandler(
+		"media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil,
+	))
+	if rec.Header().Get("X-MS-Manifest-Hash") == withoutClient.Header().Get("X-MS-Manifest-Hash") {
+		t.Fatal("manifest hash did not change after declaring a client")
+	}
+}
+
+func TestManifest_ClientOmittedWhenNil(t *testing.T) {
+	t.Parallel()
+
+	compatRec := manifestResponse(t, ManifestHandler(
+		"media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil,
+	))
+	clientAwareRec := manifestResponse(t, ManifestHandlerWithClient(
+		"media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil, nil,
+	))
+	if strings.Contains(clientAwareRec.Body.String(), `"client"`) {
+		t.Errorf("client field must be omitted for nil declarations: %s", clientAwareRec.Body.String())
+	}
+	if clientAwareRec.Body.String() != compatRec.Body.String() {
+		t.Errorf("nil client changed the compatibility manifest body\nclient-aware: %s\ncompat: %s", clientAwareRec.Body.String(), compatRec.Body.String())
+	}
+	if clientAwareRec.Header().Get("X-MS-Manifest-Hash") != compatRec.Header().Get("X-MS-Manifest-Hash") {
+		t.Error("nil client changed the compatibility manifest hash")
+	}
+}
+
 func TestManifest_StorageDeclarationIsExplicit(t *testing.T) {
 	base := registry.New()
 	baseRec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, base, nil))

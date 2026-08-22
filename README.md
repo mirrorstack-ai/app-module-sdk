@@ -67,6 +67,42 @@ func createItem(w http.ResponseWriter, r *http.Request) {
 
 No config files. No YAML. Code is the single source of truth.
 
+### Module client
+
+A module can declare a separately built client for custom web applications:
+
+```go
+import "github.com/mirrorstack-ai/app-module-sdk/system"
+
+ms.Init(ms.Config{
+    ID:   "media",
+    Name: "Media",
+    Client: &system.ClientSpec{
+        Dir:       "client",
+        OutputDir: "dist",
+    },
+})
+```
+
+- **Paths:** `Dir` is relative to the module root; `OutputDir` is relative to
+  `Dir`. Both are non-empty canonical relative paths using `/` separators.
+- **Declaration:** use the inline literal above because the CLI reads it before
+  the module starts.
+- **Build:** install dependencies locally for the runner's Linux architecture
+  and provide a non-empty `package.json#scripts.build`. The CLI runs
+  `npm run build` and requires non-empty `index.js` and `index.d.ts` roots.
+- **Development:** `mirrorstack dev --tunnel` builds, publishes, and watches by
+  default; the explicit `mirrorstack dev --tunnel --watch` form behaves the
+  same. Use `--watch=false` for a one-shot build. `--share` is not required.
+- **Runner:** Compose must use a Linux runner built from the matching CLI
+  checkout. In `ms-app-modules`, run
+  `./scripts/build-dev-runner.sh /path/to/mirrorstack-cli` once and after CLI
+  changes; preflight rejects a missing/non-executable runner or an incompatible
+  CLI version or runner protocol. It does not fingerprint same-version source
+  changes.
+- **Ownership:** MirrorStack owns installed package identity, version, registry,
+  and the fixed build command; modules declare only source and output paths.
+
 ### Struct API (for testing)
 
 ```go
