@@ -5,6 +5,15 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.5] - 2026-08-22
+
+### Added
+
+- Optional `Config.Client` / `system.ClientSpec` declarations for a module's
+  client source directory and compiled output directory.
+- `system.ManifestHandlerWithClient`, while preserving the existing
+  `system.ManifestHandler` API for source compatibility.
+
 ## [v0.4.4] - 2026-08-17
 
 Additive only — 2 exported symbols added (`ms.MintMemberAssertion`,
