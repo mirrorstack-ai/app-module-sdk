@@ -28,6 +28,8 @@ package httpx
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -187,4 +189,65 @@ func ParseTimeIDCursor(r *http.Request) TimeIDCursor {
 		return TimeIDCursor{}
 	}
 	return TimeIDCursor{Time: parsed, ID: id}
+}
+
+// DefaultMaxBytes is the size a tool result should aim to stay under.
+//
+// It is a guideline, not a limit the SDK enforces: the platform caps a tool
+// result at 32 KB when it stores one, and an agent's context is the real
+// scarce resource. 16 KB leaves room for the envelope and for the rest of the
+// conversation.
+const DefaultMaxBytes = 16 << 10
+
+// Cap returns at most as many leading items as fit within maxBytes once
+// marshalled, marking the page Truncated when it had to drop any.
+//
+// 🔴 IT DROPS WHOLE ITEMS, NEVER BYTES. The obvious way to bound a result is
+// to marshal it and cut the string, and that produces INVALID JSON — the reader
+// gets a parse error instead of data, or worse, a half-written object it
+// silently mis-reads. Dropping whole items keeps the result parseable at every
+// size, which is what makes truncation something a caller can reason about
+// rather than something that breaks them.
+//
+// The page it returns is self-describing: Truncated says it happened, Note says
+// how many were dropped and how to get the rest, and NextCursor (when the
+// caller supplies cursorOf) is the position to resume from. A model reading it
+// can ask for the next page instead of concluding the list is short.
+//
+// Binary does not belong here at all. A tool returning bytes should return a
+// presigned URL (storage.PresignGet) and let the caller fetch it out of band —
+// base64 in a tool result spends the agent's context on data it cannot read.
+func Cap[T any](items []T, maxBytes int, cursorOf func(T) string) Page[T] {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	kept := items
+	for len(kept) > 0 {
+		encoded, err := json.Marshal(kept)
+		if err != nil {
+			// Unmarshalable items are the caller's bug, not a size problem.
+			// Return them and let the marshal fail where it can be diagnosed,
+			// rather than silently returning an empty page.
+			return NewPage(items, false, nil)
+		}
+		if len(encoded) <= maxBytes {
+			break
+		}
+		// Halve rather than step: a single oversized item would otherwise make
+		// this O(n) marshals of an already-too-large slice.
+		kept = kept[:len(kept)/2]
+	}
+
+	dropped := len(items) - len(kept)
+	page := NewPage(kept, dropped > 0, cursorOf)
+	if dropped == 0 {
+		return page
+	}
+	note := fmt.Sprintf("%d of %d items omitted to stay under %d bytes", dropped, len(items), maxBytes)
+	if page.NextCursor != nil {
+		note += "; pass the cursor to continue"
+	} else {
+		note += "; narrow the query to see the rest"
+	}
+	return page.Truncate(note)
 }

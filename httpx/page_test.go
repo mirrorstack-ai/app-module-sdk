@@ -3,6 +3,7 @@ package httpx
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,6 +135,91 @@ func TestNewPage(t *testing.T) {
 		}
 		if p.NextCursor == nil {
 			t.Error("Truncate cleared NextCursor — a page can be both cut AND have successors")
+		}
+	})
+}
+
+// Cap must drop whole ITEMS, never bytes.
+//
+// 🔴 THE OBVIOUS IMPLEMENTATION IS THE BROKEN ONE. Marshalling and cutting the
+// string is how most size caps get written, and it produces INVALID JSON — the
+// reader gets a parse error instead of data, or a half-written object it
+// silently mis-reads. Every case below asserts the result is still parseable.
+func TestCap(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		ID   int64  `json:"id"`
+		Body string `json:"body"`
+	}
+	cursorOf := func(r row) string { return IDCursor(r.ID).String() }
+
+	items := make([]row, 40)
+	for i := range items {
+		items[i] = row{ID: int64(i + 1), Body: strings.Repeat("x", 100)}
+	}
+
+	t.Run("everything fits", func(t *testing.T) {
+		t.Parallel()
+		p := Cap(items, 1<<20, cursorOf)
+		if len(p.Items) != len(items) || p.Truncated {
+			t.Errorf("Cap dropped %d items that fit", len(items)-len(p.Items))
+		}
+		if p.NextCursor != nil {
+			t.Error("a complete page carries a NextCursor")
+		}
+	})
+
+	t.Run("stays valid JSON and says it was cut", func(t *testing.T) {
+		t.Parallel()
+		p := Cap(items, 900, cursorOf)
+		if !p.Truncated || p.Note == "" {
+			t.Fatalf("Cap dropped items without saying so: %+v", p)
+		}
+		if len(p.Items) == 0 || len(p.Items) == len(items) {
+			t.Fatalf("kept %d of %d items", len(p.Items), len(items))
+		}
+		body, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("a truncated page must still marshal: %v", err)
+		}
+		var round Page[row]
+		if err := json.Unmarshal(body, &round); err != nil {
+			t.Fatalf("a truncated page must still PARSE — this is the whole point: %v", err)
+		}
+		if len(round.Items) != len(p.Items) {
+			t.Errorf("round trip changed the item count: %d vs %d", len(round.Items), len(p.Items))
+		}
+		// And it must say where to resume, or the caller cannot recover the rest.
+		if round.NextCursor == nil {
+			t.Error("a truncated page carries no cursor, so the dropped items are unreachable")
+		}
+		if !strings.Contains(round.Note, "omitted") {
+			t.Errorf("Note = %q, want it to say what happened", round.Note)
+		}
+	})
+
+	t.Run("a single oversized item still yields a valid page", func(t *testing.T) {
+		t.Parallel()
+		huge := []row{{ID: 1, Body: strings.Repeat("x", 5000)}}
+		p := Cap(huge, 100, cursorOf)
+		body, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := json.Unmarshal(body, &Page[row]{}); err != nil {
+			t.Fatalf("must still parse: %v", err)
+		}
+		// Nothing fit, so the page is empty AND says so — never a silent
+		// empty list the caller reads as "there is nothing".
+		if len(p.Items) != 0 || !p.Truncated {
+			t.Errorf("page = %+v, want empty and marked truncated", p)
+		}
+	})
+
+	t.Run("zero maxBytes falls back to the default", func(t *testing.T) {
+		t.Parallel()
+		if p := Cap(items, 0, cursorOf); len(p.Items) != len(items) {
+			t.Errorf("kept %d of %d under the default cap", len(p.Items), len(items))
 		}
 	})
 }
