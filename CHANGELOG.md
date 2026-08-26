@@ -28,7 +28,12 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   as the way to avoid owning the platform's spelling at all.
 
 Additive only — 1 exported symbol added (`ms.AbsorbInfra`), none removed and none
-changed, so this is a PATCH per the pre-1.0 convention.
+changed, so this is a PATCH per the pre-1.0 convention. Measured, not asserted:
+`go doc -all` over every non-`internal/`, non-`examples/` package with `GOWORK=off`,
+diffed against `origin/main`, goes 240 → 241 with a single `>` line. One exported
+STRUCT FIELD is also added — `system.ManifestPayload.AbsorbInfra` — which the
+func/type diff does not count; it is additive on an existing type and breaks no
+caller, so the patch bump stands either way.
 
 ## [v0.4.5] - 2026-08-22
 
