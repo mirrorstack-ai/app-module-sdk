@@ -534,11 +534,11 @@ func (q *DependencyQuery) resultDeployed(ctx context.Context) (*DependencyResult
 // first.
 //
 // The dev cross-module guard does not fire here, and that is REQUIRED rather
-// than accidental: guardQuerier wraps db.Querier (db_guard.go:186) while
+// than accidental: guardQuerier wraps db.Querier (db_guard.go) while
 // db.TxReadOnly hands fn a raw pgx.Tx and queryDynamicSelect calls tx.Query
 // directly. Do NOT "fix" this by routing through Module.DB/Module.Tx — the
 // guard's moduleTableRe would reject a foreign m<hex>_* name, and circularly
-// so, since its own error text tells users to call ms.DependencyDB. db.go:81's
+// so, since its own error text tells users to call ms.DependencyDB. db.go's
 // seedConn is the existing precedent for a documented, deliberate bypass.
 func (q *DependencyQuery) readGrantedRows(ctx context.Context, physical string) ([]map[string]any, bool, error) {
 	// Schema comes from the trusted envelope (SchemaFrom), never module input;

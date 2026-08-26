@@ -107,7 +107,7 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 	// Plane gate. m.devMode is the SDK's canonical "running under the
 	// `mirrorstack dev` lifecycle" signal — captured once at New() from
 	// devMigrateEnabled(), which is MS_LOCAL_DB_URL AND not Lambda AND not
-	// task-worker (dev_migrate.go:32). It is also the exact flag that attaches
+	// task-worker (dev_migrate.go). It is also the exact flag that attaches
 	// devAppSchemaMiddleware (module.go), so gating on it makes "the local DB is
 	// reachable" and "the app schema is in ctx" ONE condition instead of two.
 	//
@@ -152,7 +152,7 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 
 	// The directory row arrived from ANOTHER process over a shared table, so it
 	// is untrusted input no matter how honest its author. moduleIDPattern
-	// (module.go:196) is the first of three gates; selectIdentPattern inside
+	// (module.go) is the first of three gates; selectIdentPattern inside
 	// buildDynamicSelect is the second, pgx.Identifier.Sanitize() the third.
 	// Plain error, no sentinel: a malformed directory row is a broken local
 	// session, not an authorization verdict about this consumer.
@@ -160,12 +160,12 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 		return nil, true, fmt.Errorf("mirrorstack: DependencyDB: dependency directory row for %q carries an invalid module id %q", q.dep.producer, entry.ModuleID)
 	}
 
-	// buildDynamicSelect hard-fails on zero columns (select.go:120) — the
+	// buildDynamicSelect hard-fails on zero columns (select.go) — the
 	// blessed composer never emits SELECT *. The proxy supports an empty
 	// projection only because it expands it via a visibleColumns
 	// information_schema probe run THROUGH THE RESTRICTED CONSUMER ROLE, which
 	// is what makes that probe an authorization signal at all. Locally
-	// resolvePoolFor (db.go:103) hands back the shared SUPERUSER pool, so the
+	// resolvePoolFor (db.go) hands back the shared SUPERUSER pool, so the
 	// identical probe would see every table and carry no authorization meaning
 	// whatsoever — it would silently WIDEN the surface and hand back columns
 	// that have no GRANT in prod. Falling through to the proxy is equally wrong
@@ -178,12 +178,12 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 	// app_twkpa_edu and app_dev share ONE database under ONE superuser, so this
 	// schema binding is the ENTIRE tenant-isolation story locally. It must come
 	// from db.SchemaFrom(ctx) — injected by devAppSchemaMiddleware
-	// (module.go:168) from the trusted X-MS-App-ID header — and from nothing
+	// (module.go) from the trusted X-MS-App-ID header — and from nothing
 	// caller-derived, ever. Prod makes a cross-app read structurally impossible
 	// via per-app schema plus per-(app,module) role; here only this does.
 	// Checking explicitly also avoids requireSafeSelectIdentifiers failing
 	// opaquely with errUnsafeSelectIdentifier on an empty Schema
-	// (select.go:171).
+	// (select.go).
 	schema := db.SchemaFrom(ctx)
 	if schema == "" {
 		return nil, true, errors.New("mirrorstack: DependencyDB: this request carries no app scope (no X-MS-App-ID header), so there is no app schema to read the producer's table from")
@@ -247,12 +247,12 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 	}
 
 	// The local path loses the implicit 15s bound the proxy had via callHTTP
-	// (call.go:29), so re-establish it with the SAME callTimeout constant —
+	// (call.go), so re-establish it with the SAME callTimeout constant —
 	// both dev transports then carry an identical wall-clock bound and no new
 	// number enters the codebase. Deliberately NOT a SET LOCAL
 	// statement_timeout: there are zero occurrences of that anywhere in db/ or
-	// internal/core/, and bounding is Go-side by convention (call.go:29,
-	// task.go:118).
+	// internal/core/, and bounding is Go-side by convention (callHTTP in call.go,
+	// task.go).
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
@@ -344,9 +344,9 @@ func authorizeLocalRead(deps []registry.Dependency, entry devModuleEntry, table 
 	}
 	// A consumer-side miss and a producer-side miss are DELIBERATELY
 	// indistinguishable — one bool here, one message at the call site. This
-	// preserves the anti-probing collapse documented at dependency_db.go:78 and
-	// mirrored by both existing planes (resultDeployed's :467 and the proxy's
-	// collapsed 403). A consumer must not be able to enumerate a sibling's
+	// preserves the anti-probing collapse documented on errDevPlaneOnly in
+	// dependency_db.go and mirrored by both existing planes
+	// (DependencyQuery.result's deployed branch and the proxy's collapsed 403). A consumer must not be able to enumerate a sibling's
 	// exposure set by error shape.
 	return false
 }
@@ -366,7 +366,7 @@ func authorizeLocalRead(deps []registry.Dependency, entry devModuleEntry, table 
 // source is the proof: oauth-core/sql/app/0001_init.up.sql declares
 // `CREATE TABLE IF NOT EXISTS __MODULE_ID___users` — three underscores, i.e.
 // token + "_" + "users" — resolved by placeholderQuerier.resolve
-// (db_placeholder.go:69) with p.id == Config.ID. A second "m" yields a name
+// (db_placeholder.go) with p.id == Config.ID. A second "m" yields a name
 // that 42P01s.
 //
 // The shape check here rather than in buildDynamicSelect turns an opaque
@@ -383,10 +383,10 @@ func localPhysicalName(producerID, table string) (string, error) {
 // values a dev-plane caller already receives, so switching a co-located read
 // off the proxy cannot change what the consumer sees.
 //
-// The proxy returns JSON, decoded with dec.UseNumber() (dependency_db.go:420):
+// The proxy returns JSON, decoded with dec.UseNumber() (DependencyQuery.result in dependency_db.go):
 // uuid arrives as a string (the platform's normalizeWireRows rewrites the
 // binary form), timestamptz as RFC3339, every number as json.Number.
-// pgx.CollectRows(pgx.RowToMap) (select.go:98) returns NATIVE Go types.
+// pgx.CollectRows(pgx.RowToMap) (queryDynamicSelect in select.go) returns NATIVE Go types.
 // Measured against the live dev Postgres:
 //
 //	uuid        -> [16]uint8        fmt.Sprint "[202 60 140 239 ...]"
@@ -434,7 +434,7 @@ func normalizeLocalRows(rows []map[string]any) ([]map[string]any, error) {
 	if out == nil {
 		// A nil input marshals to `null` and decodes straight back to nil, so
 		// this guard is load-bearing rather than defensive: Rows is never nil
-		// on success (dependency_db.go:429).
+		// on success (DependencyQuery.result in dependency_db.go).
 		out = []map[string]any{}
 	}
 	return out, nil
