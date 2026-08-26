@@ -5,6 +5,31 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.6] - 2026-08-26
+
+### Added
+
+- `ms.AbsorbInfra()` — pass EVERY platform infrastructure metric through to the
+  app owner at a price of 0, for a module that bills through its own meters and
+  adds no infrastructure passthrough on top. One manifest boolean
+  (`absorbInfra`); the platform expands the set from its own catalog at publish,
+  so a metric introduced after a module ships is absorbed with no republish and
+  no list of platform metric names lives in module code to go stale. An explicit
+  `ms.Meter("infra.X", ms.Price(n))` is applied after the absorb and WINS.
+
+### Fixed
+
+- The documented reserved-metric example named `infra.compute.ms`, which billing
+  migration 019 re-chartered to `infra.compute.walltime.ms` and 022 deleted. A
+  module following it declared a price for a metric that does not exist — and
+  because the platform validates the override batch all-or-nothing and only logs
+  the rejection, that one stale name silently took the module's OTHER overrides
+  down with it. Corrected everywhere it is shown, with `ms.AbsorbInfra()` named
+  as the way to avoid owning the platform's spelling at all.
+
+Additive only — 1 exported symbol added (`ms.AbsorbInfra`), none removed and none
+changed, so this is a PATCH per the pre-1.0 convention.
+
 ## [v0.4.5] - 2026-08-22
 
 ### Added
