@@ -675,3 +675,22 @@ func TestMCP_PreservesRegistrationOrder(t *testing.T) {
 		t.Errorf("order not preserved: %+v", got)
 	}
 }
+
+// AbsorbInfra is the ONE piece of infra pricing a module declares by flag rather
+// than by name. The test that matters is not that the setter works — it is that
+// the flag reaches the manifest, because the whole reason it exists is to keep a
+// list of platform metric names out of module code (see Registry.AbsorbInfra).
+func TestAbsorbInfra_DefaultsOffAndSetsOnce(t *testing.T) {
+	r := New()
+	if r.AbsorbsInfra() {
+		t.Fatal("AbsorbsInfra() = true before any declaration; a module must opt in")
+	}
+	r.AbsorbInfra()
+	if !r.AbsorbsInfra() {
+		t.Fatal("AbsorbsInfra() = false after AbsorbInfra()")
+	}
+	r.AbsorbInfra() // idempotent — a second call is not an error or a toggle
+	if !r.AbsorbsInfra() {
+		t.Fatal("AbsorbsInfra() flipped off on a repeat declaration")
+	}
+}

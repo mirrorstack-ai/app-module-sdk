@@ -49,12 +49,22 @@ func registerMeter() {
 
 	// Reserved infra metric: PRICE-OVERRIDE only. Here we set the per-unit
 	// customer passthrough for platform compute to 0 — absorbing platform
-	// compute into our own pricing (we still owe the platform the measured COGS
-	// regardless; this only changes what OUR customer is billed). kind/unit are
-	// platform-owned, so we pass ms.Price alone — adding ms.Counter/ms.Gauge or
-	// ms.Unit here would panic, and ms.Record("infra.compute.ms", ...) is
-	// rejected (the platform meters compute at its own chokepoint).
-	ms.Meter("infra.compute.ms", ms.Price(0))
+	// compute into our own pricing (this only changes what OUR customer is
+	// billed). kind/unit are platform-owned, so we pass ms.Price alone — adding
+	// ms.Counter/ms.Gauge or ms.Unit here would panic, and
+	// ms.Record("infra.compute.walltime.ms", ...) is rejected (the platform
+	// meters compute at its own chokepoint).
+	//
+	// 🔴 NAMING A RESERVED METRIC MEANS OWNING THE PLATFORM'S SPELLING OF IT.
+	// This example said "infra.compute.ms" until the platform re-chartered that
+	// metric to "infra.compute.walltime.ms" and then deleted the old row — after
+	// which the override matched nothing and, being validated all-or-nothing,
+	// took the module's other overrides down with it. To zero the whole set (the
+	// usual want for a module that charges through its own meters), call
+	// ms.AbsorbInfra() instead and name nothing:
+	//
+	//	ms.AbsorbInfra()
+	ms.Meter("infra.compute.walltime.ms", ms.Price(0))
 
 	ms.Platform(func(r chi.Router) {
 		r.Post("/orders", func(w http.ResponseWriter, r *http.Request) {

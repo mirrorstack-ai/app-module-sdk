@@ -67,7 +67,12 @@ type ManifestPayload struct {
 	// this at install/publish, so the catalog is authoritative before any usage
 	// event arrives. Omitted when the module declares no metrics.
 	Metrics []registry.MetricDecl `json:"metrics,omitempty"`
-	MCP     ManifestMCP           `json:"mcp"`
+	// AbsorbInfra is ms.AbsorbInfra(): pass EVERY platform infra metric through
+	// to the app owner at 0. A BOOLEAN, deliberately — the platform expands it
+	// against its own catalog, so no list of infra metric names travels in a
+	// manifest to go stale. Omitted when the module did not declare it.
+	AbsorbInfra bool        `json:"absorbInfra,omitempty"`
+	MCP         ManifestMCP `json:"mcp"`
 	// UI is the module's declared UI surface (RegisterUI). Nil/absent when
 	// the module ships no UI — callers must nil-check before reading.
 	UI *registry.ModuleUI `json:"ui,omitempty"`
@@ -299,6 +304,7 @@ func manifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, ve
 			Permissions:       reg.Permissions(),
 			Resources:         ManifestResources{Storage: reg.StorageRequired()},
 			Metrics:           reg.Metrics(),
+			AbsorbInfra:       reg.AbsorbsInfra(),
 			MCP:               buildManifestMCP(reg),
 			UI:                localizeUIPages(reg.UI()),
 			Provides:          contribSlots,
