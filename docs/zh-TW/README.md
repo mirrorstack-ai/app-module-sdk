@@ -10,6 +10,7 @@
 
 ## 核心概念
 
+- [Module structure](./concepts/module-structure.md) — 每個已發布模組共用的骨架，以及決定檔案該放哪個目錄的那一個問題。
 - [Agent tools](./concepts/agent-tools.md) — MCP tools 與 resources 的差別,以及為什麼 module 是 agent-first。
 - [Dependencies](./concepts/dependencies.md) — Required 與 optional 相依、SemVer version constraint、 `ms.Needs` 用法。
 - [Manifest](./concepts/manifest.md) — Manifest endpoint 的完整欄位與用途。
