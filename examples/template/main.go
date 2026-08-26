@@ -27,7 +27,12 @@ var postInitHooks []func()
 
 func main() {
 	if err := ms.Init(ms.Config{
-		ID:          "template",
+		ID: "template",
+		// Slug is the catalog handle. The example omitted it entirely, which
+		// taught a Config the catalog will not accept: `mirrorstack module
+		// register` derives the module's public @owner/slug from it, and the
+		// SDK caps it at 16 chars (moduleSlugPattern). Optional in dev only.
+		Slug:        "template",
 		Name:        "Template",
 		Icon:        "extension",
 		Description: "A MirrorStack module template. Replace this description with your module's purpose.",

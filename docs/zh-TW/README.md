@@ -21,5 +21,8 @@
 
 ## 其他
 
-- [Template module](../../examples/template/) — CLI 會據此複製的 scaffold。
+- [Template module](../../examples/template/) — 完整的範例模組：cache、events、
+  meter、notifications、schedule、storage 與 tasks 都在同一處。
+  這**不是** `mirrorstack module init` 產生的內容——CLI 使用自己維護的精簡
+  範本（`templates/module/`）。想看 API 怎麼用就讀這份；要開新專案請用 CLI。
 - [Changelog](../../CHANGELOG.md)。

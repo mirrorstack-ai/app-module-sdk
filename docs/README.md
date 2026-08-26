@@ -22,5 +22,9 @@ Reference + conceptual guides for building MirrorStack modules in Go.
 
 ## Related
 
-- [Template module](../examples/template/) — working scaffold the CLI pulls from.
+- [Template module](../examples/template/) — a complete worked module: cache,
+  events, meter, notifications, schedule, storage and tasks in one place.
+  It is NOT what `mirrorstack module init` writes — the CLI vendors its own
+  minimal templates under `templates/module/`. Read this one to see an API
+  in use; run the CLI to start a project.
 - [Changelog](../CHANGELOG.md).

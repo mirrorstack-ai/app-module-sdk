@@ -86,6 +86,23 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 // MCPResource registers an agent-readable resource on the default module. The
 // handler returns current content on demand. Output schema is derived from Out.
 // Panics before Init or on schema derivation failure.
+//
+// Deprecated: nothing can reach an MCP resource. The dispatch MCP server
+// answers `method not found` to every resources/* call — its v1 capability set
+// is tools only, by design (api-platform, MCPServerHandler's JSON-RPC switch),
+// and the SDK never advertises a resources capability either. A registered
+// resource is therefore served on the module's own router and read by nobody:
+// adoption across the fleet is 0 of 11 modules, which is the expected outcome
+// for a surface with no client.
+//
+// Expose the same data as an MCPTool with no arguments. A tool is reachable,
+// it carries the same derived output schema, and it can be annotated read-only
+// (see the Tool* options) so an agent treats it exactly as it would a resource.
+//
+// This will be removed once the last caller is gone. It is not removed now
+// because doing so is a breaking change to a published module API, and there
+// is no evidence anyone is calling it — only evidence that it would not work
+// if they did.
 func MCPResource[Out any](name, description string, handler func(ctx context.Context) (Out, error)) {
 	m := mustDefault("MCPResource")
 	schema, err := deriveMCPSchema[Out]()
