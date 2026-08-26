@@ -340,9 +340,29 @@ func MetricUnitLabel(l Label) MetricOption { return meter.MetricUnitLabel(l) }
 // as does a duplicate name, an invalid name, or conflicting kinds.
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
-//	ms.Meter("infra.compute.ms", ms.Price(0)) // absorb platform compute
+//	ms.Meter("infra.compute.walltime.ms", ms.Price(0)) // absorb platform compute
+//
+// To absorb EVERY platform infra metric rather than name them one at a time,
+// call AbsorbInfra — a metric name written here is a copy of the platform's
+// catalog and goes stale when the platform renames one.
 func Meter(name string, opts ...MetricOption) {
 	core.Meter(name, opts...)
+}
+
+// AbsorbInfra passes EVERY platform infrastructure metric through to the app
+// owner at a price of 0 — compute, egress, storage, AI tokens, and whatever the
+// platform meters next. Use it when your module bills through its OWN meters and
+// adds no infrastructure passthrough on top.
+//
+// One flag, no metric names: the platform expands the set from its own catalog
+// at publish, so a metric introduced after your module shipped is absorbed
+// without a republish. An explicit ms.Meter("infra.X", ms.Price(n)) is applied
+// after the absorb and wins.
+//
+//	ms.AbsorbInfra()                                       // baseline: all infra at 0
+//	ms.Meter("infra.egress.api.bytes", ms.Price(120_000))  // …except egress
+func AbsorbInfra() {
+	core.AbsorbInfra()
 }
 
 // Record emits a usage event for the metric DECLARED (via ms.Meter) under name

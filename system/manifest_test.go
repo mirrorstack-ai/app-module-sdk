@@ -602,3 +602,35 @@ func TestManifest_ProvidesOmitPayloadWhenUnderived(t *testing.T) {
 		t.Errorf("expected \"payload\" key omitted for a slot with no schema, got: %s", rec.Body.String())
 	}
 }
+
+// 🔴 THE FLAG HAS TO REACH THE WIRE, OR ms.AbsorbInfra() IS DECORATION. The
+// platform expands the absorbed set from its own catalog keyed on this one
+// boolean; a manifest that drops it declares nothing, and the module silently
+// keeps passing infrastructure cost through to the app owner.
+func TestManifest_AbsorbInfra(t *testing.T) {
+	t.Parallel()
+
+	off := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil))
+	if off.AbsorbInfra {
+		t.Error("absorbInfra = true for a module that never declared it")
+	}
+
+	reg := registry.New()
+	reg.AbsorbInfra()
+	on := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, reg, nil))
+	if !on.AbsorbInfra {
+		t.Error("absorbInfra = false after ms.AbsorbInfra()")
+	}
+}
+
+// omitempty keeps the key out of the body entirely for the overwhelming majority
+// of modules, so an older platform reading this manifest sees exactly what it
+// saw before rather than a new field it must know to ignore.
+func TestManifest_AbsorbInfraOmittedWhenUndeclared(t *testing.T) {
+	t.Parallel()
+
+	rec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, registry.New(), nil))
+	if body := rec.Body.String(); strings.Contains(body, "absorbInfra") {
+		t.Errorf("absorbInfra present in a manifest that never declared it: %s", body)
+	}
+}

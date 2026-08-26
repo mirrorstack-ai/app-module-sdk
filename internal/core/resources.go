@@ -139,7 +139,12 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 // package-level wrapper's mustDefault guards the before-Init case).
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
-//	ms.Meter("infra.compute.ms", ms.Price(0)) // reserved price-override
+//	ms.Meter("infra.compute.walltime.ms", ms.Price(0)) // reserved price-override
+//
+// To zero EVERY platform infra metric at once — the usual want for a module that
+// charges through its own meters — call AbsorbInfra instead of listing them.
+// A metric name written here is a copy of the platform's catalog and goes stale
+// the first time the platform renames one (infra.compute.ms already did).
 func (m *Module) Meter(name string, opts ...meter.MetricOption) {
 	d := meter.DeclFromOptions(name, opts...)
 	// Declare validates the name + custom/reserved option rules and registers
@@ -159,6 +164,31 @@ func (m *Module) Meter(name string, opts ...meter.MetricOption) {
 		decl.UnitLabels = d.UnitLabel.Resolve()
 	}
 	m.registry.AddMetric(decl)
+}
+
+// AbsorbInfra declares that this module passes EVERY platform infrastructure
+// metric through to the app owner at a price of 0 — compute, egress, storage,
+// AI tokens, and whatever the platform meters next. Use it when the module
+// bills its customer through its OWN meters and adds no infrastructure
+// passthrough on top.
+//
+// 🔴 THE MODULE NAMES NOTHING. This is one manifest flag; the platform expands
+// it against its own metric catalog at publish, so a metric introduced after
+// this module shipped is absorbed with no republish. The alternative — a
+// Meter("infra.X", Price(0)) line per metric — is a copy of a catalog the module
+// does not own, and it has already gone stale once: infra.compute.ms was
+// re-chartered to infra.compute.walltime.ms and then deleted, so every module
+// still naming it declared nothing at all.
+//
+// An explicit Meter("infra.X", Price(n)) is applied AFTER the absorb and WINS:
+//
+//	ms.AbsorbInfra()                                       // baseline: all infra at 0
+//	ms.Meter("infra.egress.api.bytes", ms.Price(120_000))  // …except egress
+//
+// Absorbing changes what the APP OWNER is billed for that metric. It does not
+// make the underlying cost disappear.
+func (m *Module) AbsorbInfra() {
+	m.registry.AbsorbInfra()
 }
 
 // Record emits a usage event for the metric declared (via Meter) under name —
@@ -190,6 +220,10 @@ func Storage(ctx context.Context) (storage.Storer, error) {
 
 // RequireStorage declares storage on the default module created by Init.
 func RequireStorage() { mustDefault("RequireStorage").RequireStorage() }
+
+// AbsorbInfra declares that this module passes EVERY platform infrastructure
+// metric through to the app owner at 0. See Module.AbsorbInfra.
+func AbsorbInfra() { mustDefault("AbsorbInfra").AbsorbInfra() }
 
 // Meter declares a usage metric on the default module (side effect, no return).
 // Panics before Init.

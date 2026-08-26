@@ -233,6 +233,7 @@ type Registry struct {
 	mcpTools              []MCPToolDecl
 	mcpResources          []MCPResourceDecl
 	storageRequired       bool
+	absorbInfra           bool
 	ui                    *ModuleUI
 }
 
@@ -251,6 +252,33 @@ func (r *Registry) RequireStorage() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.storageRequired = true
+}
+
+// AbsorbInfra declares that this module passes EVERY platform infrastructure
+// metric through to the app owner at a price of 0 — it bills through its own
+// meters and adds no infrastructure passthrough on top.
+//
+// 🔴 IT SETS A FLAG, IT DOES NOT ENUMERATE ANYTHING. The platform expands the
+// set from its own catalog at publish, so a metric added next quarter is
+// absorbed with no republish. A module that instead listed the infra metric
+// names would be wrong the first time the platform renamed one — which has
+// already happened once: infra.compute.ms was re-chartered to
+// infra.compute.walltime.ms and then deleted, and every module still naming the
+// old one silently declared nothing.
+//
+// An explicit Meter("infra.X", Price(n)) is applied AFTER the absorb and WINS,
+// so "absorb everything except egress, which I mark up" is expressible.
+func (r *Registry) AbsorbInfra() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.absorbInfra = true
+}
+
+// AbsorbsInfra reports whether AbsorbInfra was declared.
+func (r *Registry) AbsorbsInfra() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.absorbInfra
 }
 
 // StorageRequired reports whether RequireStorage was declared.
