@@ -18,9 +18,17 @@ There is one question, and it decides which directory a file goes in:
 > - **Yes** — it runs per request → `internal/handlers/`
 
 `declare/` mutates the SDK registry once, at startup, before `ms.Start()`.
-`internal/handlers/` answers requests, forever, after it. Nothing in `declare/`
-should reference a `*http.Request`, and nothing in `internal/handlers/` should
-call `ms.RegisterPermission` or `ms.ContributesTo`.
+`internal/handlers/` answers requests, forever, after it. Nothing in
+`internal/handlers/` should call `ms.RegisterPermission` or `ms.ContributesTo`.
+
+**One exception, and it is a real one.** `ms.OnEvent` and `ms.Cron` take a
+handler with an HTTP shape, and every module that uses them keeps that handler
+in `declare/` beside its subscription. Moving it to `internal/handlers/` would
+need `declare/` to import `handlers`, which already imports `declare` — so the
+honest options are an import cycle or a third package, and the fleet settled on
+keeping them together. What `declare/` must never do is **mount a route**:
+`ms.Public` / `ms.Platform` / `ms.Internal` belong in `internal/handlers/`, and
+`scripts/verify-module.sh` enforces exactly that.
 
 That split is not aesthetic. The declaration set becomes the **manifest**, and
 the manifest is what the platform reads to decide what a module may do —
