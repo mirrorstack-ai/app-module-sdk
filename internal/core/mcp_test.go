@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -397,4 +398,69 @@ func mustSchema[T any](t *testing.T) json.RawMessage {
 		t.Fatal(err)
 	}
 	return schema
+}
+
+// The Tool* options must produce the MCP spec's annotations object — and must
+// produce NOTHING when the module declared nothing.
+//
+// 🔴 THE ABSENT CASE IS THE LOAD-BEARING ONE. An unset hint has to stay off the
+// wire, because absent means "the module said nothing" while false means "the
+// module said no". A reader that cannot tell those apart has lost the only
+// thing a hint is for — and defaulting readOnly to true would silently vouch
+// for every tool ever written, including the ones that delete things.
+func TestMCPTool_Annotations(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	declare := func(name string, opts ...MCPToolOption) registry.MCPToolDecl {
+		t.Helper()
+		MCPTool(name, "d", func(_ context.Context, a greetArgs) (greetResult, error) {
+			return greetResult{}, nil
+		}, opts...)
+		for _, d := range m.registry.MCPTools() {
+			if d.Name == name {
+				return d
+			}
+		}
+		t.Fatalf("tool %q was not registered", name)
+		return registry.MCPToolDecl{}
+	}
+
+	if got := declare("plain").Annotations; got != nil {
+		t.Errorf("an un-annotated tool carries annotations = %s, want nil — absent must "+
+			"stay absent so a reader can tell 'said nothing' from 'said no'", got)
+	}
+
+	got := declare("marked", ToolReadOnly(), ToolIdempotent(), ToolTitle("Marked")).Annotations
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("annotations are not an object: %v (%s)", err, got)
+	}
+	for key, want := range map[string]any{
+		"readOnlyHint":   true,
+		"idempotentHint": true,
+		"title":          "Marked",
+	} {
+		if fields[key] != want {
+			t.Errorf("annotations[%q] = %v, want %v (%s)", key, fields[key], want, got)
+		}
+	}
+	// A hint that was never declared must not appear at all — not as false.
+	if _, present := fields["destructiveHint"]; present {
+		t.Errorf("undeclared destructiveHint is present: %s", got)
+	}
+
+	if got := declare("dangerous", ToolDestructive()).Annotations; !strings.Contains(string(got), `"destructiveHint":true`) {
+		t.Errorf("ToolDestructive() produced %s, want destructiveHint:true", got)
+	}
+
+	// Marshalled from a map, so keys are sorted and the manifest bytes are
+	// stable across boots — a reshuffling manifest looks like a content change
+	// to every consumer that hashes it.
+	a := declare("stable-a", ToolReadOnly(), ToolTitle("T")).Annotations
+	b := declare("stable-b", ToolTitle("T"), ToolReadOnly()).Annotations
+	if string(a) != string(b) {
+		t.Errorf("annotation bytes depend on option order: %s vs %s", a, b)
+	}
 }

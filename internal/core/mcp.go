@@ -18,6 +18,14 @@ type MCPToolOption func(*mcpToolConfig)
 
 type mcpToolConfig struct {
 	permission string // SHORT permission name; slug-qualified at registration
+	// annotations accumulates the MCP spec's per-tool hints. Pointers, not
+	// bools: an unset hint must stay ABSENT on the wire, because absent means
+	// "the module said nothing" and false means "the module said no". A reader
+	// that cannot tell those apart has lost the only thing a hint is for.
+	title       string
+	readOnly    *bool
+	destructive *bool
+	idempotent  *bool
 }
 
 // ToolPermission gates the tool on a module permission, looked up by SHORT
@@ -30,6 +38,72 @@ type mcpToolConfig struct {
 // the tool down rather than opening it — same rule as RequirePermission.
 func ToolPermission(name string) MCPToolOption {
 	return func(c *mcpToolConfig) { c.permission = name }
+}
+
+// ToolTitle sets a short human-readable display name for the tool, shown by
+// clients that render a tool list for a person. The wire NAME stays the
+// identifier; this is only for display.
+func ToolTitle(title string) MCPToolOption {
+	return func(c *mcpToolConfig) { c.title = title }
+}
+
+// ToolReadOnly declares that the tool does not modify anything.
+//
+// 🔴 DEFAULT UNSET IS NOT DEFAULT READ-ONLY. A tool that says nothing is
+// UNKNOWN, and every reader must treat unknown as "may write". Defaulting to
+// readOnly:true would silently vouch for every tool ever written, including the
+// ones that delete things — which is exactly backwards for a hint whose only
+// job is to let a caller relax.
+func ToolReadOnly() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.readOnly = &t }
+}
+
+// ToolDestructive declares that the tool changes or removes data
+// irreversibly. The platform agent renders this into the tool description the
+// model reads, so it is a real warning and not decoration.
+//
+// Declare it on anything a person would want to be asked about first. An
+// absent hint is not a promise of safety, but it is also not a warning — so a
+// destructive tool that stays silent gets treated like any other.
+func ToolDestructive() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.destructive = &t }
+}
+
+// ToolIdempotent declares that calling the tool twice with the same arguments
+// has the same effect as calling it once — which is what makes a retry safe.
+func ToolIdempotent() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.idempotent = &t }
+}
+
+// buildAnnotations renders the declared hints as the MCP spec's annotations
+// object, or nil when nothing was declared. nil is the honest encoding of
+// "this module said nothing": an empty object would read, to anything
+// downstream, as a module that considered the question.
+func (c mcpToolConfig) buildAnnotations() json.RawMessage {
+	fields := map[string]any{}
+	if c.title != "" {
+		fields["title"] = c.title
+	}
+	if c.readOnly != nil {
+		fields["readOnlyHint"] = *c.readOnly
+	}
+	if c.destructive != nil {
+		fields["destructiveHint"] = *c.destructive
+	}
+	if c.idempotent != nil {
+		fields["idempotentHint"] = *c.idempotent
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	// Marshalling a map sorts the keys, so the manifest bytes are stable across
+	// boots — a manifest that reshuffled would look like a content change to
+	// every consumer that hashes it.
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // MCPTool registers an agent-callable tool on the default module. Input and
@@ -70,7 +144,11 @@ func ToolPermission(name string) MCPToolOption {
 // Registration logs a warning naming every input field that has no
 // description.
 //
-// Optional MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").
+// Optional MCPToolOptions scope and annotate the tool: ToolPermission gates
+// it, and ToolReadOnly / ToolDestructive / ToolIdempotent / ToolTitle
+// become the MCP annotations object. Declare ToolDestructive on anything a
+// person would want to be asked about first — the platform agent renders it
+// into the description the model reads.
 //
 // Panics before Init or on schema derivation failure.
 func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error), opts ...MCPToolOption) {
@@ -97,6 +175,7 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 	if cfg.permission != "" {
 		decl.Permission, _ = m.ensurePermissionDeclared("MCPTool", cfg.permission)
 	}
+	decl.Annotations = cfg.buildAnnotations()
 	m.warnUndocumentedFields(name, inputSchema)
 	m.registry.AddMCPTool(decl)
 }

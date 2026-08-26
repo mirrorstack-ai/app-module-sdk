@@ -795,6 +795,38 @@ type MCPToolOption = core.MCPToolOption
 //	ms.MCPTool("list-users", "List users", listUsers, ms.ToolPermission("users.read"))
 func ToolPermission(name string) MCPToolOption { return core.ToolPermission(name) }
 
+// ToolTitle sets a short human-readable display name shown by clients that
+// render a tool list for a person. The wire name stays the identifier.
+//
+//	ms.MCPTool("list-users", "List users", listUsers, ms.ToolTitle("List users"))
+func ToolTitle(title string) MCPToolOption { return core.ToolTitle(title) }
+
+// ToolReadOnly declares that the tool modifies nothing.
+//
+// 🔴 UNSET IS NOT READ-ONLY. A tool that declares nothing is UNKNOWN, and every
+// reader must treat unknown as "may write". The default could not be
+// readOnly:true — that would silently vouch for every tool ever written,
+// including the ones that delete things.
+//
+//	ms.MCPTool("list-users", "List users", listUsers, ms.ToolReadOnly())
+func ToolReadOnly() MCPToolOption { return core.ToolReadOnly() }
+
+// ToolDestructive declares that the tool changes or removes data irreversibly.
+// The platform agent renders this into the tool description the model reads, so
+// it is a real warning rather than metadata.
+//
+// Declare it on anything a person would want to be asked about first. An absent
+// hint is not a promise of safety — but it is not a warning either, so a
+// destructive tool that stays silent is treated like any other.
+//
+//	ms.MCPTool("delete-user", "Delete a user", deleteUser,
+//	    ms.ToolDestructive(), ms.ToolPermission("users.write"))
+func ToolDestructive() MCPToolOption { return core.ToolDestructive() }
+
+// ToolIdempotent declares that calling the tool twice with the same arguments
+// has the same effect as calling it once — which is what makes a retry safe.
+func ToolIdempotent() MCPToolOption { return core.ToolIdempotent() }
+
 // MCPTool registers an agent-callable tool on the default module with JSON
 // Schema derived from the type parameters via reflection. Optional
 // MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").

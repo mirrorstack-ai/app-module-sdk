@@ -27,7 +27,7 @@ func toolEntries(decls []registry.MCPToolDecl) []MCPToolEntry {
 		out[i] = MCPToolEntry{
 			Name: t.Name, Description: t.Description,
 			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
-			Permission: t.Permission,
+			Permission: t.Permission, Annotations: t.Annotations,
 		}
 	}
 	return out
@@ -132,6 +132,11 @@ type MCPToolEntry struct {
 	// Permission mirrors MCPToolDecl.Permission: the slug-qualified module
 	// permission required to see and call the tool; absent when none declared.
 	Permission string `json:"permission,omitempty"`
+	// Annotations is the MCP spec's per-tool hint object (title, readOnlyHint,
+	// destructiveHint, idempotentHint, openWorldHint). The platform stores it
+	// whole and the agent renders the actionable hints into the tool
+	// description the model reads.
+	Annotations json.RawMessage `json:"annotations,omitempty"`
 }
 
 // MCPResourceEntry is the JSON wire shape for a resource.

@@ -202,8 +202,12 @@ type MCPToolDecl struct {
 	// Permission is the slug-qualified module permission gating the tool
 	// (ms.ToolPermission). Empty means none declared — the platform falls
 	// back to its membership floor.
-	Permission string         `json:"permission,omitempty"`
-	Handler    MCPToolHandler `json:"-"`
+	Permission string `json:"permission,omitempty"`
+	// Annotations is the MCP spec's per-tool hint object, built from the
+	// Tool* options. Absent when the module declared none — which means
+	// UNKNOWN to every reader, never "safe".
+	Annotations json.RawMessage `json:"annotations,omitempty"`
+	Handler     MCPToolHandler  `json:"-"`
 }
 
 // MCPResourceDecl is a registered MCP resource.
