@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -276,4 +278,123 @@ func TestMCPTool_ManifestIncludesMCPSurface(t *testing.T) {
 	if len(payload.MCP.Tools) != 1 || payload.MCP.Tools[0].Name != "greet" {
 		t.Errorf("manifest.mcp.tools = %+v, want [greet]", payload.MCP.Tools)
 	}
+}
+
+// The two schema constraints Go's json.Unmarshal ignores must actually be
+// enforced, because MCPTool's doc comment has always claimed they are.
+//
+// Before this, a tool declaring a required userId ran with userId="" when the
+// model omitted it, and a model that sent {"user_id":…} against a `userId`
+// field got the same silent zero plus no hint it had misspelled anything. A
+// wrong answer delivered confidently is worse than an error.
+func TestMCPTool_EnforcesRequiredAndUnknownArgs(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	type args struct {
+		Name  string `json:"name"`
+		Limit int    `json:"limit,omitempty"`
+	}
+	called := false
+	handler := wrapMCPToolHandler(
+		func(_ context.Context, a args) (greetResult, error) {
+			called = true
+			return greetResult{Message: a.Name}, nil
+		},
+		mustSchema[args](t),
+	)
+
+	cases := []struct {
+		name    string
+		args    string
+		wantErr bool
+		reason  string
+	}{
+		{"present", `{"name":"ada"}`, false, "the ordinary call must still work"},
+		{"optional omitted is fine", `{"name":"ada"}`, false, "limit has omitempty, so it is not required"},
+		{"explicit null satisfies presence", `{"name":null}`, false, "JSON Schema required is about the KEY, not the value"},
+		{"required missing", `{"limit":5}`, true, "name is required and absent"},
+		{"no args at all", `{}`, true, "an empty object is still missing name"},
+		{"null args", `null`, true, "no arguments at all, but name is required"},
+		{"unknown key", `{"name":"ada","user_id":"x"}`, true, "additionalProperties:false is advertised"},
+		{"misspelled required", `{"nmae":"ada"}`, true, "must not read as an absent name plus an unknown key silently"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			_, err := handler(context.Background(), json.RawMessage(tc.args))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("args %s: no error — %s", tc.args, tc.reason)
+				}
+				if !errors.Is(err, system.ErrInvalidArgs) {
+					t.Errorf("args %s: err = %v, want ErrInvalidArgs (a 400, not a 500)", tc.args, err)
+				}
+				if called {
+					t.Error("the handler ran on arguments the schema rejects")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("args %s: unexpected error %v — %s", tc.args, err, tc.reason)
+			}
+			if !called {
+				t.Error("the handler did not run on valid arguments")
+			}
+		})
+	}
+}
+
+// Registration must name the input fields a tool ships undocumented. The model
+// picks arguments from the input schema alone, and 0 of 45 shipped tools
+// documented a single field — because the jsonschema tag worked all along and
+// nothing ever said so.
+func TestMCPTool_WarnsAboutUndocumentedFields(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	var logged strings.Builder
+	m.logger = log.New(&logged, "", 0)
+
+	type documented struct {
+		Name string `json:"name" jsonschema:"description=Who to greet."`
+	}
+	type partial struct {
+		Name  string `json:"name" jsonschema:"description=Who to greet."`
+		Limit int    `json:"limit"`
+		Zzz   string `json:"zzz"`
+	}
+
+	MCPTool("documented", "d", func(_ context.Context, a documented) (greetResult, error) {
+		return greetResult{}, nil
+	})
+	if logged.Len() != 0 {
+		t.Errorf("a fully documented tool warned anyway: %s", logged.String())
+	}
+
+	MCPTool("partial", "p", func(_ context.Context, a partial) (greetResult, error) {
+		return greetResult{}, nil
+	})
+	out := logged.String()
+	if !strings.Contains(out, "MCPTool(partial)") {
+		t.Errorf("warning does not name the tool: %s", out)
+	}
+	// Sorted, so the line is stable across boots and readable in a diff.
+	if !strings.Contains(out, "limit, zzz") {
+		t.Errorf("warning does not name the undocumented fields in sorted order: %s", out)
+	}
+	if strings.Contains(out, "name") {
+		t.Errorf("warning names a field that IS documented: %s", out)
+	}
+}
+
+func mustSchema[T any](t *testing.T) json.RawMessage {
+	t.Helper()
+	schema, err := deriveMCPSchema[T]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
 }
