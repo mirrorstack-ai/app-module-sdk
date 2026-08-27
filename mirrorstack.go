@@ -827,6 +827,28 @@ func ToolDestructive() MCPToolOption { return core.ToolDestructive() }
 // has the same effect as calling it once — which is what makes a retry safe.
 func ToolIdempotent() MCPToolOption { return core.ToolIdempotent() }
 
+// ToolDigest declares how this tool's result compresses, for replay on later
+// turns.
+//
+// 🔴 THE MODULE HAS TO SAY THIS BECAUSE THE PLATFORM CANNOT GUESS IT. Tool
+// results are replayed so a later turn can still cite them, and a large one has
+// to shrink somehow. Without a digest the only option is a blind byte
+// truncation — which keeps the FIRST n bytes, and the first n bytes of a
+// fifty-row table is rows one to four. You know that "50 users, first five: …,
+// filter by role to narrow" answers more later questions in fewer tokens than
+// rows one to four do. Nothing outside your module knows that.
+//
+// It runs only when the full result is large enough to be worth shrinking, and
+// never fails the call: a digest that errors is dropped and the platform falls
+// back to truncation.
+//
+//	ms.MCPTool("users-list", "List users", listUsers,
+//	    ms.ToolDigest(func(r UsersResult) any {
+//	        return map[string]any{"total": r.Total, "sample": r.Users[:min(5, len(r.Users))]}
+//	    }),
+//	)
+func ToolDigest[Out any](fn func(Out) any) MCPToolOption { return core.ToolDigest(fn) }
+
 // MCPTool registers an agent-callable tool on the default module with JSON
 // Schema derived from the type parameters via reflection. Optional
 // MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").

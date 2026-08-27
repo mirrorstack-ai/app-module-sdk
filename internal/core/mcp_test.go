@@ -464,3 +464,79 @@ func TestMCPTool_Annotations(t *testing.T) {
 		t.Errorf("annotation bytes depend on option order: %s vs %s", a, b)
 	}
 }
+
+// A declared digest must reach the registry, and must survive a result the
+// module can actually produce.
+//
+// 🔴 WHY A MODULE DECLARES THIS AT ALL. Tool results are replayed to the model
+// on later turns, and a large one has to shrink somehow. Without a digest the
+// only option is a blind byte truncation — which keeps the FIRST n bytes, and
+// the first n bytes of a fifty-row table is rows one to four. The module knows
+// that a total plus a sample answers more later questions in fewer tokens.
+// Nothing outside the module knows that.
+func TestMCPTool_Digest(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	type listResult struct {
+		Total int      `json:"total"`
+		Users []string `json:"users"`
+	}
+	MCPTool("with-digest", "d", func(_ context.Context, _ greetArgs) (listResult, error) {
+		return listResult{}, nil
+	}, ToolDigest(func(r listResult) any {
+		return map[string]any{"total": r.Total, "sample": r.Users[:1]}
+	}))
+	MCPTool("no-digest", "d", func(_ context.Context, _ greetArgs) (listResult, error) {
+		return listResult{}, nil
+	})
+
+	byName := map[string]registry.MCPToolDecl{}
+	for _, d := range m.registry.MCPTools() {
+		byName[d.Name] = d
+	}
+	if byName["no-digest"].Digest != nil {
+		t.Error("a tool that declared no digest carries one")
+	}
+	digest := byName["with-digest"].Digest
+	if digest == nil {
+		t.Fatal("ToolDigest did not reach the registry")
+	}
+
+	full, err := json.Marshal(listResult{Total: 50, Users: []string{"ada", "grace", "alan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := digest(full)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if len(got) >= len(full) {
+		t.Errorf("digest (%d bytes) is not smaller than the result (%d)", len(got), len(full))
+	}
+	var shrunk map[string]any
+	if err := json.Unmarshal(got, &shrunk); err != nil {
+		t.Fatalf("a digest must be valid JSON: %v", err)
+	}
+	// The total is the fact a truncation would have destroyed — it lives at the
+	// END of the encoded struct for a long list, so byte-cutting loses it first.
+	if shrunk["total"] != float64(50) {
+		t.Errorf("digest lost the total: %s", got)
+	}
+
+	// 🔴 A PANICKING DIGEST MUST NOT REACH THE CALLER. The obvious digest is a
+	// slice expression and the obvious bug is `Users[:1]` on a result with no
+	// rows — which is exactly what this is. A tool that works perfectly would
+	// otherwise 500 the first time its list came back empty. It has to come
+	// back as an error the caller can drop, degrading to truncation.
+	//
+	// This test wrote that bug by accident on the first attempt, which is how
+	// the recover got added.
+	empty, err := digest(json.RawMessage(`{"total":0,"users":[]}`))
+	if err == nil {
+		t.Errorf("a panicking digest returned %s instead of an error", empty)
+	} else if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("err = %v, want it to name the panic", err)
+	}
+}

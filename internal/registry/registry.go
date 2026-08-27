@@ -208,7 +208,15 @@ type MCPToolDecl struct {
 	// UNKNOWN to every reader, never "safe".
 	Annotations json.RawMessage `json:"annotations,omitempty"`
 	Handler     MCPToolHandler  `json:"-"`
+	// Digest compresses THIS tool's result for replay on later turns. nil when
+	// the module declared none, in which case a caller that needs to shrink the
+	// result has to truncate it blindly.
+	Digest MCPDigestFunc `json:"-"`
 }
+
+// MCPDigestFunc turns a full tool result into a compact stand-in. Type-erased
+// like MCPToolHandler; ms.ToolDigest builds one from a typed function.
+type MCPDigestFunc func(result json.RawMessage) (json.RawMessage, error)
 
 // MCPResourceDecl is a registered MCP resource.
 type MCPResourceDecl struct {

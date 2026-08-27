@@ -26,6 +26,7 @@ type mcpToolConfig struct {
 	readOnly    *bool
 	destructive *bool
 	idempotent  *bool
+	digest      registry.MCPDigestFunc
 }
 
 // ToolPermission gates the tool on a module permission, looked up by SHORT
@@ -106,6 +107,55 @@ func (c mcpToolConfig) buildAnnotations() json.RawMessage {
 	return raw
 }
 
+// ToolDigest declares how THIS tool's result compresses, for replay on later
+// turns.
+//
+// 🔴 WHY A MODULE HAS TO SAY THIS AND THE PLATFORM CANNOT GUESS. Tool results
+// are replayed to the model so a later turn can still cite them, and a large
+// one has to shrink somehow. Without a digest the only option is a blind byte
+// truncation — which keeps the FIRST n bytes, and the first n bytes of a
+// fifty-row table is rows one to four. The module knows that "50 users, first
+// five: …, filter by role to narrow" answers more later questions in fewer
+// tokens than rows one to four do. Nothing outside the module can know that.
+//
+// The digest runs only when the full result is large enough to be worth
+// shrinking; a small result replays verbatim. It must never fail the call: a
+// digest that errors is dropped and the caller falls back to truncation, so a
+// bad digest costs fidelity and never the tool.
+//
+//	ms.MCPTool("users-list", "List users", listUsers,
+//	    ms.ToolDigest(func(r UsersResult) any {
+//	        return map[string]any{"total": r.Total, "sample": r.Users[:min(5, len(r.Users))]}
+//	    }),
+//	)
+func ToolDigest[Out any](fn func(Out) any) MCPToolOption {
+	return func(c *mcpToolConfig) {
+		if fn == nil {
+			return
+		}
+		c.digest = func(result json.RawMessage) (digest json.RawMessage, err error) {
+			// 🔴 RECOVER. A digest is module-authored code that runs on the hot
+			// path of a tool call, and the contract above says it must never
+			// fail the call — an error return alone does not deliver that,
+			// because the obvious digest is a slice expression and the obvious
+			// bug is `r.Users[:5]` on a result with three rows. Without this,
+			// a tool that works perfectly returns 500 the first time its list
+			// comes back short. Caught, it degrades to truncation, which is
+			// exactly what a module with no digest gets.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					digest, err = nil, fmt.Errorf("digest panicked: %v", recovered)
+				}
+			}()
+			var full Out
+			if err := json.Unmarshal(result, &full); err != nil {
+				return nil, err
+			}
+			return json.Marshal(fn(full))
+		}
+	}
+}
+
 // MCPTool registers an agent-callable tool on the default module. Input and
 // output JSON Schemas are derived from the In and Out type parameters via
 // reflection; struct fields use their `json:"..."` tags. The handler receives
@@ -176,6 +226,7 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 		decl.Permission, _ = m.ensurePermissionDeclared("MCPTool", cfg.permission)
 	}
 	decl.Annotations = cfg.buildAnnotations()
+	decl.Digest = cfg.digest
 	m.warnUndocumentedFields(name, inputSchema)
 	m.registry.AddMCPTool(decl)
 }
