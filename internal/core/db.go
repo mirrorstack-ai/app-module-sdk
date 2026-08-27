@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mirrorstack-ai/app-module-sdk/audit"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
@@ -248,23 +249,35 @@ func (m *Module) lifecycleProvisioner(scope migration.Scope) system.Provisioner 
 		return nil
 	}
 	return func(ctx context.Context) error {
-		// The slot count is read per CALL, never when the route is mounted:
-		// ms.Provide runs after ms.Init, which is what mounts the lifecycle
-		// routes, so a mount-time check would see zero slots for every module
-		// that declares any — and silently provision nothing, forever.
-		if m.contribReg.Len() == 0 {
-			return nil
-		}
 		// No schema in the lifecycle body means the tunnel payload shape, where
 		// the module runs against its own dev DB and the per-app store is
-		// created by ensureDevAppSchema instead. Creating it here would land a
-		// per-app table in the connection's default schema — the wrong place,
-		// and shared across every app.
+		// created by ensureDevAppSchema instead. Creating anything here would
+		// land a per-app table in the connection's default schema — the wrong
+		// place, and shared across every app.
 		if db.SchemaFrom(ctx) == "" {
 			return nil
 		}
 		return m.Tx(ctx, func(q db.Querier) error {
-			return m.contribStorage.EnsureTable(ctx, q)
+			// The contributions store is only ensured for a module that
+			// declares slots. The count is read per CALL, never when the route
+			// is mounted: ms.Provide runs after ms.Init, which is what mounts
+			// the lifecycle routes, so a mount-time check would see zero slots
+			// for every module that declares any — and silently provision
+			// nothing, forever.
+			if m.contribReg.Len() > 0 {
+				if err := m.contribStorage.EnsureTable(ctx, q); err != nil {
+					return err
+				}
+			}
+			// The audit outbox is ensured for EVERY module, because any module
+			// may record audit whether or not it hosts contribution slots.
+			//
+			// Go DDL rather than a migration, and it has to be: an SDK-owned
+			// numbered migration can never reach an already-installed module —
+			// it would sort below every stored watermark and be skipped
+			// forever — and the SDK cannot ship .sql at all, because the module
+			// owns the migration filesystem.
+			return audit.EnsureTable(ctx, q)
 		})
 	}
 }
