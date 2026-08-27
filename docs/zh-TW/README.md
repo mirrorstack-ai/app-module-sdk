@@ -10,6 +10,7 @@
 
 ## 核心概念
 
+- [Module structure](./concepts/module-structure.md) — 每個已發布模組共用的骨架，以及決定檔案該放哪個目錄的那一個問題。
 - [Agent tools](./concepts/agent-tools.md) — MCP tools 與 resources 的差別,以及為什麼 module 是 agent-first。
 - [Dependencies](./concepts/dependencies.md) — Required 與 optional 相依、SemVer version constraint、 `ms.Needs` 用法。
 - [Manifest](./concepts/manifest.md) — Manifest endpoint 的完整欄位與用途。
@@ -21,5 +22,8 @@
 
 ## 其他
 
-- [Template module](../../examples/template/) — CLI 會據此複製的 scaffold。
+- [Template module](../../examples/template/) — 完整的範例模組：cache、events、
+  meter、notifications、schedule、storage 與 tasks 都在同一處。
+  這**不是** `mirrorstack module init` 產生的內容——CLI 使用自己維護的精簡
+  範本（`templates/module/`）。想看 API 怎麼用就讀這份；要開新專案請用 CLI。
 - [Changelog](../../CHANGELOG.md)。

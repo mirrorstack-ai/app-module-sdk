@@ -23,7 +23,7 @@ import (
 // platform and therefore no catalog, so each module self-publishes the two
 // facts a consumer needs — its Config.ID and its registry.ExposedTables() set —
 // into one shared dev-only table at boot. That self-publication is not a new
-// trust assumption: system/manifest.go:209 builds the manifest's `exposes` from
+// trust assumption: manifestHandler in system/manifest.go builds the manifest's `exposes` from
 // the same reg.ExposedTables() call, and prod freezes THAT self-assertion at
 // publish time. The dev directory just carries it over a different channel.
 //
@@ -294,7 +294,7 @@ func (m *Module) ensureDevDirectory(ctx context.Context) error {
 // registerInDevDirectory upserts THIS module's row and reclaims its slug.
 //
 // Skipped with one loud log line when Config.Slug is empty: Slug is optional
-// (module.go:48) and a module without one simply is not locally discoverable
+// (Config.Slug in module.go) and a module without one simply is not locally discoverable
 // as a producer by the slug form every consumer's DependsOn actually uses.
 // Publishing a row with an empty slug would be worse than publishing none — it
 // would match a consumer that resolved to the empty string.
@@ -319,7 +319,7 @@ func (m *Module) registerInDevDirectory(ctx context.Context) error {
 	}
 
 	// ExposedTables already returns a sorted, non-nil slice
-	// (internal/registry/exposure.go:46), so the marshalled JSON is stable and
+	// (Registry.AddExposedTable in internal/registry/exposure.go), so the marshalled JSON is stable and
 	// an unchanged exposure set rewrites byte-identical content.
 	exposed := m.registry.ExposedTables()
 	exposes, err := json.Marshal(exposed)

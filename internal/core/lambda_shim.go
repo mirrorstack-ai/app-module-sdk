@@ -61,7 +61,12 @@ func (m *Module) lambdaInvokeShim() http.HandlerFunc {
 	invoke := runtime.NewLambdaHandler(m.router)
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, internalRouteBodyCap))
+		// The ENVELOPE cap, which is the same 1 MB as the route cap it wraps.
+		// A route body arrives base64'd inside this JSON, so the effective
+		// limit through Lambda is ~3/4 of routeBodyCap. That predates this
+		// constant's rename and is not changed here; API Gateway's own 6 MB
+		// ceiling sits above both.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, routeBodyCap))
 		if err != nil {
 			httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "invalid request body"})
 			return

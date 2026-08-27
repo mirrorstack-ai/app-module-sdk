@@ -60,7 +60,36 @@ const maxDependencyCallBody = 1 << 20
 
 // callHTTP is the shared client for inter-module calls. A single client with a
 // per-request timeout is enough — context cancellation still applies on top.
-var callHTTP = &http.Client{Timeout: callTimeout}
+//
+// 🔴 IT MUST NOT USE http.DefaultTransport. DefaultTransport caps
+// MaxIdleConnsPerHost at 2, and every inter-module call in a module goes to the
+// SAME host (dispatch). While a module's fan-out is serial that is invisible —
+// concurrency never exceeds 1. The moment a host module fans out to N
+// contributors in parallel, connections 3..N cannot be pooled: each one pays a
+// fresh TCP handshake (plus TLS in production) and is then CLOSED rather than
+// returned, on every request. That converts most of the intended parallel win
+// back into handshake latency, silently, and it looks like "parallelising
+// didn't help much" rather than like a misconfigured pool.
+//
+// Cloned from DefaultTransport so proxy handling, timeouts and HTTP/2 stay
+// exactly as they were; only the pool sizes change.
+var callHTTP = &http.Client{Timeout: callTimeout, Transport: callTransport()}
+
+// callTransport is DefaultTransport with a pool sized for fan-out. 64 is
+// comfortably above any realistic contributor count and costs nothing when
+// unused — idle connections are reaped by IdleConnTimeout as before.
+func callTransport() *http.Transport {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Something replaced DefaultTransport. Leave it alone rather than
+		// guessing at a replacement.
+		return nil
+	}
+	t = t.Clone()
+	t.MaxIdleConnsPerHost = 64
+	t.MaxConnsPerHost = 0 // unlimited in-flight; the pool bound is what mattered
+	return t
+}
 
 // resolveCallURL builds the platform-dispatch URL for a module->module hop:
 //

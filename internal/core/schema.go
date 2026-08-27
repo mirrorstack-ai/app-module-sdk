@@ -16,8 +16,23 @@ func deriveMCPSchema[T any]() (json.RawMessage, error) {
 	// {"type":"object",...} rather than invopop's default {"$ref":"#/$defs/..."}.
 	// The MCP spec requires inputSchema/outputSchema to be an object schema with
 	// type:"object"; a top-level $ref makes clients reject the whole tools/list.
-	r := &jsonschema.Reflector{DoNotReference: true}
-	return json.Marshal(r.Reflect(zero))
+	//
+	// Anonymous suppresses the $id invopop derives from the Go import path. Left
+	// on, every tool's inputSchema carried a line like
+	//
+	//	"$id":"https://github.com/mirrorstack-ai/app-module-sdk/internal/core/args"
+	//
+	// which leaks the declaring package's layout to every MCP client and costs
+	// tokens on every tools/list — the listing is re-sent each turn, so it is
+	// paid per turn, per tool, forever. derivePayloadSchema already set this;
+	// the two paths simply never got the same treatment.
+	r := &jsonschema.Reflector{DoNotReference: true, Anonymous: true}
+	schema := r.Reflect(zero)
+	// $schema is dialect metadata an MCP client never reads — it consumes
+	// inputSchema as a JSON Schema object and looks at type/properties/required.
+	// Another ~55 bytes per tool per listing, for nothing.
+	schema.Version = ""
+	return json.Marshal(schema)
 }
 
 // derivePayloadSchema returns the full recursive JSON Schema of a contribution

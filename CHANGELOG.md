@@ -5,6 +5,68 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.7] - 2026-08-27
+
+### Added
+
+- `httpx` — one pagination shape for every module. `Page[T]` plus `NewPage`,
+  `Limit`, `IDCursor`/`ParseIDCursor` and `TimeIDCursor`/`ParseTimeIDCursor`.
+  The rule is keyset always, limit/offset never: an offset scan re-reads every
+  skipped row on every page and silently repeats or drops rows when the set
+  changes underneath it. The cursor is opaque on the wire so a module can change
+  its key without a breaking change. `Cap` bounds a result by dropping whole
+  ITEMS and returning a cursor for the rest — never by truncating bytes, which
+  would hand a caller invalid JSON and no way to ask for the remainder.
+- `audit` — `Record(ctx, q, Entry)` writes to the module's own audit outbox, and
+  `EnsureTable` provisions it.
+
+  🔴 `Entry` HAS NO ACTOR FIELD, and that is the point. The platform resolves
+  who acted; a module that could name the actor could name any actor, and an
+  audit trail a module can author is not evidence. The module says WHAT
+  happened to WHICH subject; the platform says who.
+- `ms.ToolTitle`, `ms.ToolReadOnly`, `ms.ToolDestructive`, `ms.ToolIdempotent` —
+  MCP tool annotations, so a client can tell a read from a delete before calling
+  it rather than inferring intent from the tool's name.
+- `ms.ToolDigest[Out]` — a module declares how its OWN result compresses, for
+  the replay path that would otherwise re-send a full result into a model's
+  context. A digest that panics is contained and reported as an error, not
+  allowed to take the request down with it.
+
+### Changed
+
+- **A tool's published input schema is now ENFORCED.** Required fields are
+  checked and unknown fields are rejected before the handler runs. A module that
+  published a schema it did not honour was making a promise to every MCP client
+  that nothing kept; a caller's typo in an optional field name silently became
+  "field omitted". Undocumented fields a handler accepts are named in a startup
+  warning rather than being quietly tolerated.
+- **Every route scope now caps its request body.** The cap existed but only
+  covered some scopes, so the others were the uncapped branch.
+- **Derived MCP schemas no longer carry Go import paths.** A schema built from a
+  handler's argument type published `github.com/org/module/internal/...` to every
+  client. Schemas are emitted anonymous and without the generator's version.
+- `audit.EnsureTable` runs at module boot for every module, not only those with
+  contribution slots — an audit outbox is not a contribution feature.
+- Module-to-module HTTP calls reuse connections (`MaxIdleConnsPerHost` 64). The
+  default transport allows 2 per host, so a fan-out across modules spent most of
+  its time in TCP and TLS setup it immediately discarded.
+- `cache` keys accept hyphens. The pattern rejected them for no reason a colon
+  did not already cover, and module IDs contain them.
+
+### Fixed
+
+- Comments cite symbols, not line numbers. A line number is wrong the moment
+  anything above it moves, and nothing catches it; a repo-wide test now does.
+
+Additive only — 22 exported functions/types added, none removed and none changed
+in signature, so this is a PATCH per the pre-1.0 convention. Measured, not
+asserted: `go doc -all` over every non-`internal/`, non-`examples/` package with
+`GOWORK=off`, diffed against `origin/main`, goes 252 → 273 unique exported names.
+That is 21 rather than 22 because `audit.Record` shares a name with the existing
+`ms.Record` and the name-level diff counts it once. The behaviour changes listed
+above are real and are the reason to read this entry, but none of them alters an
+exported signature.
+
 ## [v0.4.6] - 2026-08-26
 
 ### Added

@@ -66,14 +66,24 @@ func TestLifecycleProvisioner_AppScopeOnly(t *testing.T) {
 	}
 }
 
-// TestLifecycleProvisioner_ReadsSlotsPerCall guards the ordering trap that would
-// disable this whole mechanism silently: the provisioner is built when ms.Init
-// mounts the routes, but ms.Provide runs afterwards. If the slot count were read
-// at mount time it would be zero for every real module.
+// The app-scope provisioner ALWAYS reaches the database, with or without
+// contribution slots.
 //
-// The DB is deliberately unreachable, so "returned nil" proves the hook did not
-// try to provision and a connect error proves it did.
-func TestLifecycleProvisioner_ReadsSlotsPerCall(t *testing.T) {
+// 🔴 THIS TEST USED TO ASSERT THE OPPOSITE, and the assertion was correct until
+// the audit outbox joined the ensure step. Contribution storage is only needed
+// by a module that declares slots; the audit outbox is needed by EVERY module,
+// because any module may record audit. So "no slots means no database work" is
+// no longer true, and pinning it would pin the outbox out of existence for
+// exactly the modules that declare no slots.
+//
+// What the original protected is still protected, in the code rather than here:
+// m.contribReg.Len() is read INSIDE the returned closure, never when the route
+// is mounted. ms.Provide runs after ms.Init — which is what mounts the
+// lifecycle routes — so a mount-time read would see zero slots for every module
+// that declares any, and silently provision nothing forever. That ordering is
+// no longer observable through this seam, because both branches now touch the
+// database.
+func TestLifecycleProvisioner_AlwaysEnsuresAudit(t *testing.T) {
 	resetDefault(t)
 	t.Setenv(devMigrateEnvVar, "")
 	t.Setenv("DATABASE_URL", unreachableDSN)
@@ -83,8 +93,8 @@ func TestLifecycleProvisioner_ReadsSlotsPerCall(t *testing.T) {
 	provision := m.lifecycleProvisioner(migration.ScopeApp)
 	ctx := db.WithSchema(context.Background(), "app_11111111_1111_1111_1111_111111111111")
 
-	if err := provision(ctx); err != nil {
-		t.Fatalf("no slots declared: want a no-op, got %v", err)
+	if err := provision(ctx); err == nil {
+		t.Error("with no slots the hook must still reach the DB for the audit outbox, got nil")
 	}
 
 	m.ProvideSlot(NewContributionSlot[contribTestPayload]("auth-provider"))

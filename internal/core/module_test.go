@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1164,5 +1166,68 @@ func TestModule_ModuleSchemaFor_PrefixFromContext(t *testing.T) {
 	ctx := db.WithPrefix(context.Background(), "anna_oauth_")
 	if got := m.moduleSchemaFor(ctx); got != "anna_oauth_" {
 		t.Errorf("moduleSchemaFor(ctx with prefix) = %q, want %q", got, "anna_oauth_")
+	}
+}
+
+// Every scope must cap the request body, not just Internal.
+//
+// The cap used to be applied only when scope == ScopeInternal, which had the
+// protection backwards: Internal needs a shared secret and is reachable only
+// from the platform, while Public is anonymous and is the one surface a
+// stranger can post to. The guarded scope was capped; the unguarded one was
+// not — an anonymous POST could stream until the module ran out of memory.
+func TestEveryScopeCapsTheRequestBody(t *testing.T) {
+	m := newTestModuleWithSecret(t, "secret")
+
+	// Each handler drains the body and reports whether the read failed. A cap
+	// surfaces at READ time (http.MaxBytesReader), not at routing time, so a
+	// handler that ignored the body would pass no matter what middleware ran.
+	echo := func(r chi.Router) {
+		r.Post("/drain", func(w http.ResponseWriter, req *http.Request) {
+			if _, err := io.ReadAll(req.Body); err != nil {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+	}
+	m.Public(echo)
+	m.Platform(echo)
+	m.Internal(echo)
+
+	post := func(path string, body []byte) int {
+		req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+		req.Header.Set("X-MS-Internal-Secret", "secret")
+		rec := httptest.NewRecorder()
+		m.Router().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	oversized := bytes.Repeat([]byte("a"), routeBodyCap+1)
+
+	// /public/* is the regression: this returned 200 before the cap moved off
+	// the scope check, because nothing limited the reader.
+	if code := post("/public/drain", oversized); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("/public/drain with %d bytes: code = %d, want %d — the body is uncapped",
+			len(oversized), code, http.StatusRequestEntityTooLarge)
+	}
+	if code := post("/internal/drain", oversized); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("/internal/drain with %d bytes: code = %d, want %d",
+			len(oversized), code, http.StatusRequestEntityTooLarge)
+	}
+	// /platform/* rejects at 401 rather than 413, and that is the STRONGER
+	// outcome, not a gap: platformAuth is mounted ahead of the cap, so an
+	// unauthenticated oversized body is refused before anything reads a byte
+	// of it. Asserted explicitly so that if the ordering ever flips — auth
+	// after the reader — this test says so instead of quietly still passing.
+	if code := post("/platform/drain", oversized); code != http.StatusUnauthorized {
+		t.Errorf("/platform/drain with %d bytes: code = %d, want 401 (auth must run before the body is read)",
+			len(oversized), code)
+	}
+
+	// And a body at exactly the limit still gets through — a cap that rejects
+	// legitimate traffic is its own outage.
+	if code := post("/public/drain", bytes.Repeat([]byte("a"), routeBodyCap)); code != http.StatusOK {
+		t.Errorf("/public/drain at exactly the cap: code = %d, want 200", code)
 	}
 }

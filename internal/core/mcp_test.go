@@ -3,11 +3,14 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
 )
@@ -275,5 +278,265 @@ func TestMCPTool_ManifestIncludesMCPSurface(t *testing.T) {
 	}
 	if len(payload.MCP.Tools) != 1 || payload.MCP.Tools[0].Name != "greet" {
 		t.Errorf("manifest.mcp.tools = %+v, want [greet]", payload.MCP.Tools)
+	}
+}
+
+// The two schema constraints Go's json.Unmarshal ignores must actually be
+// enforced, because MCPTool's doc comment has always claimed they are.
+//
+// Before this, a tool declaring a required userId ran with userId="" when the
+// model omitted it, and a model that sent {"user_id":…} against a `userId`
+// field got the same silent zero plus no hint it had misspelled anything. A
+// wrong answer delivered confidently is worse than an error.
+func TestMCPTool_EnforcesRequiredAndUnknownArgs(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	type args struct {
+		Name  string `json:"name"`
+		Limit int    `json:"limit,omitempty"`
+	}
+	called := false
+	handler := wrapMCPToolHandler(
+		func(_ context.Context, a args) (greetResult, error) {
+			called = true
+			return greetResult{Message: a.Name}, nil
+		},
+		mustSchema[args](t),
+	)
+
+	cases := []struct {
+		name    string
+		args    string
+		wantErr bool
+		reason  string
+	}{
+		{"present", `{"name":"ada"}`, false, "the ordinary call must still work"},
+		{"optional omitted is fine", `{"name":"ada"}`, false, "limit has omitempty, so it is not required"},
+		{"explicit null satisfies presence", `{"name":null}`, false, "JSON Schema required is about the KEY, not the value"},
+		{"required missing", `{"limit":5}`, true, "name is required and absent"},
+		{"no args at all", `{}`, true, "an empty object is still missing name"},
+		{"null args", `null`, true, "no arguments at all, but name is required"},
+		{"unknown key", `{"name":"ada","user_id":"x"}`, true, "additionalProperties:false is advertised"},
+		{"misspelled required", `{"nmae":"ada"}`, true, "must not read as an absent name plus an unknown key silently"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			_, err := handler(context.Background(), json.RawMessage(tc.args))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("args %s: no error — %s", tc.args, tc.reason)
+				}
+				if !errors.Is(err, system.ErrInvalidArgs) {
+					t.Errorf("args %s: err = %v, want ErrInvalidArgs (a 400, not a 500)", tc.args, err)
+				}
+				if called {
+					t.Error("the handler ran on arguments the schema rejects")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("args %s: unexpected error %v — %s", tc.args, err, tc.reason)
+			}
+			if !called {
+				t.Error("the handler did not run on valid arguments")
+			}
+		})
+	}
+}
+
+// Registration must name the input fields a tool ships undocumented. The model
+// picks arguments from the input schema alone, and 0 of 45 shipped tools
+// documented a single field — because the jsonschema tag worked all along and
+// nothing ever said so.
+func TestMCPTool_WarnsAboutUndocumentedFields(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	var logged strings.Builder
+	m.logger = log.New(&logged, "", 0)
+
+	type documented struct {
+		Name string `json:"name" jsonschema:"description=Who to greet."`
+	}
+	type partial struct {
+		Name  string `json:"name" jsonschema:"description=Who to greet."`
+		Limit int    `json:"limit"`
+		Zzz   string `json:"zzz"`
+	}
+
+	MCPTool("documented", "d", func(_ context.Context, a documented) (greetResult, error) {
+		return greetResult{}, nil
+	})
+	if logged.Len() != 0 {
+		t.Errorf("a fully documented tool warned anyway: %s", logged.String())
+	}
+
+	MCPTool("partial", "p", func(_ context.Context, a partial) (greetResult, error) {
+		return greetResult{}, nil
+	})
+	out := logged.String()
+	if !strings.Contains(out, "MCPTool(partial)") {
+		t.Errorf("warning does not name the tool: %s", out)
+	}
+	// Sorted, so the line is stable across boots and readable in a diff.
+	if !strings.Contains(out, "limit, zzz") {
+		t.Errorf("warning does not name the undocumented fields in sorted order: %s", out)
+	}
+	if strings.Contains(out, "name") {
+		t.Errorf("warning names a field that IS documented: %s", out)
+	}
+}
+
+func mustSchema[T any](t *testing.T) json.RawMessage {
+	t.Helper()
+	schema, err := deriveMCPSchema[T]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
+}
+
+// The Tool* options must produce the MCP spec's annotations object — and must
+// produce NOTHING when the module declared nothing.
+//
+// 🔴 THE ABSENT CASE IS THE LOAD-BEARING ONE. An unset hint has to stay off the
+// wire, because absent means "the module said nothing" while false means "the
+// module said no". A reader that cannot tell those apart has lost the only
+// thing a hint is for — and defaulting readOnly to true would silently vouch
+// for every tool ever written, including the ones that delete things.
+func TestMCPTool_Annotations(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	declare := func(name string, opts ...MCPToolOption) registry.MCPToolDecl {
+		t.Helper()
+		MCPTool(name, "d", func(_ context.Context, a greetArgs) (greetResult, error) {
+			return greetResult{}, nil
+		}, opts...)
+		for _, d := range m.registry.MCPTools() {
+			if d.Name == name {
+				return d
+			}
+		}
+		t.Fatalf("tool %q was not registered", name)
+		return registry.MCPToolDecl{}
+	}
+
+	if got := declare("plain").Annotations; got != nil {
+		t.Errorf("an un-annotated tool carries annotations = %s, want nil — absent must "+
+			"stay absent so a reader can tell 'said nothing' from 'said no'", got)
+	}
+
+	got := declare("marked", ToolReadOnly(), ToolIdempotent(), ToolTitle("Marked")).Annotations
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("annotations are not an object: %v (%s)", err, got)
+	}
+	for key, want := range map[string]any{
+		"readOnlyHint":   true,
+		"idempotentHint": true,
+		"title":          "Marked",
+	} {
+		if fields[key] != want {
+			t.Errorf("annotations[%q] = %v, want %v (%s)", key, fields[key], want, got)
+		}
+	}
+	// A hint that was never declared must not appear at all — not as false.
+	if _, present := fields["destructiveHint"]; present {
+		t.Errorf("undeclared destructiveHint is present: %s", got)
+	}
+
+	if got := declare("dangerous", ToolDestructive()).Annotations; !strings.Contains(string(got), `"destructiveHint":true`) {
+		t.Errorf("ToolDestructive() produced %s, want destructiveHint:true", got)
+	}
+
+	// Marshalled from a map, so keys are sorted and the manifest bytes are
+	// stable across boots — a reshuffling manifest looks like a content change
+	// to every consumer that hashes it.
+	a := declare("stable-a", ToolReadOnly(), ToolTitle("T")).Annotations
+	b := declare("stable-b", ToolTitle("T"), ToolReadOnly()).Annotations
+	if string(a) != string(b) {
+		t.Errorf("annotation bytes depend on option order: %s vs %s", a, b)
+	}
+}
+
+// A declared digest must reach the registry, and must survive a result the
+// module can actually produce.
+//
+// 🔴 WHY A MODULE DECLARES THIS AT ALL. Tool results are replayed to the model
+// on later turns, and a large one has to shrink somehow. Without a digest the
+// only option is a blind byte truncation — which keeps the FIRST n bytes, and
+// the first n bytes of a fifty-row table is rows one to four. The module knows
+// that a total plus a sample answers more later questions in fewer tokens.
+// Nothing outside the module knows that.
+func TestMCPTool_Digest(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	type listResult struct {
+		Total int      `json:"total"`
+		Users []string `json:"users"`
+	}
+	MCPTool("with-digest", "d", func(_ context.Context, _ greetArgs) (listResult, error) {
+		return listResult{}, nil
+	}, ToolDigest(func(r listResult) any {
+		return map[string]any{"total": r.Total, "sample": r.Users[:1]}
+	}))
+	MCPTool("no-digest", "d", func(_ context.Context, _ greetArgs) (listResult, error) {
+		return listResult{}, nil
+	})
+
+	byName := map[string]registry.MCPToolDecl{}
+	for _, d := range m.registry.MCPTools() {
+		byName[d.Name] = d
+	}
+	if byName["no-digest"].Digest != nil {
+		t.Error("a tool that declared no digest carries one")
+	}
+	digest := byName["with-digest"].Digest
+	if digest == nil {
+		t.Fatal("ToolDigest did not reach the registry")
+	}
+
+	full, err := json.Marshal(listResult{Total: 50, Users: []string{"ada", "grace", "alan"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := digest(full)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if len(got) >= len(full) {
+		t.Errorf("digest (%d bytes) is not smaller than the result (%d)", len(got), len(full))
+	}
+	var shrunk map[string]any
+	if err := json.Unmarshal(got, &shrunk); err != nil {
+		t.Fatalf("a digest must be valid JSON: %v", err)
+	}
+	// The total is the fact a truncation would have destroyed — it lives at the
+	// END of the encoded struct for a long list, so byte-cutting loses it first.
+	if shrunk["total"] != float64(50) {
+		t.Errorf("digest lost the total: %s", got)
+	}
+
+	// 🔴 A PANICKING DIGEST MUST NOT REACH THE CALLER. The obvious digest is a
+	// slice expression and the obvious bug is `Users[:1]` on a result with no
+	// rows — which is exactly what this is. A tool that works perfectly would
+	// otherwise 500 the first time its list came back empty. It has to come
+	// back as an error the caller can drop, degrading to truncation.
+	//
+	// This test wrote that bug by accident on the first attempt, which is how
+	// the recover got added.
+	empty, err := digest(json.RawMessage(`{"total":0,"users":[]}`))
+	if err == nil {
+		t.Errorf("a panicking digest returned %s instead of an error", empty)
+	} else if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("err = %v, want it to name the panic", err)
 	}
 }

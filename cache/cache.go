@@ -18,7 +18,20 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
 
-var idPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
+// idPattern guards the key prefix, and the ONLY thing it has to guard against
+// is a colon: keys are built as {appID}:{moduleID}:{key}, so an id containing
+// ':' could climb out of its own namespace and read another app's data.
+//
+// 🔴 IT USED TO EXCLUDE HYPHENS, WHICH MADE IT PANIC ON EVERY REAL APP ID.
+// App ids are UUIDs — `bb8a3f8b-1234-…` — and runtime.AppSchemaName exists
+// precisely because of it, rewriting '-' to '_' before the value can be used as
+// a Postgres identifier. Nothing did the equivalent here, so the first module
+// to reach for ms.Cache().ForApp(ms.AppID(ctx), …) crashed on its first real
+// request. The unit test passed because it used a hand-written "app_abc123".
+//
+// A hyphen cannot break a prefix boundary. Excluding it bought nothing and
+// cost the whole cache.
+var idPattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 const defaultDevURL = "redis://localhost:6379"
 
@@ -145,10 +158,10 @@ func optionsFromProvider(ctx context.Context, provider CredentialProvider) (*red
 // Validates both IDs to prevent colon injection breaking prefix boundary.
 func (c *Client) ForApp(appID, moduleID string) *Client {
 	if appID != "" && !idPattern.MatchString(appID) {
-		panic(fmt.Sprintf("mirrorstack/cache: invalid appID %q — must match [a-z0-9_]+", appID))
+		panic(fmt.Sprintf("mirrorstack/cache: invalid appID %q — must match %s", appID, idPattern))
 	}
 	if !idPattern.MatchString(moduleID) {
-		panic(fmt.Sprintf("mirrorstack/cache: invalid moduleID %q — must match [a-z0-9_]+", moduleID))
+		panic(fmt.Sprintf("mirrorstack/cache: invalid moduleID %q — must match %s", moduleID, idPattern))
 	}
 	return &Client{
 		rdb:    c.rdb,

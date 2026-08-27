@@ -242,3 +242,42 @@ func TestDerivePayloadSchemaAnyDoesNotPanic(t *testing.T) {
 		t.Fatal("derived schema is empty")
 	}
 }
+
+// deriveMCPSchema must not leak the declaring package's import path, and must
+// not carry dialect metadata no MCP client reads.
+//
+// Both cost tokens on EVERY tools/list, and a listing is re-sent every turn —
+// so this is paid per turn, per tool, for the life of the conversation. The
+// $id also published the SDK's internal package layout to third-party clients.
+// derivePayloadSchema had suppressed $id since it was written; this path simply
+// never got the same treatment, which is why the assertion is here rather than
+// in a comment.
+func TestDeriveMCPSchemaOmitsIDAndDialect(t *testing.T) {
+	t.Parallel()
+
+	type args struct {
+		UserID string `json:"userId"`
+	}
+	raw, err := deriveMCPSchema[args]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("derived schema is not an object: %v", err)
+	}
+	for _, key := range []string{"$id", "$schema"} {
+		if v, present := got[key]; present {
+			t.Errorf("derived MCP schema carries %s = %v; it must not", key, v)
+		}
+	}
+	// The MCP spec requires inputSchema to be an object schema. Dropping the
+	// two keys above must not cost us that — a top-level $ref or a missing
+	// type makes clients reject the whole listing.
+	if got["type"] != "object" {
+		t.Errorf(`type = %v, want "object" (got %s)`, got["type"], raw)
+	}
+	if _, present := got["$ref"]; present {
+		t.Errorf("derived MCP schema is a $ref, not an inline object: %s", raw)
+	}
+}

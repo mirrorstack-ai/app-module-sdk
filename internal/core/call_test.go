@@ -718,3 +718,40 @@ func TestCallGet_NoBodyNoContentType(t *testing.T) {
 		t.Error("GET set a Content-Type header, want none (no body)")
 	}
 }
+
+// The inter-module client must not inherit DefaultTransport's 2-connection
+// idle pool.
+//
+// 🔴 WHY IT MATTERS AND WHY IT IS INVISIBLE. Every inter-module call from a
+// module goes to the SAME host (dispatch). DefaultTransport caps
+// MaxIdleConnsPerHost at 2, so the moment a host module fans out to N
+// contributors in parallel, connections 3..N pay a fresh TCP handshake (plus
+// TLS in production) and are CLOSED rather than pooled — on every request.
+// Most of the parallel win goes back into handshakes, and it presents as
+// "parallelising didn't help much" rather than as a misconfigured pool.
+//
+// Asserted here rather than left to a comment because the symptom appears in a
+// different repo (the module doing the fan-out) from the cause.
+func TestCallHTTPPoolsEnoughConnectionsForFanOut(t *testing.T) {
+	t.Parallel()
+
+	transport, ok := callHTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("callHTTP.Transport = %T, want *http.Transport — a nil transport "+
+			"means DefaultTransport, which pools only 2 connections per host", callHTTP.Transport)
+	}
+	if transport.MaxIdleConnsPerHost <= 2 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want well above 2: every module call "+
+			"targets the same dispatch host, so this IS the fan-out ceiling",
+			transport.MaxIdleConnsPerHost)
+	}
+	// Cloned, not hand-built: proxy handling, timeouts and HTTP/2 must stay as
+	// DefaultTransport had them.
+	if def, isTransport := http.DefaultTransport.(*http.Transport); isTransport {
+		if transport.IdleConnTimeout != def.IdleConnTimeout {
+			t.Errorf("IdleConnTimeout = %v, want DefaultTransport's %v — the clone "+
+				"should change pool sizes and nothing else",
+				transport.IdleConnTimeout, def.IdleConnTimeout)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package system
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -27,7 +28,7 @@ func toolEntries(decls []registry.MCPToolDecl) []MCPToolEntry {
 		out[i] = MCPToolEntry{
 			Name: t.Name, Description: t.Description,
 			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
-			Permission: t.Permission,
+			Permission: t.Permission, Annotations: t.Annotations,
 		}
 	}
 	return out
@@ -81,7 +82,20 @@ func MCPToolsCallHandler(reg *registry.Registry) http.HandlerFunc {
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
 			return
 		}
-		httputil.JSON(w, http.StatusOK, mcpToolCallResponse{Result: result})
+		response := mcpToolCallResponse{Result: result}
+		// A declared digest is computed only for a result big enough to need
+		// one, and NEVER fails the call: a digest that errors is dropped and
+		// the platform falls back to truncation, so a bad digest costs fidelity
+		// and never the tool.
+		if tool.Digest != nil && len(result) > digestThreshold {
+			if digest, err := tool.Digest(result); err != nil {
+				log.Printf("mirrorstack: MCPTool(%s) digest failed; replay will truncate instead: %v", tool.Name, err)
+			} else if len(digest) < len(result) {
+				// A digest bigger than what it stands in for is not a digest.
+				response.Digest = digest
+			}
+		}
+		httputil.JSON(w, http.StatusOK, response)
 	}
 }
 
@@ -132,6 +146,11 @@ type MCPToolEntry struct {
 	// Permission mirrors MCPToolDecl.Permission: the slug-qualified module
 	// permission required to see and call the tool; absent when none declared.
 	Permission string `json:"permission,omitempty"`
+	// Annotations is the MCP spec's per-tool hint object (title, readOnlyHint,
+	// destructiveHint, idempotentHint, openWorldHint). The platform stores it
+	// whole and the agent renders the actionable hints into the tool
+	// description the model reads.
+	Annotations json.RawMessage `json:"annotations,omitempty"`
 }
 
 // MCPResourceEntry is the JSON wire shape for a resource.
@@ -152,7 +171,20 @@ type mcpToolCallRequest struct {
 
 type mcpToolCallResponse struct {
 	Result json.RawMessage `json:"result"`
+	// Digest is a compact stand-in for Result, present only when the tool
+	// declared ms.ToolDigest AND the result was large enough to be worth
+	// shrinking. The platform stores it beside the full result and replays it
+	// on later turns instead of truncating the full one blindly.
+	Digest json.RawMessage `json:"digest,omitempty"`
 }
+
+// digestThreshold is the result size above which a declared digest is computed.
+//
+// Below it the full result already replays cheaply, and running the digest
+// would spend the module's CPU to save nothing. 4 KB matches the platform's
+// per-result replay budget, so a result that fits there is exactly one that
+// needs no stand-in.
+const digestThreshold = 4 << 10
 
 type mcpResourcesListResponse struct {
 	Resources []MCPResourceEntry `json:"resources"`

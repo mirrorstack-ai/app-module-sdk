@@ -1,9 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -15,6 +18,15 @@ type MCPToolOption func(*mcpToolConfig)
 
 type mcpToolConfig struct {
 	permission string // SHORT permission name; slug-qualified at registration
+	// annotations accumulates the MCP spec's per-tool hints. Pointers, not
+	// bools: an unset hint must stay ABSENT on the wire, because absent means
+	// "the module said nothing" and false means "the module said no". A reader
+	// that cannot tell those apart has lost the only thing a hint is for.
+	title       string
+	readOnly    *bool
+	destructive *bool
+	idempotent  *bool
+	digest      registry.MCPDigestFunc
 }
 
 // ToolPermission gates the tool on a module permission, looked up by SHORT
@@ -27,6 +39,121 @@ type mcpToolConfig struct {
 // the tool down rather than opening it — same rule as RequirePermission.
 func ToolPermission(name string) MCPToolOption {
 	return func(c *mcpToolConfig) { c.permission = name }
+}
+
+// ToolTitle sets a short human-readable display name for the tool, shown by
+// clients that render a tool list for a person. The wire NAME stays the
+// identifier; this is only for display.
+func ToolTitle(title string) MCPToolOption {
+	return func(c *mcpToolConfig) { c.title = title }
+}
+
+// ToolReadOnly declares that the tool does not modify anything.
+//
+// 🔴 DEFAULT UNSET IS NOT DEFAULT READ-ONLY. A tool that says nothing is
+// UNKNOWN, and every reader must treat unknown as "may write". Defaulting to
+// readOnly:true would silently vouch for every tool ever written, including the
+// ones that delete things — which is exactly backwards for a hint whose only
+// job is to let a caller relax.
+func ToolReadOnly() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.readOnly = &t }
+}
+
+// ToolDestructive declares that the tool changes or removes data
+// irreversibly. The platform agent renders this into the tool description the
+// model reads, so it is a real warning and not decoration.
+//
+// Declare it on anything a person would want to be asked about first. An
+// absent hint is not a promise of safety, but it is also not a warning — so a
+// destructive tool that stays silent gets treated like any other.
+func ToolDestructive() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.destructive = &t }
+}
+
+// ToolIdempotent declares that calling the tool twice with the same arguments
+// has the same effect as calling it once — which is what makes a retry safe.
+func ToolIdempotent() MCPToolOption {
+	return func(c *mcpToolConfig) { t := true; c.idempotent = &t }
+}
+
+// buildAnnotations renders the declared hints as the MCP spec's annotations
+// object, or nil when nothing was declared. nil is the honest encoding of
+// "this module said nothing": an empty object would read, to anything
+// downstream, as a module that considered the question.
+func (c mcpToolConfig) buildAnnotations() json.RawMessage {
+	fields := map[string]any{}
+	if c.title != "" {
+		fields["title"] = c.title
+	}
+	if c.readOnly != nil {
+		fields["readOnlyHint"] = *c.readOnly
+	}
+	if c.destructive != nil {
+		fields["destructiveHint"] = *c.destructive
+	}
+	if c.idempotent != nil {
+		fields["idempotentHint"] = *c.idempotent
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	// Marshalling a map sorts the keys, so the manifest bytes are stable across
+	// boots — a manifest that reshuffled would look like a content change to
+	// every consumer that hashes it.
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// ToolDigest declares how THIS tool's result compresses, for replay on later
+// turns.
+//
+// 🔴 WHY A MODULE HAS TO SAY THIS AND THE PLATFORM CANNOT GUESS. Tool results
+// are replayed to the model so a later turn can still cite them, and a large
+// one has to shrink somehow. Without a digest the only option is a blind byte
+// truncation — which keeps the FIRST n bytes, and the first n bytes of a
+// fifty-row table is rows one to four. The module knows that "50 users, first
+// five: …, filter by role to narrow" answers more later questions in fewer
+// tokens than rows one to four do. Nothing outside the module can know that.
+//
+// The digest runs only when the full result is large enough to be worth
+// shrinking; a small result replays verbatim. It must never fail the call: a
+// digest that errors is dropped and the caller falls back to truncation, so a
+// bad digest costs fidelity and never the tool.
+//
+//	ms.MCPTool("users-list", "List users", listUsers,
+//	    ms.ToolDigest(func(r UsersResult) any {
+//	        return map[string]any{"total": r.Total, "sample": r.Users[:min(5, len(r.Users))]}
+//	    }),
+//	)
+func ToolDigest[Out any](fn func(Out) any) MCPToolOption {
+	return func(c *mcpToolConfig) {
+		if fn == nil {
+			return
+		}
+		c.digest = func(result json.RawMessage) (digest json.RawMessage, err error) {
+			// 🔴 RECOVER. A digest is module-authored code that runs on the hot
+			// path of a tool call, and the contract above says it must never
+			// fail the call — an error return alone does not deliver that,
+			// because the obvious digest is a slice expression and the obvious
+			// bug is `r.Users[:5]` on a result with three rows. Without this,
+			// a tool that works perfectly returns 500 the first time its list
+			// comes back short. Caught, it degrades to truncation, which is
+			// exactly what a module with no digest gets.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					digest, err = nil, fmt.Errorf("digest panicked: %v", recovered)
+				}
+			}()
+			var full Out
+			if err := json.Unmarshal(result, &full); err != nil {
+				return nil, err
+			}
+			return json.Marshal(fn(full))
+		}
+	}
 }
 
 // MCPTool registers an agent-callable tool on the default module. Input and
@@ -50,10 +177,28 @@ func ToolPermission(name string) MCPToolOption {
 //	    })
 //
 // Generics give compile-time type safety on the handler signature; schemas are
-// derived at registration via reflection and validated against incoming JSON
-// at call time (NOT statically against the wire format).
+// derived at registration via reflection and enforced against incoming JSON at
+// call time (NOT statically against the wire format). Enforcement covers both
+// constraints the derived schema states: a missing `required` argument and an
+// unknown key (additionalProperties:false) are each rejected as ErrInvalidArgs
+// rather than silently becoming a zero value.
 //
-// Optional MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").
+// DOCUMENT YOUR FIELDS. The model picks arguments from the input schema alone,
+// so an undescribed field is one it has to guess at. Use the jsonschema struct
+// tag — it needs no SDK API and shows up in tools/list immediately:
+//
+//	type GreetArgs struct {
+//	    Name string `json:"name" jsonschema:"description=Who to greet."`
+//	}
+//
+// Registration logs a warning naming every input field that has no
+// description.
+//
+// Optional MCPToolOptions scope and annotate the tool: ToolPermission gates
+// it, and ToolReadOnly / ToolDestructive / ToolIdempotent / ToolTitle
+// become the MCP annotations object. Declare ToolDestructive on anything a
+// person would want to be asked about first — the platform agent renders it
+// into the description the model reads.
 //
 // Panics before Init or on schema derivation failure.
 func MCPTool[In, Out any](name, description string, handler func(ctx context.Context, args In) (Out, error), opts ...MCPToolOption) {
@@ -75,17 +220,74 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 		Description:  description,
 		InputSchema:  inputSchema,
 		OutputSchema: outputSchema,
-		Handler:      wrapMCPToolHandler(handler),
+		Handler:      wrapMCPToolHandler(handler, inputSchema),
 	}
 	if cfg.permission != "" {
 		decl.Permission, _ = m.ensurePermissionDeclared("MCPTool", cfg.permission)
 	}
+	decl.Annotations = cfg.buildAnnotations()
+	decl.Digest = cfg.digest
+	m.warnUndocumentedFields(name, inputSchema)
 	m.registry.AddMCPTool(decl)
+}
+
+// warnUndocumentedFields logs the input fields a tool ships with no
+// description.
+//
+// 🔴 WHY THIS IS WORTH A LOG LINE. Across the fleet, 0 of 45 shipped tools
+// documented a single field. The model chooses arguments from the input schema
+// and nothing else, so an undescribed field is one it fills by guessing at the
+// name — and `jsonschema:"description=..."` already worked, at zero cost, the
+// whole time. Nothing ever told anyone, so nobody did it.
+//
+// A warning rather than an error: descriptions are a quality bar, and failing
+// a module's boot over prose would be a worse trade than shipping it
+// undocumented. It names the fields so the fix is mechanical.
+func (m *Module) warnUndocumentedFields(tool string, inputSchema json.RawMessage) {
+	var parsed struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(inputSchema, &parsed); err != nil {
+		return
+	}
+	undocumented := make([]string, 0, len(parsed.Properties))
+	for field, prop := range parsed.Properties {
+		if prop.Description == "" {
+			undocumented = append(undocumented, field)
+		}
+	}
+	if len(undocumented) == 0 {
+		return
+	}
+	// Map iteration order is random; a log line that reorders between boots is
+	// noise in a diff and unusable in a test.
+	sort.Strings(undocumented)
+	m.logger.Printf("MCPTool(%s): input fields have no description: %s — add `jsonschema:\"description=...\"` struct tags so the agent stops guessing",
+		tool, strings.Join(undocumented, ", "))
 }
 
 // MCPResource registers an agent-readable resource on the default module. The
 // handler returns current content on demand. Output schema is derived from Out.
 // Panics before Init or on schema derivation failure.
+//
+// Deprecated: nothing can reach an MCP resource. The dispatch MCP server
+// answers `method not found` to every resources/* call — its v1 capability set
+// is tools only, by design (api-platform, MCPServerHandler's JSON-RPC switch),
+// and the SDK never advertises a resources capability either. A registered
+// resource is therefore served on the module's own router and read by nobody:
+// adoption across the fleet is 0 of 11 modules, which is the expected outcome
+// for a surface with no client.
+//
+// Expose the same data as an MCPTool with no arguments. A tool is reachable,
+// it carries the same derived output schema, and it can be annotated read-only
+// (see the Tool* options) so an agent treats it exactly as it would a resource.
+//
+// This will be removed once the last caller is gone. It is not removed now
+// because doing so is a breaking change to a published module API, and there
+// is no evidence anyone is calling it — only evidence that it would not work
+// if they did.
 func MCPResource[Out any](name, description string, handler func(ctx context.Context) (Out, error)) {
 	m := mustDefault("MCPResource")
 	schema, err := deriveMCPSchema[Out]()
@@ -100,16 +302,76 @@ func MCPResource[Out any](name, description string, handler func(ctx context.Con
 	})
 }
 
-// wrapMCPToolHandler adapts a typed handler into the type-erased registry form.
-// Args unmarshal failures become ErrInvalidArgs (400); handler errors pass
-// through (default to 500 unless the handler returned ErrInvalidArgs itself).
-func wrapMCPToolHandler[In, Out any](handler func(context.Context, In) (Out, error)) registry.MCPToolHandler {
+// requiredProperties reads the `required` array out of a derived input schema.
+// Parsed ONCE at registration — the result is closed over by the handler, so
+// the call path never re-parses the schema.
+func requiredProperties(schema json.RawMessage) []string {
+	var parsed struct {
+		Required []string `json:"required"`
+	}
+	// A schema that will not parse is not a reason to reject every call: the
+	// unmarshal below still enforces types and unknown fields. Derivation
+	// failure already panicked at registration, so this is unreachable in
+	// practice and fails OPEN only for the required check.
+	if err := json.Unmarshal(schema, &parsed); err != nil {
+		return nil
+	}
+	return parsed.Required
+}
+
+// wrapMCPToolHandler adapts a typed handler into the type-erased registry form
+// and enforces the input schema the module published.
+//
+// 🔴 THE SCHEMA USED TO BE ADVERTISED AND ENFORCED BY NOBODY. MCPTool's own doc
+// comment promised args were "validated against incoming JSON at call time",
+// and the only thing that ran was json.Unmarshal — which ignores both of the
+// constraints the derived schema states:
+//
+//   - `required` — Go leaves an absent field at its zero value, so a tool
+//     declaring a required userId ran with userId="" and, if that meant "all
+//     users" or "me", did the wrong thing silently. An LLM omitting an argument
+//     is the ordinary case, not the exotic one.
+//   - `additionalProperties:false` — Go drops unknown keys without a word, so a
+//     model calling `{"user_id": ...}` against a `userId` field got the same
+//     silent zero value plus no signal that it had misspelled anything.
+//
+// Both are now rejected as ErrInvalidArgs (400), which the MCP layer turns into
+// an in-band error the model can read and retry against. A wrong answer
+// delivered confidently is worse than an error, and this closes the gap between
+// what the schema says and what the module does.
+func wrapMCPToolHandler[In, Out any](handler func(context.Context, In) (Out, error), inputSchema json.RawMessage) registry.MCPToolHandler {
+	required := requiredProperties(inputSchema)
 	return func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
 		var in In
 		if len(args) > 0 && string(args) != "null" {
-			if err := json.Unmarshal(args, &in); err != nil {
+			// Presence check first, against the raw object: JSON Schema's
+			// `required` is about the KEY being present, so an explicit null
+			// satisfies it and a zero value from an absent key does not.
+			if len(required) > 0 {
+				var present map[string]json.RawMessage
+				if err := json.Unmarshal(args, &present); err != nil {
+					return nil, fmt.Errorf("%w: %s", system.ErrInvalidArgs, err.Error())
+				}
+				for _, name := range required {
+					if _, ok := present[name]; !ok {
+						return nil, fmt.Errorf("%w: missing required argument %q", system.ErrInvalidArgs, name)
+					}
+				}
+			}
+			// DisallowUnknownFields IS additionalProperties:false: the schema's
+			// properties are derived from In's fields, so "unknown to the
+			// struct" and "not in properties" are the same set, at every level
+			// of nesting.
+			dec := json.NewDecoder(bytes.NewReader(args))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&in); err != nil {
 				return nil, fmt.Errorf("%w: %s", system.ErrInvalidArgs, err.Error())
 			}
+		} else if len(required) > 0 {
+			// No args at all, but the schema says some are mandatory. Running
+			// the handler on an all-zero In is precisely the silent-wrong-answer
+			// case above.
+			return nil, fmt.Errorf("%w: missing required argument %q", system.ErrInvalidArgs, required[0])
 		}
 		out, err := handler(ctx, in)
 		if err != nil {

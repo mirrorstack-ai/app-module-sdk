@@ -50,3 +50,15 @@ jobs:
         env:
           DATABASE_URL: postgres://test:test@localhost:5433/test?sslmode=disable
           REDIS_URL: redis://localhost:6379
+
+      # examples/template is its OWN Go module, so `./...` above never reached
+      # it and nothing had compiled it since it was written — it silently
+      # shipped a Config that omits Slug. It carries `replace => ../..`, which
+      # is what makes this worth running: it builds against THIS working tree,
+      # so an SDK change that breaks the documented example fails here instead
+      # of in the first reader's terminal.
+      - name: Build examples/template against this tree
+        working-directory: examples/template
+        run: |
+          go vet ./...
+          go build ./...

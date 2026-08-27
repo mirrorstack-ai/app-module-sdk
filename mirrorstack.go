@@ -795,6 +795,60 @@ type MCPToolOption = core.MCPToolOption
 //	ms.MCPTool("list-users", "List users", listUsers, ms.ToolPermission("users.read"))
 func ToolPermission(name string) MCPToolOption { return core.ToolPermission(name) }
 
+// ToolTitle sets a short human-readable display name shown by clients that
+// render a tool list for a person. The wire name stays the identifier.
+//
+//	ms.MCPTool("list-users", "List users", listUsers, ms.ToolTitle("List users"))
+func ToolTitle(title string) MCPToolOption { return core.ToolTitle(title) }
+
+// ToolReadOnly declares that the tool modifies nothing.
+//
+// 🔴 UNSET IS NOT READ-ONLY. A tool that declares nothing is UNKNOWN, and every
+// reader must treat unknown as "may write". The default could not be
+// readOnly:true — that would silently vouch for every tool ever written,
+// including the ones that delete things.
+//
+//	ms.MCPTool("list-users", "List users", listUsers, ms.ToolReadOnly())
+func ToolReadOnly() MCPToolOption { return core.ToolReadOnly() }
+
+// ToolDestructive declares that the tool changes or removes data irreversibly.
+// The platform agent renders this into the tool description the model reads, so
+// it is a real warning rather than metadata.
+//
+// Declare it on anything a person would want to be asked about first. An absent
+// hint is not a promise of safety — but it is not a warning either, so a
+// destructive tool that stays silent is treated like any other.
+//
+//	ms.MCPTool("delete-user", "Delete a user", deleteUser,
+//	    ms.ToolDestructive(), ms.ToolPermission("users.write"))
+func ToolDestructive() MCPToolOption { return core.ToolDestructive() }
+
+// ToolIdempotent declares that calling the tool twice with the same arguments
+// has the same effect as calling it once — which is what makes a retry safe.
+func ToolIdempotent() MCPToolOption { return core.ToolIdempotent() }
+
+// ToolDigest declares how this tool's result compresses, for replay on later
+// turns.
+//
+// 🔴 THE MODULE HAS TO SAY THIS BECAUSE THE PLATFORM CANNOT GUESS IT. Tool
+// results are replayed so a later turn can still cite them, and a large one has
+// to shrink somehow. Without a digest the only option is a blind byte
+// truncation — which keeps the FIRST n bytes, and the first n bytes of a
+// fifty-row table is rows one to four. You know that "50 users, first five: …,
+// filter by role to narrow" answers more later questions in fewer tokens than
+// rows one to four do. Nothing outside your module knows that.
+//
+// It runs only when the full result is large enough to be worth shrinking, and
+// never fails the call: a digest that errors is dropped and the platform falls
+// back to truncation.
+//
+//	ms.MCPTool("users-list", "List users", listUsers,
+//	    ms.ToolDigest(func(r UsersResult) any {
+//	        return map[string]any{"total": r.Total, "sample": r.Users[:min(5, len(r.Users))]}
+//	    }),
+//	)
+func ToolDigest[Out any](fn func(Out) any) MCPToolOption { return core.ToolDigest(fn) }
+
 // MCPTool registers an agent-callable tool on the default module with JSON
 // Schema derived from the type parameters via reflection. Optional
 // MCPToolOptions scope the tool, e.g. ms.ToolPermission("users.read").
@@ -803,6 +857,23 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 }
 
 // MCPResource registers an agent-readable resource on the default module.
+//
+// Deprecated: nothing can reach an MCP resource. The dispatch MCP server
+// answers `method not found` to every resources/* call — its v1 capability set
+// is tools only, by design (api-platform, MCPServerHandler's JSON-RPC switch),
+// and the SDK never advertises a resources capability either. A registered
+// resource is therefore served on the module's own router and read by nobody:
+// adoption across the fleet is 0 of 11 modules, which is the expected outcome
+// for a surface with no client.
+//
+// Expose the same data as an MCPTool with no arguments. A tool is reachable,
+// it carries the same derived output schema, and it can be annotated read-only
+// (see the Tool* options) so an agent treats it exactly as it would a resource.
+//
+// This will be removed once the last caller is gone. It is not removed now
+// because doing so is a breaking change to a published module API, and there
+// is no evidence anyone is calling it — only evidence that it would not work
+// if they did.
 func MCPResource[Out any](name, description string, handler func(ctx context.Context) (Out, error)) {
 	core.MCPResource[Out](name, description, handler)
 }
