@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mirrorstack-ai/app-module-sdk/audit"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
@@ -106,24 +107,28 @@ func (m *Module) ensureDevAppSchema(ctx context.Context, schema string) error {
 }
 
 // provisionDevAppSchema runs the per-app setup: app-scope migrations into
-// app_<id>, then the contributions table (when the module declares any slots),
-// since that store is per-app — handlers read it via Module.DB, which resolves
-// to the app schema. Without it, a host module's slot reads/writes would hit a
-// missing relation the moment dev moved off the single shared schema.
+// app_<id>, then the SDK-owned per-app stores. Contributions are provisioned
+// only when the module declares a slot; the audit outbox is provisioned for
+// every module because any mutation may record audit. Both stores use the same
+// schema-scoped, module-placeholder-aware querier that normal dev requests use.
 func (m *Module) provisionDevAppSchema(ctx context.Context, schema string) error {
 	if err := m.ensureSchemaMigrated(ctx, migration.ScopeApp, schema); err != nil {
 		return err
 	}
+	sctx := db.WithSchema(ctx, schema)
+	q, release, err := m.DB(sctx)
+	if err != nil {
+		return fmt.Errorf("dev provision %s: open db: %w", schema, err)
+	}
+	defer release()
+
 	if m.contribReg.Len() > 0 {
-		sctx := db.WithSchema(ctx, schema)
-		q, release, err := m.DB(sctx)
-		if err != nil {
-			return fmt.Errorf("dev provision %s: open db: %w", schema, err)
-		}
-		defer release()
 		if err := m.contribStorage.EnsureTable(sctx, q); err != nil {
 			return fmt.Errorf("dev provision %s: ensure contributions table: %w", schema, err)
 		}
+	}
+	if err := audit.EnsureTable(sctx, q); err != nil {
+		return fmt.Errorf("dev provision %s: ensure audit outbox: %w", schema, err)
 	}
 	return nil
 }
@@ -298,9 +303,10 @@ func pinnedRunTx(inner migration.TxRunner, schema string) migration.TxRunner {
 }
 
 // moduleHasTables reports whether the schema contains at least one ordinary
-// table whose name starts with this module's id prefix (m<id>_...). Used by the
-// drift self-heal: a module that recorded migrations but owns no tables in the
-// schema never actually ran its DDL there.
+// app-migration table whose name starts with this module's id prefix
+// (m<id>_...). SDK-owned stores do not count: contributions and audit are
+// provisioned independently after migrations, so treating either as migration
+// evidence would mask a recorded migration whose application tables are gone.
 func (m *Module) moduleHasTables(ctx context.Context, pool *pgxpool.Pool, schema string) (bool, error) {
 	var exists bool
 	err := pool.QueryRow(ctx, `
@@ -309,7 +315,9 @@ func (m *Module) moduleHasTables(ctx context.Context, pool *pgxpool.Pool, schema
 			WHERE table_schema = $1
 			  AND table_type = 'BASE TABLE'
 			  AND table_name LIKE $2
-		)`, schema, m.config.ID+"\\_%").Scan(&exists)
+			  AND table_name NOT IN ($3, $4)
+		)`, schema, m.config.ID+"\\_%",
+		m.config.ID+"_contributions", m.config.ID+"_audit_outbox").Scan(&exists)
 	return exists, err
 }
 
