@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.10] - 2026-08-30
+
 ### Added
 
 - `ms.DrainAudit` / `(*Module).DrainAudit` forward one bounded batch from the
@@ -33,8 +35,9 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 This is an additive public hook plus a fail-closed provenance requirement on
 the existing audit path. No exported signature was removed or changed, so the
-next release remains a PATCH under the repository's pre-1.0 convention. It must
-not be released before the compatible API audit consumer is published.
+release remains a PATCH under the repository's pre-1.0 convention. The
+compatible API audit consumer was published from API Platform commit
+`5c2551533c0f5662e300f82f9d0b7fbf322c507c` before this release.
 
 ## [v0.4.9] - 2026-08-30
 
