@@ -50,7 +50,7 @@ func consumeTrustedInvocation(w http.ResponseWriter, r *http.Request, binding in
 		return r, true, false
 	}
 
-	trusted, _, err := invocationwire.DecodeHeader(values[0])
+	trusted, proof, err := invocationwire.DecodeHeader(values[0])
 	if err != nil || !requestMatchesInvocation(r, trusted) || !moduleMatchesInvocation(binding, trusted) ||
 		(trusted.Identity.ActorDelegation != "" && !actor.ValidTransportValue(trusted.Identity.ActorDelegation)) {
 		rejectInvocation(w)
@@ -68,7 +68,7 @@ func consumeTrustedInvocation(w http.ResponseWriter, r *http.Request, binding in
 		return r, true, false
 	}
 
-	ctx := invocationwire.WithContext(r.Context(), trusted)
+	ctx := invocationwire.WithContextAndProof(r.Context(), trusted, proof)
 	ctx = actor.WithoutDelegation(ctx)
 	ctx = db.WithSchema(ctx, trusted.App.Schema)
 	ctx = Set(ctx, Identity{

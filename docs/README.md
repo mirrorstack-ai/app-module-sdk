@@ -12,7 +12,7 @@ Reference + conceptual guides for building MirrorStack modules in Go.
 
 - [Module structure](./concepts/module-structure.md) — the one skeleton every shipped module uses, and the single question that decides which directory a file goes in.
 - [Agent tools](./concepts/agent-tools.md) — MCP tools/resources vs skills vs subagents; why modules are agent-first.
-- [Audit trails](./concepts/audit.md) — recording who changed what and how; ledger vs provenance columns, and why the actor is never a header.
+- [Durable audit records](./concepts/audit.md) — atomic module-owned facts with platform-proven actor/request provenance and shared outbox delivery.
 - [Dependencies](./concepts/dependencies.md) — required vs optional deps, auto-detect rule, extract-function caveat.
 - [Manifest](./concepts/manifest.md) — what's in the manifest endpoint, field by field.
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal and when to use each.

@@ -7,6 +7,35 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- `ms.DrainAudit` / `(*Module).DrainAudit` forward one bounded batch from the
+  current app's SDK-owned audit outbox. Claiming uses expiring leases, rotating
+  fence tokens and `SKIP LOCKED`; exact event replay is idempotent at API
+  Platform, while changed content conflicts.
+
+### Changed
+
+- `audit.Record` now privately persists the exact canonical invocation proof
+  authenticated for the mutation. `audit.Entry` remains source-compatible and
+  still cannot carry an actor or trusted scope. A proofless context returns
+  `audit.ErrProvenanceUnavailable` before SQL, so a business mutation cannot
+  commit with invented or permanently unverifiable provenance.
+- A successful `ms.Tx` that called `audit.Record` makes a bounded best-effort
+  drain after commit. Transactions without an audit insert do no extra query. A
+  delivery outage leaves the atomic outbox row durable for retry and does not
+  turn the already-committed mutation into a reported failure; rollback never
+  drains.
+- Existing outbox tables upgrade in place. Older pending rows without proof are
+  retained and quarantined as `missing_invocation_proof`, never backfilled with
+  a plausible actor. Permanent rejection and exhausted retries are likewise
+  retained for operator inspection.
+
+This is an additive public hook plus a fail-closed provenance requirement on
+the existing audit path. No exported signature was removed or changed, so the
+next release remains a PATCH under the repository's pre-1.0 convention. It must
+not be released before the compatible API audit consumer is published.
+
 ## [v0.4.9] - 2026-08-30
 
 ### Added

@@ -87,6 +87,14 @@ func TestLambdaInvocationInstallsTypedContextAndStripsCompatibilityWire(t *testi
 		if schema := db.SchemaFrom(r.Context()); schema != trusted.App.Schema {
 			t.Fatalf("schema=%q want=%q", schema, trusted.App.Schema)
 		}
+		proof := invocationwire.ProofFromContext(r.Context())
+		if !bytes.Equal(proof, raw) {
+			t.Fatal("Lambda did not retain the exact private invocation proof")
+		}
+		proof[0] ^= 0xff
+		if again := invocationwire.ProofFromContext(r.Context()); len(again) == 0 || again[0] == proof[0] {
+			t.Fatal("private Lambda invocation proof shared mutable storage")
+		}
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Fatal("ordinary header was removed")
 		}

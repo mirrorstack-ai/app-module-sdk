@@ -85,6 +85,15 @@ func TestRequireProxyTypedInvocationInstallsAuthoritativeContextAndStripsWire(t 
 		if schema := db.SchemaFrom(r.Context()); schema != trusted.App.Schema {
 			t.Fatalf("schema = %q, want %q", schema, trusted.App.Schema)
 		}
+		proof := invocationwire.ProofFromContext(r.Context())
+		decodedProof, err := invocationwire.EncodeHeader(proof)
+		if err != nil || decodedProof != header {
+			t.Fatalf("private invocation proof changed: header_equal=%v err=%v", decodedProof == header, err)
+		}
+		proof[0] ^= 0xff
+		if again := invocationwire.ProofFromContext(r.Context()); len(again) == 0 || again[0] == proof[0] {
+			t.Fatal("private invocation proof shared mutable storage")
+		}
 		if actor.Delegation(r.Context()) != "" {
 			t.Fatal("public surface activated typed actor delegation")
 		}

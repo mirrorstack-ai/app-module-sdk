@@ -155,7 +155,7 @@ err := ms.Tx(r.Context(), func(q db.Querier) error {
 ### Module-shared schema (`mod_<id>`)
 
 For state that crosses app boundaries — outbox tables, dedup ledgers,
-cross-app audit logs, rate limiters, module-wide config — use `ms.ModuleDB`
+rate limiters, module-wide config — use `ms.ModuleDB`
 and `ms.ModuleTx`:
 
 ```go
@@ -168,6 +168,11 @@ err := ms.ModuleTx(r.Context(), func(q db.Querier) error {
 `ModuleDB` and `ModuleTx` operate on the module's `mod_<id>` schema — independent
 of the per-app `app_<id>` schema that `DB`/`Tx` use. A handler that needs both
 calls both — they use independent credentials and don't interfere.
+
+Do not build a module-shared audit log. Record a business change with
+`audit.Record` inside the same `ms.Tx`; the SDK owns the per-app durable outbox,
+post-commit delivery, retry and provenance handoff. `ms.DrainAudit` is the
+shared backlog hook for cron/worker execution.
 
 The `mod_<id>` schema is where you put `sql/module/*.up.sql` migrations
 (see Module structure below).
@@ -380,7 +385,7 @@ app-mod-{name}/
       0000_initial.up.sql
       0000_initial.down.sql
     module/                    Per-module migrations (single mod_<id> shared schema)
-      0000_outbox.up.sql       e.g. outbox, dedup ledgers, audit logs
+      0000_outbox.up.sql       e.g. module-wide outbox or dedup ledger
       0000_outbox.down.sql
     queries/                   sqlc query definitions
   api/                         Go backend

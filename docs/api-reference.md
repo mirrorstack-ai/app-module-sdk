@@ -142,6 +142,29 @@ ms.Tx(ctx, func(q db.Querier) error {
 })
 ```
 
+## Audit
+
+| Function | Purpose |
+|---|---|
+| `audit.Record(ctx, q, entry)` | Append a module-owned fact and the request's private authenticated proof to the current app's outbox. Use the mutation's transaction querier. |
+| `ms.DrainAudit(ctx)` | Claim and forward one bounded outbox batch. Safe for concurrent cron/worker calls; `ms.Tx` also attempts it after commit. |
+
+```go
+ms.Tx(r.Context(), func(q db.Querier) error {
+    if _, err := q.Exec(r.Context(), "UPDATE items SET state = $1 WHERE id = $2", "ready", id); err != nil {
+        return err
+    }
+    return audit.Record(r.Context(), q, audit.Entry{
+        SubjectKind: "item", SubjectID: id, Action: "readied",
+    })
+})
+```
+
+`audit.Entry` has no actor or provenance field. API Platform derives trusted
+identity from the original signed invocation. Without one, `audit.Record`
+returns `audit.ErrProvenanceUnavailable` before SQL. See
+[Durable audit records](./concepts/audit.md).
+
 ## Cache / Storage / Meter
 
 | Function | Purpose |

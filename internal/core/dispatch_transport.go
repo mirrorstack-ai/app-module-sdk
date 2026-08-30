@@ -147,6 +147,21 @@ func postDispatchJSON(ctx context.Context, op, url, appID string, payload any, e
 	return postDispatchJSONInto(ctx, op, url, appID, payload, nil, extraHeaders)
 }
 
+// dispatchResponseError preserves the status class for durable transports
+// without changing the long-standing human-readable error returned by Emit,
+// Notify, Delivery, and member assertions. Its body is bounded at the read
+// site and stays private to this package.
+type dispatchResponseError struct {
+	op         string
+	path       string
+	statusCode int
+	body       string
+}
+
+func (e *dispatchResponseError) Error() string {
+	return fmt.Sprintf("%s %s -> %d: %s", e.op, e.path, e.statusCode, e.body)
+}
+
 // postDispatchJSONInto is postDispatchJSON for a surface that needs the
 // RESPONSE, decoding a 2xx body into out (pass nil to discard it, which is what
 // postDispatchJSON does). Everything else — base headers, the opt-in credential
@@ -179,7 +194,10 @@ func postDispatchJSONInto(ctx context.Context, op, url, appID string, payload, o
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("%s %s -> %d: %s", op, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return &dispatchResponseError{
+			op: op, path: req.URL.Path, statusCode: resp.StatusCode,
+			body: strings.TrimSpace(string(b)),
+		}
 	}
 	if out == nil {
 		return nil

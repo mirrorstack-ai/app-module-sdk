@@ -232,7 +232,7 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 		// Lambda and task worker paths — see inject.go.
 		params := legacyInjectParams(req)
 		if typed {
-			params = typedInjectParams(req, trustedInvocation)
+			params = typedInjectParams(req, trustedInvocation.context)
 			httpReq = httpReq.WithContext(actor.WithoutDelegation(httpReq.Context()))
 		}
 		reqCtx, err := InjectResources(httpReq.Context(), params)
@@ -243,7 +243,7 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 			return jsonError(400, err.Error()), nil
 		}
 		if typed {
-			reqCtx = invocationwire.WithContext(reqCtx, trustedInvocation)
+			reqCtx = invocationwire.WithContextAndProof(reqCtx, trustedInvocation.context, trustedInvocation.proof)
 		}
 		// Payload-trust mark: RequireProxy passes a marked request through
 		// exactly like Lambda mode (the envelope never carries the per-session

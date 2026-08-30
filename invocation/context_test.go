@@ -143,6 +143,9 @@ func TestCrossFieldConflictsFailClosed(t *testing.T) {
 func TestContextCopiesSlicesAndBodyBinding(t *testing.T) {
 	trusted := fixture()
 	ctx := invocationwire.WithContext(context.Background(), trusted)
+	if proof := invocationwire.ProofFromContext(ctx); proof != nil {
+		t.Fatalf("synthetic typed context unexpectedly carried proof: %q", proof)
+	}
 	trusted.Routes.Redirects[0] = "https://mutated.example"
 	trusted.Cookies.Capabilities[0] = "mutated"
 
