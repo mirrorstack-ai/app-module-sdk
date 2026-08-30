@@ -30,20 +30,20 @@ const unreachableDSN = "postgres://u:p@127.0.0.1:1/none?sslmode=disable"
 
 const contributionDefaultDevDSN = "postgres://mirrorstack:mirrorstack@localhost:5433/mirrorstack?sslmode=disable"
 
-// contributionIntegrationDSN uses the same DATABASE_URL contract as the CI
+// provisionIntegrationDSN uses the same DATABASE_URL contract as the CI
 // integration job. Developers without one configured retain the historical
 // localhost:5433 fallback.
-func contributionIntegrationDSN() (dsn string, required bool) {
+func provisionIntegrationDSN() (dsn string, required bool) {
 	if dsn := strings.TrimSpace(os.Getenv("DATABASE_URL")); dsn != "" {
 		return dsn, true
 	}
 	return contributionDefaultDevDSN, false
 }
 
-// requireContributionPostgres only skips when a developer has not configured a
+// requireProvisionPostgres only skips when a developer has not configured a
 // database. A supplied DATABASE_URL is an explicit integration-test contract,
 // so a connection failure must fail CI instead of silently reducing coverage.
-func requireContributionPostgres(t *testing.T, required bool, err error) {
+func requireProvisionPostgres(t *testing.T, required bool, err error) {
 	t.Helper()
 	if err == nil {
 		return
@@ -141,7 +141,7 @@ func TestContributionStore_DeployedPlane_Integration(t *testing.T) {
 	}
 	resetDefault(t)
 	t.Setenv(devMigrateEnvVar, "")
-	dsn, databaseRequired := contributionIntegrationDSN()
+	dsn, databaseRequired := provisionIntegrationDSN()
 	t.Setenv("DATABASE_URL", dsn)
 
 	// A platform-minted module id (m + 32 hex) so the physical table name — and
@@ -156,9 +156,9 @@ func TestContributionStore_DeployedPlane_Integration(t *testing.T) {
 
 	ctx := context.Background()
 	pool, release, err := m.resolvePool(ctx)
-	requireContributionPostgres(t, databaseRequired, err)
+	requireProvisionPostgres(t, databaseRequired, err)
 	defer release()
-	requireContributionPostgres(t, databaseRequired, pool.Ping(ctx))
+	requireProvisionPostgres(t, databaseRequired, pool.Ping(ctx))
 
 	appInstalled := "aaaaaaaa-1111-1111-1111-111111111111"  // gets the install hook
 	appLegacy := "bbbbbbbb-2222-2222-2222-222222222222"     // installed before the hook existed
@@ -297,7 +297,7 @@ func TestContributionStore_DevPlaneUnchanged_Integration(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 	resetDefault(t)
-	dsn, databaseRequired := contributionIntegrationDSN()
+	dsn, databaseRequired := provisionIntegrationDSN()
 	t.Setenv(devMigrateEnvVar, dsn)
 
 	const moduleID = "m3a2b1c09876543210fedcba987654321"
@@ -309,9 +309,9 @@ func TestContributionStore_DevPlaneUnchanged_Integration(t *testing.T) {
 
 	ctx := context.Background()
 	pool, release, err := m.resolvePool(ctx)
-	requireContributionPostgres(t, databaseRequired, err)
+	requireProvisionPostgres(t, databaseRequired, err)
 	defer release()
-	requireContributionPostgres(t, databaseRequired, pool.Ping(ctx))
+	requireProvisionPostgres(t, databaseRequired, pool.Ping(ctx))
 
 	schema, _ := devAppSchemaName("eeeeeeee-5555-5555-5555-555555555555")
 	table := moduleID + "_contributions"

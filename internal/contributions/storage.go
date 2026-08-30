@@ -42,8 +42,9 @@ func (s *Storage) TableName() string { return s.table }
 // deployed module's container serves many apps.
 //
 // Callers: the lifecycle install/upgrade hook (the platform's per-(app, module)
-// window, which is what provisions a deployed install) and WithTable's retry
-// (which heals an install that predates that hook). Both are idempotent.
+// window, which is what provisions a deployed install), the per-app lazy dev
+// provisioner, and WithTable's retry (which heals an install that predates the
+// hook). All are idempotent.
 //
 // CONCURRENCY. CREATE TABLE IF NOT EXISTS is idempotent but NOT atomic — the
 // existence check and the catalog insert race, so two cold containers

@@ -165,9 +165,10 @@ func Record(ctx context.Context, q db.Querier, entry Entry) error {
 // some tenants and raises 42P01 in others. The SDK also cannot ship .sql at
 // all: the module owns the migration filesystem.
 //
-// So this runs from the install/upgrade provisioner, outside the version
-// sequence entirely — the same shape the contributions store already uses, down
-// to the advisory lock that serialises two concurrent installs of the same app.
+// So this runs outside the version sequence entirely: from the deployed
+// install/upgrade provisioner and from the per-app lazy dev provisioner. It uses
+// the same shape as the contributions store, down to the advisory lock that
+// serialises two concurrent provisions of the same app.
 func EnsureTable(ctx context.Context, q db.Querier) error {
 	_, err := q.Exec(ctx, `
 		SELECT pg_advisory_xact_lock(hashtext(current_schema() || '.__MODULE_ID___audit_outbox'));

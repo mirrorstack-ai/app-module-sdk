@@ -33,6 +33,19 @@ func qualifiedTables(t *testing.T, pool *pgx.Conn, schema, prefix string) int {
 	return n
 }
 
+func qualifiedTableExists(t *testing.T, pool *pgx.Conn, schema, table string) bool {
+	t.Helper()
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema=$1 AND table_type='BASE TABLE' AND table_name=$2
+		)`, schema, table).Scan(&exists); err != nil {
+		t.Fatalf("look up table %s.%s: %v", schema, table, err)
+	}
+	return exists
+}
+
 // TestDevAppSchema_TwoModulesShareSchema_Integration is the regression guard for
 // the cross-module tracking collision: two modules provisioning the SAME app
 // schema must each get their own tables. Before the per-module tracking key,
@@ -101,11 +114,11 @@ func TestDevAppSchema_TwoModulesShareSchema_Integration(t *testing.T) {
 	defer conn.Release()
 	raw := conn.Conn()
 
-	if got := qualifiedTables(t, raw, schema, "mcore"); got != 1 {
-		t.Errorf("mcore tables in %s = %d, want 1", schema, got)
+	if !qualifiedTableExists(t, raw, schema, "mcore_items") {
+		t.Errorf("mcore_items is missing from %s", schema)
 	}
-	if got := qualifiedTables(t, raw, schema, "mgoog"); got != 1 {
-		t.Errorf("mgoog tables in %s = %d, want 1 — cross-module tracking collision", schema, got)
+	if !qualifiedTableExists(t, raw, schema, "mgoog_nonces") {
+		t.Errorf("mgoog_nonces is missing from %s — cross-module tracking collision", schema)
 	}
 	// Neither module's DDL leaked into public.
 	if got := qualifiedTables(t, raw, "public", "mgoog"); got != 0 {
@@ -167,6 +180,15 @@ func TestDevAppSchema_DriftSelfHeal_Integration(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("expected tracking row pre-drop, got %d", rows)
 	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire before self-heal: %v", err)
+	}
+	if !qualifiedTableExists(t, conn.Conn(), schema, "mheal_audit_outbox") {
+		conn.Release()
+		t.Fatal("audit outbox is missing before self-heal — test cannot prove SDK stores are excluded from drift evidence")
+	}
+	conn.Release()
 
 	// Re-provision must detect drift and re-apply (the sync.Once is per-module
 	// instance; a fresh instance models the next dev run).
@@ -175,12 +197,12 @@ func TestDevAppSchema_DriftSelfHeal_Integration(t *testing.T) {
 		t.Fatalf("re-provision: %v", err)
 	}
 
-	conn, err := pool.Acquire(ctx)
+	conn, err = pool.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	defer conn.Release()
-	if got := qualifiedTables(t, conn.Conn(), schema, "mheal"); got != 1 {
-		t.Errorf("after self-heal, mheal tables in %s = %d, want 1", schema, got)
+	if !qualifiedTableExists(t, conn.Conn(), schema, "mheal_items") {
+		t.Errorf("after self-heal, mheal_items is missing from %s", schema)
 	}
 }
