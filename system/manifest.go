@@ -225,6 +225,18 @@ type ManifestExposes struct {
 	Tables []string `json:"tables"`
 }
 
+// ManifestDocument is one canonical manifest build. Body is the exact byte
+// sequence served by the manifest HTTP endpoint, including its trailing
+// newline. SHA256 is lowercase hexadecimal over those same bytes.
+//
+// Callers must treat Body as immutable. The release-manifest tool base64
+// encodes it so a non-Go caller can recover and verify the byte sequence
+// without reserializing the JSON.
+type ManifestDocument struct {
+	Body   []byte
+	SHA256 string
+}
+
 // buildManifestMCP projects the registry's MCP declarations into wire-safe
 // entries (Handler stripped). Uses the shared toolEntries/resourceEntries
 // helpers from mcp.go so list endpoints and manifest stay in lockstep.
@@ -260,75 +272,87 @@ func ManifestHandlerWithClient(id, slug, name, icon string, tags []string, sqlFS
 }
 
 func manifestHandler(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry, client *ClientSpec) http.HandlerFunc {
-	if versions == nil {
-		versions = map[string]MigrationVersions{}
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Read each scope independently. Errors are logged with a sanitized
-		// message — in dev mode with os.DirFS the wrapped error would include
-		// the resolved filesystem path, which is dev-environment noise we
-		// don't want in CloudWatch. The operator can re-check Config.SQL
-		// locally. The manifest still serves successfully with the empty
-		// version so the platform can discover the module.
-		appVersion, appErr := migration.LatestVersion(sqlFS, migration.ScopeApp)
-		if appErr != nil {
-			log.Printf("mirrorstack: manifest app migration version unavailable (check Config.SQL is set correctly)")
-		}
-		moduleVersion, moduleErr := migration.LatestVersion(sqlFS, migration.ScopeModule)
-		if moduleErr != nil {
-			log.Printf("mirrorstack: manifest module migration version unavailable (check Config.SQL is set correctly)")
-		}
-
-		var contribSlots []contributions.SlotInfo
-		if contribReg != nil {
-			contribSlots = contribReg.List()
-		} else {
-			contribSlots = []contributions.SlotInfo{}
-		}
-
-		payload := ManifestPayload{
-			ID:                id,
-			Slug:              slug,
-			Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
-			Description:       reg.Description(),
-			DescriptionLabels: reg.DescriptionLabels(),
-			Client:            client,
-			Dependencies:      reg.Dependencies(),
-			Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},
-			Versions:          versions,
-			Routes:            reg.Routes(),
-			Events:            ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
-			Exposes:           ManifestExposes{Tables: reg.ExposedTables()},
-			Schedules:         reg.Schedules(),
-			Tasks:             reg.Tasks(),
-			Permissions:       reg.Permissions(),
-			Resources:         ManifestResources{Storage: reg.StorageRequired()},
-			Metrics:           reg.Metrics(),
-			AbsorbInfra:       reg.AbsorbsInfra(),
-			MCP:               buildManifestMCP(reg),
-			UI:                localizeUIPages(reg.UI()),
-			Provides:          contribSlots,
-			ContributesTo:     reg.OutboundContributions(),
-		}
-
-		// Marshal the body ONCE, hash exactly those bytes, advertise the hash
-		// in X-MS-Manifest-Hash, then write the SAME bytes. Encoding must be
-		// byte-identical to httputil.JSON (json.Encoder: HTML escaping + a
-		// trailing newline) so the served body is unchanged and the hash the
-		// platform/CLI read matches sha256 over what they actually receive.
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		document, err := BuildManifest(
+			id, slug, name, icon, tags, sqlFS, versions, reg, contribReg, client,
+		)
+		if err != nil {
 			log.Printf("mirrorstack: manifest marshal error: %v", err)
 			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "manifest unavailable"})
 			return
 		}
-		body := buf.Bytes()
-		sum := sha256.Sum256(body)
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set(manifestHashHeader, hex.EncodeToString(sum[:]))
+		w.Header().Set(manifestHashHeader, document.SHA256)
 		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(body); err != nil {
+		if _, err := w.Write(document.Body); err != nil {
 			log.Printf("mirrorstack: manifest write error: %v", err)
 		}
 	}
+}
+
+// BuildManifest builds the exact document used by both the served manifest
+// endpoint and the SDK's release-manifest tool mode. Keeping construction,
+// encoding, and hashing here prevents the two release inputs from drifting.
+//
+// The encoding deliberately matches httputil.JSON: encoding/json's default
+// HTML escaping and one trailing newline. Migration discovery errors remain
+// non-fatal, matching the long-standing HTTP behavior; diagnostics are
+// sanitized so an os.DirFS path is never disclosed.
+func BuildManifest(id, slug, name, icon string, tags []string, sqlFS fs.FS, versions map[string]MigrationVersions, reg *registry.Registry, contribReg *contributions.Registry, client *ClientSpec) (ManifestDocument, error) {
+	if versions == nil {
+		versions = map[string]MigrationVersions{}
+	}
+
+	// Read each scope independently. The manifest still builds with an empty
+	// version when the configured migration filesystem is unavailable.
+	appVersion, appErr := migration.LatestVersion(sqlFS, migration.ScopeApp)
+	if appErr != nil {
+		log.Printf("mirrorstack: manifest app migration version unavailable (check Config.SQL is set correctly)")
+	}
+	moduleVersion, moduleErr := migration.LatestVersion(sqlFS, migration.ScopeModule)
+	if moduleErr != nil {
+		log.Printf("mirrorstack: manifest module migration version unavailable (check Config.SQL is set correctly)")
+	}
+
+	var contribSlots []contributions.SlotInfo
+	if contribReg != nil {
+		contribSlots = contribReg.List()
+	} else {
+		contribSlots = []contributions.SlotInfo{}
+	}
+
+	payload := ManifestPayload{
+		ID:                id,
+		Slug:              slug,
+		Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
+		Description:       reg.Description(),
+		DescriptionLabels: reg.DescriptionLabels(),
+		Client:            client,
+		Dependencies:      reg.Dependencies(),
+		Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},
+		Versions:          versions,
+		Routes:            reg.Routes(),
+		Events:            ManifestEvents{Emits: reg.Emits(), Subscribes: reg.Subscribes()},
+		Exposes:           ManifestExposes{Tables: reg.ExposedTables()},
+		Schedules:         reg.Schedules(),
+		Tasks:             reg.Tasks(),
+		Permissions:       reg.Permissions(),
+		Resources:         ManifestResources{Storage: reg.StorageRequired()},
+		Metrics:           reg.Metrics(),
+		AbsorbInfra:       reg.AbsorbsInfra(),
+		MCP:               buildManifestMCP(reg),
+		UI:                localizeUIPages(reg.UI()),
+		Provides:          contribSlots,
+		ContributesTo:     reg.OutboundContributions(),
+	}
+
+	// Marshal ONCE, hash exactly those bytes, then hand the SAME slice to
+	// either the HTTP writer or release envelope.
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return ManifestDocument{}, err
+	}
+	body := buf.Bytes()
+	sum := sha256.Sum256(body)
+	return ManifestDocument{Body: body, SHA256: hex.EncodeToString(sum[:])}, nil
 }
