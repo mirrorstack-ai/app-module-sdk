@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/httpx"
+	"github.com/mirrorstack-ai/app-module-sdk/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
@@ -57,6 +60,22 @@ const callTimeout = 15 * time.Second
 // Rejecting before transport avoids spending memory and network bandwidth on a
 // request the platform will deterministically reject.
 const maxDependencyCallBody = 1 << 20
+
+// CallOptions opts one inter-module response into stricter decoding. The zero
+// value preserves Call's existing forward-compatible, unbounded response
+// behavior.
+type CallOptions struct {
+	// MaxResponseBytes bounds a successful response before JSON decoding. Zero
+	// keeps the existing unbounded behavior. Negative values are invalid.
+	MaxResponseBytes int64
+	// StrictJSON rejects response object fields not declared by out and rejects
+	// a second/trailing JSON value.
+	StrictJSON bool
+}
+
+// ErrCallResponseTooLarge is returned when a successful inter-module response
+// exceeds CallOptions.MaxResponseBytes. Use errors.Is to match it.
+var ErrCallResponseTooLarge = errors.New("ms.Call: response exceeds configured limit")
 
 // callHTTP is the shared client for inter-module calls. A single client with a
 // per-request timeout is enough — context cancellation still applies on top.
@@ -156,8 +175,18 @@ func resolveDevModuleURL(slug, path string) string {
 //
 // DEV/DISPATCH TRANSPORT — see resolveCallURL for the prod (#146) seam.
 func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
+	return m.CallWithOptions(ctx, targetModuleID, method, path, body, out, CallOptions{})
+}
+
+// CallWithOptions is Call with opt-in response bounds and strict JSON
+// decoding. A negative MaxResponseBytes is rejected before any network I/O.
+// When out is nil, a successful response body is not read or decoded.
+func (m *Module) CallWithOptions(ctx context.Context, targetModuleID, method, path string, body, out any, options CallOptions) error {
+	if options.MaxResponseBytes < 0 {
+		return errors.New("ms.CallWithOptions: MaxResponseBytes must be non-negative")
+	}
 	appID := AppID(ctx)
-	return m.callURL(ctx, appID, method, resolveCallURLFor(ctx, targetModuleID, path), path, body, out, 0)
+	return m.callURLWithOptions(ctx, appID, method, resolveCallURLFor(ctx, targetModuleID, path), path, body, out, 0, options)
 }
 
 // CallDependency addresses a declared dependency by the same stable ref used
@@ -236,7 +265,7 @@ func (m *Module) resolveDevDependencyCall(ctx context.Context, producer, path st
 	if !moduleIDPattern.MatchString(entry.ModuleID) {
 		return "", "", false, fmt.Errorf("ms.CallDependency: dependency directory entry for %q carries invalid module id %q", producer, entry.ModuleID)
 	}
-	if !moduleSlugPattern.MatchString(entry.Slug) {
+	if !ids.ValidModuleSlug(entry.Slug) {
 		return "", "", false, fmt.Errorf("ms.CallDependency: dependency directory entry for %q carries invalid module slug %q", producer, entry.Slug)
 	}
 	token, err := devTargetPlatformToken(entry.Slug)
@@ -295,14 +324,22 @@ func devEntryMatchesRef(entry devModuleEntry, producer string) bool {
 }
 
 func (m *Module) callURL(ctx context.Context, appID, method, endpoint, rawPath string, body, out any, maxBody int) error {
+	return m.callURLWithOptions(ctx, appID, method, endpoint, rawPath, body, out, maxBody, CallOptions{})
+}
+
+func (m *Module) callURLWithOptions(ctx context.Context, appID, method, endpoint, rawPath string, body, out any, maxBody int, options CallOptions) error {
 	secret, err := outboundServiceSecret(ctx, "Call")
 	if err != nil {
 		return err
 	}
-	return m.callURLWithCredential(ctx, appID, method, endpoint, rawPath, body, out, maxBody, "X-MS-Service-Secret", secret)
+	return m.callURLWithCredentialOptions(ctx, appID, method, endpoint, rawPath, body, out, maxBody, "X-MS-Service-Secret", secret, options)
 }
 
 func (m *Module) callURLWithCredential(ctx context.Context, appID, method, endpoint, rawPath string, body, out any, maxBody int, credentialHeader, credential string) error {
+	return m.callURLWithCredentialOptions(ctx, appID, method, endpoint, rawPath, body, out, maxBody, credentialHeader, credential, CallOptions{})
+}
+
+func (m *Module) callURLWithCredentialOptions(ctx context.Context, appID, method, endpoint, rawPath string, body, out any, maxBody int, credentialHeader, credential string, options CallOptions) error {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -348,6 +385,27 @@ func (m *Module) callURLWithCredential(ctx context.Context, appID, method, endpo
 	}
 	if out == nil {
 		return nil
+	}
+	if options.MaxResponseBytes > 0 || options.StrictJSON {
+		reader := io.Reader(resp.Body)
+		if options.MaxResponseBytes > 0 {
+			limit := options.MaxResponseBytes
+			if limit < math.MaxInt64 {
+				limit++
+			}
+			reader = io.LimitReader(resp.Body, limit)
+		}
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return fmt.Errorf("ms.Call: read response: %w", err)
+		}
+		if options.MaxResponseBytes > 0 && int64(len(data)) > options.MaxResponseBytes {
+			return fmt.Errorf("%w: limit is %d bytes", ErrCallResponseTooLarge, options.MaxResponseBytes)
+		}
+		if options.StrictJSON {
+			return httpx.UnmarshalStrict(data, out)
+		}
+		return json.NewDecoder(bytes.NewReader(data)).Decode(out)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -441,6 +499,12 @@ func (m *Module) CallDependencyPost(ctx context.Context, producerRef, path strin
 // module. Panics before Init.
 func Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
 	return mustDefault("Call").Call(ctx, targetModuleID, method, path, body, out)
+}
+
+// CallWithOptions makes one inter-module hop with opt-in bounded/strict
+// response decoding on the default module. Panics before Init.
+func CallWithOptions(ctx context.Context, targetModuleID, method, path string, body, out any, options CallOptions) error {
+	return mustDefault("CallWithOptions").CallWithOptions(ctx, targetModuleID, method, path, body, out, options)
 }
 
 // CallGet is Call specialized to GET on the default module. Panics before Init.

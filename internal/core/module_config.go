@@ -198,13 +198,6 @@ func (m *Module) devAppSchemaMiddleware(next http.Handler) http.Handler {
 // schema names still fits comfortably under Postgres's 63-char identifier limit.
 var moduleIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,35}$`)
 
-// moduleSlugPattern matches catalog slugs: lowercase letter, then lowercase
-// alphanumerics/hyphens, max 16 chars. The 16-char cap keeps the worst-case
-// constructed identifier `<username>_<slug>_<table>_<col>_fkey` inside
-// Postgres's 63-byte NAMEDATALEN ceiling. The CLI's publish-time linter is
-// the real gate; this regex catches obvious shape errors at New() time.
-var moduleSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,15}$`)
-
 func validateClientPath(field, value string) error {
 	if value == "" || value == "." || strings.ContainsAny(value, "\\:\x00") || !fs.ValidPath(value) {
 		return fmt.Errorf("mirrorstack: Config.Client.%s %q must be a non-empty canonical relative path using forward slashes", field, value)

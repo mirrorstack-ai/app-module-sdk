@@ -160,20 +160,34 @@ func TestMCPToolsCall_EmptyNameReturns400(t *testing.T) {
 func TestMCPToolsCall_HandlerErrorReturns500(t *testing.T) {
 	t.Parallel()
 
+	wantErr := errors.New("handler exploded")
 	reg := newMCPReg(t)
 	reg.AddMCPTool(registry.MCPToolDecl{
 		Name: "boom", Description: "Always fails",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 		Handler: func(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-			return nil, errors.New("handler exploded")
+			return nil, wantErr
 		},
 	})
 	req := httptest.NewRequest("POST", "/tools/call", strings.NewReader(`{"name":"boom","args":{}}`))
 	rec := httptest.NewRecorder()
-	MCPToolsCallHandler(reg).ServeHTTP(rec, req)
+	var loggedKind, loggedName string
+	var loggedErr error
+	MCPToolsCallHandlerWithFailureLogger(reg, func(_ context.Context, kind, name string, err error) {
+		loggedKind, loggedName, loggedErr = kind, name, err
+	}).ServeHTTP(rec, req)
 
 	if rec.Code != 500 {
 		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "handler exploded") {
+		t.Fatalf("response exposed handler error: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request could not be completed") {
+		t.Fatalf("response = %s, want safe generic error", rec.Body.String())
+	}
+	if loggedKind != "tool" || loggedName != "boom" || !errors.Is(loggedErr, wantErr) {
+		t.Fatalf("failure log = (%q, %q, %v), want (tool, boom, %v)", loggedKind, loggedName, loggedErr, wantErr)
 	}
 }
 
@@ -273,6 +287,37 @@ func TestMCPResourcesRead_UnknownReturns404(t *testing.T) {
 
 	if rec.Code != 404 {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestMCPResourcesRead_HandlerErrorReturnsSafe500AndLogs(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("resource backend password leaked")
+	reg := newMCPReg(t)
+	reg.AddMCPResource(registry.MCPResourceDecl{
+		Name: "status", Description: "Status",
+		Handler: func(context.Context) (json.RawMessage, error) {
+			return nil, wantErr
+		},
+	})
+
+	req := httptest.NewRequest("GET", "/resources/read?name=status", nil)
+	rec := httptest.NewRecorder()
+	var loggedKind, loggedName string
+	var loggedErr error
+	MCPResourcesReadHandlerWithFailureLogger(reg, func(_ context.Context, kind, name string, err error) {
+		loggedKind, loggedName, loggedErr = kind, name, err
+	}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if got := rec.Body.String(); got != "{\"error\":\"request could not be completed\"}\n" {
+		t.Fatalf("body = %q, want safe generic error", got)
+	}
+	if loggedKind != "resource" || loggedName != "status" || !errors.Is(loggedErr, wantErr) {
+		t.Fatalf("failure log = (%q, %q, %v), want (resource, status, %v)", loggedKind, loggedName, loggedErr, wantErr)
 	}
 }
 

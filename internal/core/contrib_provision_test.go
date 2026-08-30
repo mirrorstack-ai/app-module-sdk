@@ -234,7 +234,7 @@ func TestContributionStore_DeployedPlane_Integration(t *testing.T) {
 	}
 
 	// --- Phase 2: the store is usable and app-scoped through the real routes -
-	contributor := "dddddddd-4444-4444-4444-444444444444"
+	contributor := "dddddddd-4444-4444-a444-444444444444"
 	if code, body := postContribution(t, m, schemas[appInstalled], contributor, `{"label":"Google"}`); code != http.StatusOK {
 		t.Fatalf("register status = %d, body = %s", code, body)
 	}

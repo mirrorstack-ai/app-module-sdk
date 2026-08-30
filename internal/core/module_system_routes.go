@@ -136,9 +136,12 @@ func (m *Module) mountSystemRoutes() {
 			r.Use(httputil.MaxBytes(1 << 20))
 			r.Use(m.internalAuth)
 			r.Get("/tools/list", system.MCPToolsListHandler(m.registry))
-			r.Post("/tools/call", system.MCPToolsCallHandler(m.registry))
+			logFailure := func(ctx context.Context, kind, name string, err error) {
+				LoggerFrom(ctx).Error("MCP handler failed", "kind", kind, "name", name, "error", err)
+			}
+			r.Post("/tools/call", system.MCPToolsCallHandlerWithFailureLogger(m.registry, logFailure))
 			r.Get("/resources/list", system.MCPResourcesListHandler(m.registry))
-			r.Get("/resources/read", system.MCPResourcesReadHandler(m.registry))
+			r.Get("/resources/read", system.MCPResourcesReadHandlerWithFailureLogger(m.registry, logFailure))
 		})
 	})
 }

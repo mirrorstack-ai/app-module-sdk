@@ -183,9 +183,10 @@ func (s *Storage) List(ctx context.Context, q db.Querier, slot string) ([]Contri
 	out := []Contribution{}
 	for rows.Next() {
 		var c Contribution
-		if err := rows.Scan(&c.ID, &c.Payload, &c.RegisteredAt); err != nil {
+		if err := rows.Scan(&c.OwnerModuleID, &c.Payload, &c.RegisteredAt); err != nil {
 			return nil, err
 		}
+		c.ID = c.OwnerModuleID
 		out = append(out, c)
 	}
 	return out, rows.Err()

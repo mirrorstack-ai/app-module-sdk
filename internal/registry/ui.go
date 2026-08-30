@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/mirrorstack-ai/app-module-sdk/ids"
 )
 
 // validPropTypes locks the v0 prop type vocabulary. Adding a new type means
@@ -18,9 +20,9 @@ var validPropTypes = []string{"text", "secret", "textarea", "bool", "number", "t
 
 // ModuleUI is the module's declared UI surface. Two parts:
 //
-//   - Components: the module's agent-visible React vocabulary. Each entry
-//     names a React export the module's bundle ships, plus a prop schema
-//     so the agent envelope layer (dynamic-ui v1) can compose them.
+//   - Components: stable names for independently mountable bundle components.
+//     Each declaration maps its manifest name to a separate bundle export and
+//     carries the prop schema used by hosts and composition tooling.
 //   - DefaultPages: the module's own React pages, mounted by the platform
 //     under /apps/<app-slug>/<module-slug><Route>. Each page is a
 //     full React export — the module has total layout freedom.
@@ -32,11 +34,10 @@ type ModuleUI struct {
 	DefaultPages []UIPage      `json:"defaultPages"`
 }
 
-// UIComponent declares one agent-visible React component shipped by the
-// module's web bundle. Name is how the component is referenced from agent
-// envelopes (namespaced "<module-slug>/<Name>" at the platform layer);
-// Export is the corresponding named export in web/index.tsx. Props is the
-// schema the agent uses to know what to pass in.
+// UIComponent declares one independently mountable component shipped by the
+// module's web bundle. Name is its stable manifest identity; Export is the
+// separate bundle export the host invokes. Props is the schema hosts validate
+// before mounting and composition tooling uses when constructing a request.
 type UIComponent struct {
 	Name   string   `json:"name"`
 	Export string   `json:"export"`
@@ -152,8 +153,8 @@ func (r *Registry) UI() *ModuleUI {
 func validateUI(ui ModuleUI) {
 	seenComp := make(map[string]struct{}, len(ui.Components))
 	for i, c := range ui.Components {
-		if c.Name == "" {
-			panic(fmt.Sprintf("mirrorstack: RegisterUI: Components[%d].Name is empty", i))
+		if !ids.ValidUIComponentName(c.Name) {
+			panic(fmt.Sprintf("mirrorstack: RegisterUI: Components[%d].Name %q is invalid (ASCII letter followed by at most 63 letters or digits)", i, c.Name))
 		}
 		if c.Export == "" {
 			panic(fmt.Sprintf("mirrorstack: RegisterUI: Components[%d] (%q) Export is empty", i, c.Name))

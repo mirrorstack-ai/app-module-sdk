@@ -5,6 +5,57 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [v0.4.8] - 2026-08-30
+
+### Added
+
+- `ids.ValidUUID`, `ids.CanonicalModuleID`, `ids.ValidModuleSlug`, and
+  `ids.ValidUIComponentName` — one public owner for UUID/module-ID
+  normalization, the 16-byte catalog slug grammar, and the 64-byte manifest
+  component-name grammar. UUID version and variant policy remains with the
+  platform database, not individual modules.
+- Strict, opt-in module contract helpers in `httpx`: `UnmarshalStrict`, bounded
+  request-body `DecodeStrictJSON`, `ValidStaticModuleRoute`, `NoStore`, strict
+  query/limit parsing, and filter-scoped `TimeIDCursor` encoding. Scoped cursors
+  carry the versioned `cs1.` wire shape and reject prefixless, unknown-version,
+  oversized, malformed, or cross-filter values with `ErrInvalidCursor`.
+- `ms.CallWithOptions` / `(*Module).CallWithOptions` with an optional successful
+  response byte bound and strict JSON decoding. Zero options preserve `Call`;
+  oversized responses match `ms.ErrCallResponseTooLarge`.
+- `Contribution.Decode` for strict typed payload decoding and
+  `Contribution.OwnerModuleID` for the explicit canonical contributor identity.
+  `Contribution.ID` remains populated as a compatibility alias.
+- `ms.WriteServerError` — log an unexpected HTTP failure with the request's
+  trusted correlation context while returning a fixed, non-sensitive 500 body.
+- `system.MCPFailureLogger`, `MCPToolsCallHandlerWithFailureLogger`, and
+  `MCPResourcesReadHandlerWithFailureLogger`, allowing request-correlated
+  diagnostics without exposing an unexpected handler error to the MCP caller.
+- `sdktest.Manifest`, `ValidateContributionPayload`, and
+  `ValidateContributionsToHost` — reusable manifest capture and exact host
+  JSON-Schema compatibility gates, including owner-qualified catalog targets.
+
+### Changed
+
+- Contribution registration and removal now reject malformed module IDs and
+  normalize accepted dashed or `m<32hex>` IDs before storage. The table schema
+  is unchanged.
+- `Provide[T]` now enforces its advertised JSON Schema at registration time in
+  addition to strict decoding. Missing required keys, `null`, unknown fields,
+  malformed JSON, and a second/trailing value are rejected before storage.
+- `Config.Slug` and UI registration use the public shared validators. Component
+  names outside the 1–64 character ASCII letter/alphanumeric grammar are
+  rejected before the manifest is served; bundle export names remain separate.
+- Unexpected MCP tool/resource handler failures are logged and returned as a
+  fixed generic 500. Errors wrapping `system.ErrInvalidArgs` remain actionable
+  400 responses, preserving caller correction behavior.
+
+Additive public surface with compatibility aliases and zero-value behavior
+preserved: existing `Call` decoding and MCP handler signatures are unchanged,
+and `Contribution.ID` remains populated. This is a PATCH per the repository's
+pre-1.0 release convention.
+
 ## [v0.4.7] - 2026-08-27
 
 ### Added

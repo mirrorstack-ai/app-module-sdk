@@ -2,6 +2,7 @@ package core
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -288,6 +289,24 @@ func TestRegisterUI_EmptyComponentFieldsPanic(t *testing.T) {
 			}()
 			m, _ := New(Config{ID: "demo"})
 			m.RegisterUI(ModuleUI{Components: []UIComponent{c}})
+		})
+	}
+}
+
+func TestRegisterUI_InvalidComponentNamesPanic(t *testing.T) {
+	t.Parallel()
+
+	for _, componentName := range []string{"user-card", "1Card", "C" + strings.Repeat("1", 64)} {
+		componentName := componentName
+		t.Run(componentName, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if recover() == nil {
+					t.Errorf("expected panic for component name %q", componentName)
+				}
+			}()
+			m, _ := New(Config{ID: "demo"})
+			m.RegisterUI(ModuleUI{Components: []UIComponent{{Name: componentName, Export: "mount"}}})
 		})
 	}
 }

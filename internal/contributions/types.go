@@ -29,6 +29,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/mirrorstack-ai/app-module-sdk/httpx"
 )
 
 var (
@@ -67,9 +69,22 @@ func (s Slot) SchemaTag() string { return s.schemaTag }
 
 // Contribution is a stored row, returned by the list endpoint.
 type Contribution struct {
+	// OwnerModuleID is the canonical UUID of the module that registered the
+	// contribution. The platform supplies this install identity; it is not a
+	// contributor-controlled field inside Payload.
+	OwnerModuleID string `json:"ownerModuleId"`
+	// ID is the compatibility alias for OwnerModuleID. Both are populated from
+	// the same stored key.
+	// Deprecated: Use OwnerModuleID.
 	ID           string          `json:"id"`
 	Payload      json.RawMessage `json:"payload"`
 	RegisteredAt time.Time       `json:"registered_at"`
+}
+
+// Decode strictly decodes the contribution payload into target, rejecting
+// undeclared fields and a second/trailing JSON value.
+func (c Contribution) Decode(target any) error {
+	return httpx.UnmarshalStrict(c.Payload, target)
 }
 
 // Registry holds all declared slots for one module. Populated at
