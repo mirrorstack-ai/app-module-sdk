@@ -18,7 +18,12 @@
 appID := ms.AppID(r.Context())
 ```
 
-SDK 會在你的 handler 執行**之前**,把平台經 dispatch 注入、受信任的 app id 提升進 context:Platform 透過 session auth,Public 透過 proxy guard 驗證過 token 的路徑(guard 證明 request 確實經過 dispatch,所以它轉發的 `X-MS-App-ID` 是可信的)。`ms.AppID` 會回傳它;只有在沒有設定 platform token 的獨立單元測試裡才回傳 `""`。`ms.AppID` 是 `ms.WithAppID` 的「入站對偶」(`ms.WithAppID` 用來把一個 *對外* 的 `ms.Call` *改指向* 另一個 app)。
+SDK 會在 handler 執行**之前**,把平台的 authoritative app id 提升進
+context。現在 direct HTTP、WSS/local 與 Lambda 都會在平台認證後消耗同一份
+[typed invocation context](./invocation.md);raw wire 與 compatibility headers
+不會進入 handler。`ms.AppID` 會回傳提升後的值;只有在沒有安裝 identity 的
+情況(例如獨立單元測試)才回傳 `""`。`ms.AppID` 是 `ms.WithAppID` 的「入站
+對偶」(`ms.WithAppID` 用來把一個 *對外* 的 `ms.Call` *改指向* 另一個 app)。
 
 ## Platform
 
@@ -53,7 +58,13 @@ SDK 在這層不做使用者認證,但 proxy guard 仍然守在每個 Public rou
 
 Platform 打 module。Request 必須帶 `X-MS-Internal-Secret: <shared secret>`(透過 `MS_INTERNAL_SECRET` 環境變數設定);只要有設定 secret 來源,SDK 就會把沒帶或帶錯的 request 擋掉,回 401。純本機執行、沒有設定 secret 時,SDK 會直接放行,讓 `mirrorstack dev` 可以自己 curl 自己的 route ——`--tunnel` 與部署後的模式都會設定 secret。
 
-**secret 是 SDK middleware 檢查的 credential。** Forwarder identity header 只會在 secret 驗證通過的路徑被提升,local bypass 或拒絕路徑都不會;空 header 也不會建立 identity。`TestCharacterization_ForwarderIdentityTrustedOnlyOnSecretValidatedPath` 固定了這項行為。誰能透過平台打到某個 route class,是 platform edge 的屬性,由 api-platform 的 `TestModuleEdge_RouteClassTrustMatrix` 固定,不由本頁描述。
+**secret 是 SDK middleware 檢查的 credential。** Typed invocation 只會在
+credential 驗證成功後解析,而且 method、path、body、app/module scope 以及任何
+dual-send 的 legacy claims 都必須一致。Local bypass 會移除 caller 提供的 typed
+header,不會信任它。在 bounded compatibility window 內,forwarder identity
+headers 也只會在 secret 驗證通過的路徑被提升;空 header 不會建立 identity。
+誰能透過平台打到某個 route class,仍是 platform edge 的屬性,由 api-platform
+的 `TestModuleEdge_RouteClassTrustMatrix` 固定。
 
 用在:
 
@@ -74,7 +85,10 @@ ms.Internal(func(r chi.Router) {
 
 ## Auth 對照表
 
-以下是在真正的 `m.Router()` 上實測的結果:已設定 `MS_INTERNAL_SECRET`,且 process 不在 Lambda 中。「identity headers」指的是 `X-MS-User-ID` / `X-MS-App-ID` / `X-MS-App-Role` 三個全帶:
+下表描述 bounded legacy projection 在真正 `m.Router()` 上的行為:已設定
+`MS_INTERNAL_SECRET`,且 process 不在 Lambda 中。新的平台 traffic 使用上面
+的 typed invocation。「identity headers」指 `X-MS-User-ID` / `X-MS-App-ID` /
+`X-MS-App-Role` 三個全帶:
 
 | Request 帶… | Platform | Public | Internal |
 |---|---:|---:|---:|

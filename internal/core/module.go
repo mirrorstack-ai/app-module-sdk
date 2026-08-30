@@ -19,6 +19,7 @@ import (
 	publicids "github.com/mirrorstack-ai/app-module-sdk/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	internalids "github.com/mirrorstack-ai/app-module-sdk/internal/ids"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/invocationstate"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 )
@@ -55,9 +56,9 @@ func New(cfg Config) (*Module, error) {
 		registry:       registry.New(),
 		contribReg:     contributions.NewRegistry(),
 		contribStorage: contributions.NewStorage(cfg.ID),
-		internalAuth:   auth.InternalAuth(),
-		proxyGuard:     auth.RequireProxy(),
-		platformAuth:   auth.PlatformAuth(),
+		internalAuth:   withInvocationBinding(cfg.ID, cfg.Slug, auth.InternalAuth()),
+		proxyGuard:     withInvocationBinding(cfg.ID, cfg.Slug, auth.RequireProxy()),
+		platformAuth:   withInvocationBinding(cfg.ID, cfg.Slug, auth.PlatformAuth()),
 		poolCache:      db.NewPoolCache(),
 		cacheCache:     cache.NewClientCache(),
 		taskHandlers:   make(map[string]taskEntry),
@@ -136,6 +137,16 @@ func New(cfg Config) (*Module, error) {
 
 	m.mountSystemRoutes()
 	return m, nil
+}
+
+func withInvocationBinding(moduleID, moduleSlug string, middleware func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	binding := invocationstate.Binding{ModuleID: moduleID, ModuleSlug: moduleSlug}
+	return func(next http.Handler) http.Handler {
+		protected := middleware(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			protected.ServeHTTP(w, r.WithContext(invocationstate.WithBinding(r.Context(), binding)))
+		})
+	}
 }
 
 func (m *Module) Config() Config   { return m.config }

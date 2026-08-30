@@ -67,11 +67,11 @@ func CallModule[Req, Resp any](
 Behavior:
 1. **Resolve** the dep's Internal base from platform-injected dep routing
    (see §4 — this is the gated piece).
-2. **Auth + identity:** attach the platform/internal secret, and forward
-   `X-MS-User-ID`/`X-MS-App-ID`/`X-MS-App-Role` read from `ctx` (the same
-   trusted fields `NewLambdaHandler` injected on the inbound request). This
-   preserves the trust model — the dep sees the original caller's identity,
-   not the calling module's.
+2. **Auth + identity:** attach the platform/internal credential and hand the
+   current typed invocation to the platform sender. API Platform derives a new
+   occurrence-bound invocation for the dependency, preserving the original
+   caller identity while changing the authoritative callee. Module code never
+   forwards `X-MS-*` claims itself.
 3. **Send** `method` + `path` + `json(req)`. Prod rides `lambda.Invoke` via
    the platform sender (HTTP-shaped `LambdaRequest`); dev rides HTTP through
    the dispatch proxy. The module author writes the same call either way.
@@ -128,10 +128,11 @@ Internal simply stops emitting CORS headers.
 ## 4. Gating dependency: the prod dispatch→module sender
 
 §2's `CallModule` needs to **resolve a dep's Internal base** and needs the
-platform to actually carry the call in prod. Neither exists yet — today's
-built path is the WSS dev tunnel (`api-platform/internal/dispatch/handler/dev_tunnel.go`);
-there is no prod module-invoke sender. Per ADR 0005 that sender MUST forward
-`{method, path, body}` into the SDK's HTTP-shaped `LambdaRequest`.
+platform to carry the call in prod. The request-serving sender now has a
+canonical typed invocation, but dependency resolution and the public typed
+client described here remain gated. Per ADR 0005 the sender must forward
+`{method, path, body}` and a platform-authored callee invocation into the SDK's
+HTTP-shaped `LambdaRequest`.
 
 So sequencing:
 - **Now (independent):** §1 envelope helper, §3 CORS scoping.

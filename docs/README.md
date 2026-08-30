@@ -16,6 +16,7 @@ Reference + conceptual guides for building MirrorStack modules in Go.
 - [Dependencies](./concepts/dependencies.md) — required vs optional deps, auto-detect rule, extract-function caveat.
 - [Manifest](./concepts/manifest.md) — what's in the manifest endpoint, field by field.
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal and when to use each.
+- [Trusted invocation context](./concepts/invocation.md) — the read-only, transport-neutral request contract installed after platform authentication.
 
 ## Reference
 

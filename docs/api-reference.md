@@ -59,6 +59,26 @@ ms.Platform(func(r chi.Router) {
 
 Canonical roles: `p.Admin()`, `p.Viewer()`. Use `p.Custom("key")` for module-specific roles.
 
+## Trusted invocation
+
+The `invocation` package exposes the complete read-only context installed after
+the SDK authenticates and validates a platform request. See
+[Trusted invocation context](./concepts/invocation.md).
+
+| Function | Purpose |
+|---|---|
+| `invocation.FromContext(ctx)` | Return a defensive copy of the canonical v1 invocation, when present. |
+
+```go
+import "github.com/mirrorstack-ai/app-module-sdk/invocation"
+
+trusted, ok := invocation.FromContext(r.Context())
+```
+
+There is no public setter or wire decoder. Routine identity and authorization
+should continue to use `ms.UserID`, `ms.AppID`, `ms.AppRole` and
+`ms.RequirePermission`.
+
 ## Events
 
 | Function | Purpose |
