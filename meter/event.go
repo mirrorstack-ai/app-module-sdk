@@ -2,14 +2,14 @@ package meter
 
 import "time"
 
-// envelopeVersion is the current wire format version. Bump on breaking changes.
-//
-// Still v1: the metric KIND lives in the module manifest / platform catalog,
-// not on the wire, so adding declaration-first metering required no envelope
-// change. (If a wire-incompatible change ever ships post-launch, bump here.)
+// envelopeVersion is the legacy wire format emitted by Record and
+// RecordWithID. It stays v1 permanently; RecordObservation uses the additive
+// v2 envelope so existing call sites keep byte-compatible behavior.
 const envelopeVersion = 1
 
-// Event is the JSON wire format sent to the platform meter ingress.
+// Event is the v1 JSON wire format sent to the platform meter ingress by
+// Record and RecordWithID. RecordObservation uses a private additive v2
+// envelope so this exported struct remains source-compatible.
 //
 // There is deliberately NO kind field: a metric's kind (counter/gauge) is
 // declared once via ms.Meter and travels in the manifest, so the platform's

@@ -1,20 +1,20 @@
 // Package meter is the module usage-metering surface. A module DECLARES each
-// metric once, up front, with its kind + unit + price; runtime code then emits
-// BY NAME with a single Record call — exactly mirroring ms.Emits (declare) /
-// ms.Emit (emit by name). Declaration registers the metric into the module
-// MANIFEST (via the registry, in core) AND into the module's meter registry, so
-// the platform can populate its metric catalog BEFORE any event arrives — and a
-// call site can never mislabel a metric's kind, because kind is read from the
-// catalog, not the wire. There is NO stored handle: Record resolves the metric
-// by name and fails fast if it was never declared (declaration-first).
+// metric once, up front, with its kind and optional aggregation, unit, and
+// price; runtime code then emits BY NAME with a single Record call — exactly
+// mirroring ms.Emits (declare) / ms.Emit (emit by name). Declaration registers
+// the metric into the module MANIFEST (via the registry, in core) AND into the
+// module's meter registry, so the platform can populate its metric catalog
+// BEFORE any event arrives — and a call site can never mislabel a metric's
+// semantics, because they are read from the catalog, not the wire. There is NO
+// stored handle: Record resolves the metric by name and fails fast if it was
+// never declared (declaration-first).
 //
 // Security model: the SDK runs inside the module's own (untrusted) process.
 // Wire-format fields suffixed with Hint (AppIDHint, ModuleIDHint,
 // RecordedAtHint) are NOT trusted — the platform re-derives authoritative
 // values from the authenticated invoker. Reported VALUES affect only the
-// developer's own customer billing. The reserved infra.*/platform.* namespace
-// is rejected at declaration (and at platform ingress) so a module cannot
-// declare or self-report a platform-billable infra metric.
+// developer's own customer billing. A reserved infra.*/platform.* metric may
+// be declared only as a price override and can never be self-reported.
 package meter
 
 import (
@@ -87,11 +87,11 @@ func serviceCredential(ctx context.Context) (string, error) {
 	return os.Getenv("MS_INTERNAL_SECRET"), nil
 }
 
-// reservedPrefixes are the platform-owned metric namespaces. A module may not
-// declare or self-report a metric under these — they belong to platform-side
-// infra metering (model tokens, storage bytes, egress, compute), which is
-// measured at the platform chokepoint and never trusts an SDK value. ms.Meter
-// panics on a reserved name, and the platform ingress rejects it too.
+// reservedPrefixes are the platform-owned metric namespaces. A module may
+// declare one only as a Price override; it may never self-report one. These
+// metrics belong to platform-side infra metering (model tokens, storage bytes,
+// egress, compute), measured at the platform chokepoint without trusting an SDK
+// value.
 var reservedPrefixes = []string{"infra.", "platform."}
 
 // Kind is the billing semantic of a declared metric. It is fixed at
@@ -119,10 +119,11 @@ const (
 func (k Kind) IsValid() bool { return k == counterKind || k == gaugeKind }
 
 // MetricOption configures a metric at declaration time. The KIND is itself an
-// option (Counter / Gauge), alongside Unit and Price. A custom metric MUST pass
-// exactly one kind option; a reserved infra.*/platform.* metric may pass ONLY
-// Price (its kind/unit are platform-owned). All other combinations panic at
-// declaration (see Declare).
+// option (Counter / Gauge), alongside BySubject, Unit, and Price. A custom
+// metric MUST pass exactly one kind option; BySubject is valid only with Gauge.
+// A reserved infra.*/platform.* metric may pass ONLY Price (its kind/unit/
+// aggregation are platform-owned). All other combinations panic at declaration
+// (see Declare).
 //
 // MetricOption is an INTERFACE, not a func type, on purpose: it lets Counter and
 // Gauge be untyped-style package CONSTANTS rather than reassignable package
@@ -136,15 +137,16 @@ type MetricOption interface {
 }
 
 type metricOptions struct {
-	kind      Kind
-	kindSet   bool
-	kindDup   bool // a second, conflicting kind option was passed
-	unit      string
-	unitSet   bool
-	price     int64
-	priceSet  bool
-	label     i18n.Label
-	unitLabel i18n.Label
+	kind           Kind
+	kindSet        bool
+	kindDup        bool // a second, conflicting kind option was passed
+	aggregationKey string
+	unit           string
+	unitSet        bool
+	price          int64
+	priceSet       bool
+	label          i18n.Label
+	unitLabel      i18n.Label
 }
 
 // Counter / Gauge are CONSTANTS, not vars, so a third-party module cannot
@@ -177,6 +179,22 @@ func (k kindOption) applyMetric(o *metricOptions) {
 	}
 	o.kind = Kind(k)
 	o.kindSet = true
+}
+
+const aggregationKeySubject = "subject"
+
+// BySubject declares a Gauge as a subject-keyed peak. Within each billing
+// period the platform computes SUM(MAX(value) per Observation.Subject). The
+// subject is a dedicated authoritative field; Metadata is diagnostic only and
+// is never used as billing identity. BySubject is valid only with Gauge.
+const BySubject aggregationOption = aggregationOption(aggregationKeySubject)
+
+// aggregationOption is const-backed so third-party modules cannot reassign the
+// billing aggregation option at runtime.
+type aggregationOption string
+
+func (a aggregationOption) applyMetric(o *metricOptions) {
+	o.aggregationKey = string(a)
 }
 
 // metricOptionFunc adapts a closure to MetricOption for the non-kind options
@@ -248,20 +266,22 @@ func DeclFromOptions(name string, opts ...MetricOption) Decl {
 		}
 	}
 	return Decl{
-		Name:      name,
-		Kind:      o.kind,
-		KindSet:   o.kindSet,
-		kindDup:   o.kindDup,
-		Unit:      o.unit,
-		UnitSet:   o.unitSet,
-		Price:     o.price,
-		PriceSet:  o.priceSet,
-		Label:     o.label,
-		UnitLabel: o.unitLabel,
+		Name:           name,
+		Kind:           o.kind,
+		KindSet:        o.kindSet,
+		kindDup:        o.kindDup,
+		AggregationKey: o.aggregationKey,
+		Unit:           o.unit,
+		UnitSet:        o.unitSet,
+		Price:          o.price,
+		PriceSet:       o.priceSet,
+		Label:          o.label,
+		UnitLabel:      o.unitLabel,
 	}
 }
 
-// Decl is the declared shape of a metric: name + kind + unit + optional price.
+// Decl is the declared shape of a metric: name + kind + optional aggregation,
+// unit, and price.
 // It is what flows into the manifest (see registry.MetricDecl), so the platform
 // can populate its metric_definitions catalog at install/publish.
 //
@@ -275,14 +295,17 @@ func DeclFromOptions(name string, opts ...MetricOption) Decl {
 // unexported conflict-tracking field (kindDup) that a literal cannot set, so a
 // hand-built Decl would silently skip the conflicting-kind guard.
 type Decl struct {
-	Name     string
-	Kind     Kind
-	KindSet  bool
-	kindDup  bool // both Counter and Gauge were passed (conflicting kinds)
-	Unit     string
-	UnitSet  bool
-	Price    int64
-	PriceSet bool
+	Name    string
+	Kind    Kind
+	KindSet bool
+	kindDup bool // both Counter and Gauge were passed (conflicting kinds)
+	// AggregationKey is empty for ordinary semantics or "subject" when
+	// BySubject was selected. Construct declarations through DeclFromOptions.
+	AggregationKey string
+	Unit           string
+	UnitSet        bool
+	Price          int64
+	PriceSet       bool
 	// Label is the metric's optional per-locale display label (ms.Text / ms.T),
 	// resolved into the manifest metric entry in core.Meter (mirroring the
 	// permission-label path). Zero when undeclared.
@@ -344,6 +367,7 @@ func ValidateMetricName(name string) {
 //   - empty/malformed name;
 //   - conflicting kinds (both Counter and Gauge passed);
 //   - a CUSTOM (non-reserved) name without exactly one kind option;
+//   - BySubject without Gauge;
 //   - a RESERVED infra.*/platform.* name carrying a kind or unit option
 //     (those are platform-owned — a reserved name may carry Price ONLY, to
 //     override the customer passthrough);
@@ -365,6 +389,9 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 		if decl.UnitSet {
 			panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) is a reserved platform metric — it may carry ms.Price only; unit is platform-owned (drop ms.Unit)", decl.Name))
 		}
+		if decl.AggregationKey != "" {
+			panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) is a reserved platform metric — it may carry ms.Price only; aggregation is platform-owned (drop ms.BySubject)", decl.Name))
+		}
 		// A reserved declaration's ONLY purpose is to override the customer
 		// passthrough price. With no Price it is a no-op that would otherwise
 		// pollute the manifest with a meaningless empty entry — reject it.
@@ -379,6 +406,15 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 		}
 		if !decl.Kind.IsValid() {
 			panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) has invalid kind %q (use ms.Counter or ms.Gauge)", decl.Name, decl.Kind))
+		}
+		switch decl.AggregationKey {
+		case "":
+		case aggregationKeySubject:
+			if decl.Kind != gaugeKind {
+				panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) uses ms.BySubject, which is valid only with ms.Gauge (subject-keyed MAX)", decl.Name))
+			}
+		default:
+			panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) has invalid aggregation key %q (use ms.BySubject with ms.Gauge)", decl.Name, decl.AggregationKey))
 		}
 	}
 	c.mu.Lock()
@@ -435,33 +471,49 @@ func (c *Client) RecordWithID(ctx context.Context, eventID, name string, value f
 	return c.record(ctx, eventID, name, value)
 }
 
-func (c *Client) record(ctx context.Context, eventID, name string, value float64) error {
-	c.mu.RLock()
-	decl, declared := c.metrics[name]
-	moduleID := c.moduleID
-	c.mu.RUnlock()
-	if IsReserved(name) {
-		// A reserved infra.*/platform.* metric is platform-measured. A module
-		// may DECLARE it (Price-only, to override the customer passthrough) but
-		// may never self-report its value — the platform meters it at its own
-		// chokepoint, and an SDK-reported quantity for it is never billable.
-		return fmt.Errorf("mirrorstack/meter: metric %q is platform-measured and cannot be self-reported via ms.Record (it may be declared with ms.Price only)", name)
+// RecordObservation emits a v2 usage observation with a caller-persisted
+// EventID, opaque end-user Subject, bounded diagnostic Metadata, and original
+// OccurredAt. It is the required runtime path for a metric declared BySubject
+// and is also valid for ordinary custom metrics when occurrence/audit evidence
+// is needed. The SDK validates the observation's structure and normalizes
+// OccurredAt to UTC, but does not compare it with the module process clock.
+// Dispatch/API/Billing own authoritative occurrence-window, replay, and
+// billing-period decisions. Dispatch also re-derives attribution and receipt
+// time; RecordedAtHint is carried only for envelope continuity and is discarded
+// before Billing.
+func (c *Client) RecordObservation(ctx context.Context, name string, value float64, observation Observation) error {
+	decl, moduleID, appID, err := c.recordInputs(ctx, name, value)
+	if err != nil {
+		return err
 	}
-	if !declared {
-		return fmt.Errorf("mirrorstack/meter: metric %q was never declared (call ms.Meter(%q, ...) in setup before ms.Record)", name, name)
-	}
-	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-		return fmt.Errorf("mirrorstack/meter: metric %q: value must be finite and non-negative, got %g", decl.Name, value)
+	now := c.clockNow()
+	observation, err = validateObservation(observation, decl.AggregationKey == aggregationKeySubject)
+	if err != nil {
+		return err
 	}
 
-	appID := ""
-	if a := auth.Get(ctx); a != nil {
-		appID = a.AppID
+	event := observationEvent{
+		V:              observationEnvelopeVersion,
+		EventID:        observation.EventID,
+		AppIDHint:      appID,
+		ModuleIDHint:   moduleID,
+		Metric:         decl.Name,
+		Value:          value,
+		Subject:        observation.Subject,
+		Metadata:       observation.Metadata,
+		OccurredAt:     observation.OccurredAt,
+		RecordedAtHint: now.UTC(),
 	}
-	// An empty app id means there is no app scope to attribute the usage to.
-	// Mirror ms.Emit: return an error (no panic), and do not reach the transport.
-	if appID == "" {
-		return fmt.Errorf("mirrorstack/meter: Record requires an app-scoped context (no AppID in auth identity)")
+	return c.dispatch(ctx, appID, event)
+}
+
+func (c *Client) record(ctx context.Context, eventID, name string, value float64) error {
+	decl, moduleID, appID, err := c.recordInputs(ctx, name, value)
+	if err != nil {
+		return err
+	}
+	if decl.AggregationKey == aggregationKeySubject {
+		return fmt.Errorf("mirrorstack/meter: metric %q is subject-keyed; emit it with ms.RecordObservation and a non-empty Subject", decl.Name)
 	}
 
 	// Mint the EventID ONCE here so a retried delivery reuses it and the
@@ -474,9 +526,47 @@ func (c *Client) record(ctx context.Context, eventID, name string, value float64
 		ModuleIDHint:   moduleID,
 		Metric:         decl.Name,
 		Value:          value,
-		RecordedAtHint: time.Now().UTC(),
+		RecordedAtHint: c.clockNow().UTC(),
 	}
 	return c.dispatch(ctx, appID, event)
+}
+
+func (c *Client) recordInputs(ctx context.Context, name string, value float64) (Decl, string, string, error) {
+	c.mu.RLock()
+	decl, declared := c.metrics[name]
+	moduleID := c.moduleID
+	c.mu.RUnlock()
+	if IsReserved(name) {
+		// A reserved infra.*/platform.* metric is platform-measured. A module
+		// may DECLARE it (Price-only, to override the customer passthrough) but
+		// may never self-report its value — the platform meters it at its own
+		// chokepoint, and an SDK-reported quantity for it is never billable.
+		return Decl{}, "", "", fmt.Errorf("mirrorstack/meter: metric %q is platform-measured and cannot be self-reported via ms.Record (it may be declared with ms.Price only)", name)
+	}
+	if !declared {
+		return Decl{}, "", "", fmt.Errorf("mirrorstack/meter: metric %q was never declared (call ms.Meter(%q, ...) in setup before ms.Record)", name, name)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return Decl{}, "", "", fmt.Errorf("mirrorstack/meter: metric %q: value must be finite and non-negative, got %g", decl.Name, value)
+	}
+
+	appID := ""
+	if a := auth.Get(ctx); a != nil {
+		appID = a.AppID
+	}
+	// An empty app id means there is no app scope to attribute the usage to.
+	// Mirror ms.Emit: return an error (no panic), and do not reach the transport.
+	if appID == "" {
+		return Decl{}, "", "", fmt.Errorf("mirrorstack/meter: Record requires an app-scoped context (no AppID in auth identity)")
+	}
+	return decl, moduleID, appID, nil
+}
+
+func (c *Client) clockNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // validateEventID accepts one canonical lowercase RFC 4122 text spelling.
@@ -542,13 +632,13 @@ func resolveUsageURLFor(ctx context.Context, appID string) string {
 	return fmt.Sprintf("%s/apps/%s/usage", base, appID)
 }
 
-// dispatch delivers an already-built Event to the platform dispatch usage
-// ingress over HTTP, mirroring ms.Emit. The caller (Record) mints the EventID
-// once, so retrying dispatch with the same Event reuses the same EventID and the
+// dispatch delivers an already-built v1 or v2 envelope to the platform usage
+// ingress over HTTP, mirroring ms.Emit. The caller mints the EventID once, so
+// retrying dispatch with the same envelope reuses the same EventID and the
 // platform deduplicates rather than double-counts. A non-2xx response is an
 // error with the body truncated to ~2 KB; the non-fatal contract (log, don't
 // propagate) is the caller's responsibility.
-func (c *Client) dispatch(ctx context.Context, appID string, event Event) error {
+func (c *Client) dispatch(ctx context.Context, appID string, event any) error {
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)
@@ -625,6 +715,7 @@ func (c *Client) dispatch(ctx context.Context, appID string, event Event) error 
 // non-fatal (returned, then logged by the caller, not propagated).
 type Client struct {
 	httpClient *http.Client
+	now        func() time.Time
 
 	mu       sync.RWMutex
 	moduleID string          // emitting module's Config.ID, set at first Declare
