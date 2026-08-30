@@ -106,3 +106,41 @@ curl -sH "X-MS-Internal-Secret: $MS_INTERNAL_SECRET" \
 ```
 
 Production 上,平台會在每次 deploy 時讀一次並快取。
+
+## Release manifest tool mode
+
+MirrorStack CLI 會使用 SDK 保留的 process mode，從與 Linux artifact 相同的
+凍結 source tree 建立 release evidence。Module code 不應直接呼叫此模式。
+CLI 會設定：
+
+```text
+MS_SDK_TOOL_MODE=release-manifest-v1
+```
+
+所有 startup declaration 完成後，`ms.Start()` 會從 stdin 讀取一個 JSON
+object（上限 4 KiB），並要求後面必須是 EOF：
+
+```json
+{"source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+```
+
+`source_sha256` 必須剛好是 64 個小寫十六進位字元。缺少欄位、未知欄位、
+重複欄位、錯誤型別或 trailing input 都會 fail closed。未知且非空的
+`MS_SDK_TOOL_MODE` 也會 fail closed，不會繼續啟動 module。
+
+成功時 stdout 只會輸出一行 JSON：
+
+```json
+{"protocol":"mirrorstack.release-manifest/v1","source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","manifest_sha256":"<64 lowercase hex>","manifest_base64":"<standard padded base64>"}
+```
+
+`manifest_base64` 解碼後就是一般 manifest handler 提供的完全相同 bytes，
+包含 `json.Encoder` 結尾的 newline。CLI 會先解碼、重新計算
+`manifest_sha256`，驗證成功後才解析 manifest；它不會重新序列化 JSON，
+也不會假設其他語言能產生相同 bytes。Caller 提供的 source hash 只屬於
+release metadata，不會改變一般提供的 manifest。
+
+這個 tool path 會在 development migration 或 database setup、Lambda handoff、
+one-shot task polling 與 HTTP listening 之前返回。SDK diagnostics 只寫到
+stderr。Stdout 保留給 envelope；任何額外的 module-authored stdout 都會讓
+CLI 拒絕該 candidate。

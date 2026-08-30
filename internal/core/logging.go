@@ -15,14 +15,19 @@ import (
 
 type logCtxKey struct{}
 
-// configureLogging installs a JSON slog handler on stdout as the process
-// default. Module logs (via ms.Log) and any slog call then emit one structured
-// JSON line per event, captured identically by CloudWatch (prod Lambda) and the
-// `mirrorstack dev` runner (dev) — so the platform Logcat reads one clean stream
-// with no transport code. Level is MS_LOG_LEVEL (debug|info|warn|error), default
-// info. The SDK's own stderr diagnostic logger (m.logger) is left as-is.
+// configureLogging installs a JSON slog handler as the process default. Normal
+// module logs (via ms.Log) go to stdout, captured identically by CloudWatch
+// (prod Lambda) and the `mirrorstack dev` runner (dev). Reserved SDK tool modes
+// keep stdout exclusively machine-readable, so their structured diagnostics go
+// to stderr from New onward — including declarations logged before Start.
+// Level is MS_LOG_LEVEL (debug|info|warn|error), default info. The SDK's own
+// stderr diagnostic logger (m.logger) is left as-is.
 func configureLogging() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	output := os.Stdout
+	if os.Getenv(sdkToolModeEnv) != "" {
+		output = os.Stderr
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{
 		Level: parseLogLevel(os.Getenv("MS_LOG_LEVEL")),
 	})))
 }

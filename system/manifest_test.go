@@ -1,6 +1,7 @@
 package system
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -494,6 +495,33 @@ func TestManifest_HashHeaderMatchesBody(t *testing.T) {
 	}
 	if payload.ID != "media" {
 		t.Errorf("body id = %q, want media", payload.ID)
+	}
+}
+
+func TestBuildManifest_IsExactHTTPDocument(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.New()
+	reg.AddPermission("media.view", []string{"admin", "viewer"})
+	reg.AddSchedule("cleanup", "0 3 * * *", "/crons/cleanup")
+	client := &ClientSpec{Dir: "client", OutputDir: "dist"}
+	versions := map[string]MigrationVersions{"v1.0.0": {App: "0001"}}
+	document, err := BuildManifest(
+		"media", "media", "Media", "perm_media", []string{"Content"}, nil,
+		versions, reg, nil, client,
+	)
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	rec := manifestResponse(t, ManifestHandlerWithClient(
+		"media", "media", "Media", "perm_media", []string{"Content"}, nil,
+		versions, reg, nil, client,
+	))
+	if !bytes.Equal(document.Body, rec.Body.Bytes()) {
+		t.Fatalf("builder and HTTP bytes differ\nbuilder: %s\nHTTP: %s", document.Body, rec.Body.Bytes())
+	}
+	if document.SHA256 != rec.Header().Get("X-MS-Manifest-Hash") {
+		t.Errorf("builder hash = %q, HTTP hash = %q", document.SHA256, rec.Header().Get("X-MS-Manifest-Hash"))
 	}
 }
 

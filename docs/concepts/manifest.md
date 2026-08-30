@@ -106,3 +106,42 @@ curl -sH "X-MS-Internal-Secret: $MS_INTERNAL_SECRET" \
 ```
 
 In production the platform fetches this at every deploy and caches the result.
+
+## Release manifest tool mode
+
+The MirrorStack CLI uses a reserved SDK process mode to build release evidence
+from the same frozen source tree as the Linux artifact. Module code should not
+call this mode directly. The CLI sets:
+
+```text
+MS_SDK_TOOL_MODE=release-manifest-v1
+```
+
+After all startup declarations have run, `ms.Start()` reads one JSON object
+from stdin (bounded to 4 KiB) and requires EOF:
+
+```json
+{"source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+```
+
+`source_sha256` must be exactly 64 lowercase hexadecimal characters. Missing,
+unknown, duplicate, wrongly typed, or trailing input fails closed. An unknown
+non-empty `MS_SDK_TOOL_MODE` also fails closed instead of starting the module.
+
+Success writes exactly one JSON line to stdout:
+
+```json
+{"protocol":"mirrorstack.release-manifest/v1","source_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","manifest_sha256":"<64 lowercase hex>","manifest_base64":"<standard padded base64>"}
+```
+
+`manifest_base64` decodes to the exact bytes served by the ordinary manifest
+handler, including `json.Encoder`'s trailing newline. The CLI decodes those
+bytes, recomputes `manifest_sha256`, and only then parses the manifest. It does
+not reserialize JSON and assume another language will produce the same bytes.
+The caller-provided source hash is release metadata only; it does not change
+the ordinary served manifest.
+
+This tool path returns before development migrations or database setup, Lambda
+handoff, one-shot task polling, and HTTP listening. SDK diagnostics stay on
+stderr. Stdout is reserved for the envelope; any other module-authored stdout
+causes the CLI to reject the candidate.

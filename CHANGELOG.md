@@ -7,6 +7,28 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.12] - 2026-08-30
+
+### Added
+
+- `MS_SDK_TOOL_MODE=release-manifest-v1` is a reserved CLI execution mode.
+  After a module finishes its declarations, `ms.Start` accepts one bounded,
+  strict `source_sha256` input and emits one versioned JSON envelope containing
+  the exact canonical manifest bytes as padded base64 plus lowercase source and
+  manifest SHA-256 evidence.
+
+### Changed
+
+- The HTTP manifest route and release tool now use one manifest builder and
+  hash the same encoded byte sequence, including its trailing newline. The tool
+  branch runs before Lambda, one-shot task, development migration/database, or
+  HTTP-listener startup; unknown modes and malformed inputs fail closed, and
+  tool diagnostics remain on stderr so stdout is machine-readable.
+
+This adds a versioned build-tool contract without changing ordinary module
+startup or the served manifest wire shape, so it remains a PATCH under the
+repository's pre-1.0 convention.
+
 ## [v0.4.11] - 2026-08-30
 
 ### Fixed

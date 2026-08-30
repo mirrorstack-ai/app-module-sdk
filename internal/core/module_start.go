@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,21 @@ func (m *Module) checkUIServable() error {
 // Lambda wins if both env vars are set (they are mutually exclusive in
 // production but this ordering is a safety net).
 func (m *Module) Start() error {
+	// Reserved SDK tools run after module declarations but before selecting any
+	// serving plane. This ordering is the safety boundary: manifest inspection
+	// must never migrate a database, enter Lambda, claim a task, or bind a port.
+	toolMode := os.Getenv(sdkToolModeEnv)
+	if toolMode != "" {
+		// configureLogging bridges the standard logger to structured stdout for
+		// ordinary runtime logs. A tool process reserves stdout for its one
+		// machine-readable envelope, so restore standard diagnostics to stderr
+		// before validation/building and before a caller logs a returned error.
+		log.SetOutput(os.Stderr)
+	}
+	if handled, err := m.runSDKToolMode(toolMode, os.Stdin, os.Stdout); handled {
+		return err
+	}
+
 	if runtime.IsLambda() {
 		if err := requireInternalSecret(); err != nil {
 			return err
