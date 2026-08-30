@@ -7,6 +7,22 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.11] - 2026-08-30
+
+### Fixed
+
+- The normal per-app lazy development provisioner now creates the SDK-owned
+  audit outbox after application migrations, using the same schema-scoped,
+  module-aware database path as the request. Modules can call `audit.Record`
+  on their first local request without provisioning the SDK table themselves.
+- SDK-owned audit and contribution tables no longer count as evidence that an
+  application's module migrations are intact, so a surviving shared store
+  cannot hide missing application tables from development drift repair.
+
+This is a development-plane provisioning fix with no exported signature or
+wire-format change, so it remains a PATCH under the repository's pre-1.0
+convention.
+
 ## [v0.4.10] - 2026-08-30
 
 ### Added
