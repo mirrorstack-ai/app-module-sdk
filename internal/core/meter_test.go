@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -67,6 +68,38 @@ func TestMeter_DeclaresKindAndPriceIntoManifest(t *testing.T) {
 		default:
 			t.Errorf("unexpected metric %q", d.Name)
 		}
+	}
+}
+
+func TestMeter_SubjectAggregationSurfacesInManifest(t *testing.T) {
+	m := newTestModuleWithSecret(t, "user_core")
+	m.Meter("users.active", meter.Gauge, meter.BySubject)
+	m.Meter("orders.placed", meter.Counter)
+
+	rec := doRequestWithSecret(t, m.Router(), "GET", "/__mirrorstack/platform/manifest", "secret")
+	var got system.ManifestPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if len(got.Metrics) != 2 {
+		t.Fatalf("metrics = %d, want 2: %+v", len(got.Metrics), got.Metrics)
+	}
+	for _, metric := range got.Metrics {
+		switch metric.Name {
+		case "users.active":
+			if metric.Kind != "gauge" || metric.AggregationKey != "subject" {
+				t.Fatalf("users.active = %+v, want gauge aggregationKey=subject", metric)
+			}
+		case "orders.placed":
+			if metric.AggregationKey != "" {
+				t.Fatalf("ordinary metric aggregation key = %q, want empty", metric.AggregationKey)
+			}
+		default:
+			t.Fatalf("unexpected metric %q", metric.Name)
+		}
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"aggregationKey":"subject"`)) {
+		t.Fatalf("manifest omitted subject aggregation key: %s", rec.Body.Bytes())
 	}
 }
 

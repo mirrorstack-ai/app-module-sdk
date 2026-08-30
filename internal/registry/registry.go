@@ -162,6 +162,8 @@ type OutboundContribution struct {
 // For a custom metric Kind is always set; for a reserved infra.*/platform.*
 // PRICE-OVERRIDE entry Kind and Unit are EMPTY (omitempty) — the platform
 // catalog supplies the kind/unit, the module only overrides the customer price.
+// AggregationKey is empty for legacy aggregation or "subject" for a Gauge
+// declared with ms.BySubject; the platform maps that Gauge to keyed peak/MAX.
 // Unit is a display unit (e.g. "order", "byte"); empty when undeclared.
 // Price is the per-unit CUSTOMER price in micro-dollars and is omitempty: a
 // metric may be metered without a declared price (PriceSet distinguishes a
@@ -176,12 +178,13 @@ type OutboundContribution struct {
 // Unit identifier. Distinct from Unit, which stays the untranslated billing
 // unit used for per-unit pricing aggregation.
 type MetricDecl struct {
-	Name       string            `json:"name"`
-	Kind       string            `json:"kind,omitempty"`
-	Unit       string            `json:"unit,omitempty"`
-	Price      *int64            `json:"price,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
-	UnitLabels map[string]string `json:"unitLabels,omitempty"`
+	Name           string            `json:"name"`
+	Kind           string            `json:"kind,omitempty"`
+	AggregationKey string            `json:"aggregationKey,omitempty"`
+	Unit           string            `json:"unit,omitempty"`
+	Price          *int64            `json:"price,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+	UnitLabels     map[string]string `json:"unitLabels,omitempty"`
 }
 
 // MCPToolHandler is the type-erased handler signature used after generic

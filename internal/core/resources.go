@@ -127,18 +127,21 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 // The kind is an OPTION: meter.Counter (additive; the platform SUMs) or
 // meter.Gauge (absolute level; the platform takes MAX or a time-weighted
 // integral, never a SUM). meter.Unit / meter.Price set the unit and the
-// per-unit customer price (both optional).
+// per-unit customer price (both optional). meter.BySubject is valid only with
+// Gauge and declares SUM(MAX(value) per observation subject).
 //
 // Emit at runtime with the package-level Record(ctx, name, value) — BY NAME,
 // mirroring Emits/Emit. A custom metric MUST pass exactly one kind option; a
-// reserved infra.*/platform.* metric may carry meter.Price ONLY (kind/unit are
-// platform-owned). Panics on a duplicate name, an invalid name, conflicting
-// kinds, a missing kind on a custom metric, or a kind/unit on a reserved name.
+// reserved infra.*/platform.* metric may carry meter.Price ONLY (kind/unit/
+// aggregation are platform-owned). Panics on a duplicate name, an invalid
+// name, conflicting kinds, a missing kind on a custom metric, BySubject without
+// Gauge, or a kind/unit/aggregation on a reserved name.
 // Like the other Module resource methods, it requires New() to have returned
 // successfully — calling it on a zero Module panics on the nil meterClient (the
 // package-level wrapper's mustDefault guards the before-Init case).
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
+//	ms.Meter("users.active", ms.Gauge, ms.BySubject, ms.Unit("user"))
 //	ms.Meter("infra.compute.walltime.ms", ms.Price(0)) // reserved price-override
 //
 // To zero EVERY platform infra metric at once — the usual want for a module that
@@ -152,7 +155,9 @@ func (m *Module) Meter(name string, opts ...meter.MetricOption) {
 	m.meterClient.Declare(m.config.ID, d)
 	// For a reserved price-override d.Kind is empty (the platform catalog
 	// supplies the kind/unit); the manifest entry then carries price only.
-	decl := registry.MetricDecl{Name: d.Name, Kind: string(d.Kind), Unit: d.Unit}
+	decl := registry.MetricDecl{
+		Name: d.Name, Kind: string(d.Kind), AggregationKey: d.AggregationKey, Unit: d.Unit,
+	}
 	if d.PriceSet {
 		p := d.Price
 		decl.Price = &p
@@ -206,6 +211,16 @@ func (m *Module) RecordWithID(ctx context.Context, eventID, name string, value f
 	return m.meterClient.RecordWithID(ctx, eventID, name, value)
 }
 
+// RecordObservation emits a v2 usage observation. Its caller-persisted event
+// ID, subject, metadata, and occurrence time survive outbox retries; platform
+// Dispatch still re-derives authoritative app/module/owner attribution. The
+// SDK validates structure and normalizes OccurredAt to UTC without comparing
+// it with the module process clock. API and Billing authoritatively decide the
+// accepted occurrence window, replay outcome, and billing period.
+func (m *Module) RecordObservation(ctx context.Context, name string, value float64, observation meter.Observation) error {
+	return m.meterClient.RecordObservation(ctx, name, value, observation)
+}
+
 // Package-level convenience wrappers — dispatch to defaultModule.
 
 // Cache returns a scoped cache client on the default module.
@@ -240,4 +255,10 @@ func Record(ctx context.Context, name string, value float64) error {
 // key. Panics before Init, matching Record.
 func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
 	return mustDefault("RecordWithID").RecordWithID(ctx, eventID, name, value)
+}
+
+// RecordObservation emits a v2 usage observation on the default module.
+// Panics before Init, matching Record and RecordWithID.
+func RecordObservation(ctx context.Context, name string, value float64, observation meter.Observation) error {
+	return mustDefault("RecordObservation").RecordObservation(ctx, name, value, observation)
 }

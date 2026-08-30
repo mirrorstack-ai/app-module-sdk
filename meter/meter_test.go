@@ -385,6 +385,34 @@ func TestMeter_KindIsAnOption(t *testing.T) {
 	}
 }
 
+func TestMeter_BySubjectIsGaugeOnly(t *testing.T) {
+	t.Parallel()
+
+	valid := DeclFromOptions("users.active", Gauge, BySubject)
+	if valid.AggregationKey != aggregationKeySubject {
+		t.Fatalf("aggregation key = %q, want %q", valid.AggregationKey, aggregationKeySubject)
+	}
+	c := newTestClient(t)
+	c.Declare("user-core", valid)
+
+	tests := map[string]Decl{
+		"counter":  DeclFromOptions("users.counter", Counter, BySubject),
+		"reserved": DeclFromOptions("infra.users.active", Price(0), BySubject),
+		"no kind":  DeclFromOptions("users.untyped", BySubject),
+		"unknown":  {Name: "users.unknown", Kind: gaugeKind, KindSet: true, AggregationKey: "metadata.user"},
+	}
+	for name, decl := range tests {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("invalid %s aggregation declaration did not panic", name)
+				}
+			}()
+			newTestClient(t).Declare("user-core", decl)
+		})
+	}
+}
+
 // TestMeter_RejectsMissingKind asserts a CUSTOM metric declared without a kind
 // option panics — the platform must know SUM vs MAX/integral up front.
 func TestMeter_RejectsMissingKind(t *testing.T) {

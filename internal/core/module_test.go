@@ -1115,6 +1115,7 @@ func TestScopesPanic_BeforeInit(t *testing.T) {
 		"RunTask":            func() { _, _ = RunTask(context.Background(), "work", nil) },
 		"Meter":              func() { Meter("m", meter.Counter) },
 		"Record":             func() { _ = Record(context.Background(), "m", 1) },
+		"RecordObservation":  func() { _ = RecordObservation(context.Background(), "m", 1, meter.Observation{}) },
 		"ModuleDB":           func() { _, _, _ = ModuleDB(context.Background()) },
 		"ModuleTx":           func() { _ = ModuleTx(context.Background(), func(q db.Querier) error { return nil }) },
 		"DependsOn":          func() { DependsOn("other") },

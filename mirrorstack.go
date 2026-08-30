@@ -287,8 +287,11 @@ func MintMemberAssertion(ctx context.Context, userID string, ttl time.Duration) 
 }
 
 // MetricOption configures a metric at declaration. The KIND is itself an option
-// (Counter / Gauge), alongside Unit and Price.
+// (Counter / Gauge), alongside BySubject, Unit, and Price.
 type MetricOption = meter.MetricOption
+
+// Observation is the v2 meter event evidence passed to RecordObservation.
+type Observation = meter.Observation
 
 // Counter and Gauge are the metric-kind options passed to Meter. Counter is
 // additive (the platform SUMs it); Gauge is an absolute level (MAX or a
@@ -300,6 +303,9 @@ type MetricOption = meter.MetricOption
 const (
 	Counter = meter.Counter
 	Gauge   = meter.Gauge
+	// BySubject makes a Gauge bill as SUM(MAX(value) per Observation.Subject)
+	// within each billing period. It is invalid with Counter or reserved metrics.
+	BySubject = meter.BySubject
 )
 
 // Unit sets a metric's display unit (e.g. "order", "byte"). Optional.
@@ -334,12 +340,15 @@ func MetricUnitLabel(l Label) MetricOption { return meter.MetricUnitLabel(l) }
 // the platform reads the declared kind from the catalog, so a call site can
 // never mislabel a metric.
 //
+// Add ms.BySubject to a Gauge when the billing quantity is
+// SUM(MAX(value) per end-user subject), and emit it with RecordObservation.
 // A custom metric MUST pass exactly one kind option. A reserved
 // infra.*/platform.* metric is platform-measured: it may carry ms.Price ONLY
-// (to override the customer passthrough) — passing a kind or unit on it panics,
-// as does a duplicate name, an invalid name, or conflicting kinds.
+// (to override the customer passthrough) — passing a kind, aggregation, or unit
+// on it panics, as does a duplicate name, an invalid name, or conflicting kinds.
 //
 //	ms.Meter("orders.placed", ms.Counter, ms.Unit("order"), ms.Price(50_000))
+//	ms.Meter("users.active", ms.Gauge, ms.BySubject, ms.Unit("user"))
 //	ms.Meter("infra.compute.walltime.ms", ms.Price(0)) // absorb platform compute
 //
 // To absorb EVERY platform infra metric rather than name them one at a time,
@@ -387,6 +396,15 @@ func Record(ctx context.Context, name string, value float64) error {
 // across ambiguous delivery retries.
 func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
 	return core.RecordWithID(ctx, eventID, name, value)
+}
+
+// RecordObservation emits a v2 meter observation with a persisted EventID,
+// opaque end-user Subject, bounded diagnostic Metadata, and original
+// OccurredAt. Metrics declared BySubject must use this path. The SDK validates
+// structure and normalizes OccurredAt to UTC; API and Billing authoritatively
+// decide the accepted occurrence window, replay outcome, and billing period.
+func RecordObservation(ctx context.Context, name string, value float64, observation Observation) error {
+	return core.RecordObservation(ctx, name, value, observation)
 }
 
 // --- Inter-module calls ---
