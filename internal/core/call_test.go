@@ -145,6 +145,95 @@ func TestIsInternalCallPath(t *testing.T) {
 	}
 }
 
+func TestCallWithOptions(t *testing.T) {
+	response := `{"name":"Ada"}`
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(response))
+	}))
+	defer srv.Close()
+	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
+
+	m, err := New(Config{ID: "m14b4db3ac7f34e6a880ebc763cb3ca55"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	type result struct {
+		Name string `json:"name"`
+	}
+
+	t.Run("bounded exact response", func(t *testing.T) {
+		response = `{"name":"Ada"}`
+		var got result
+		err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{
+			MaxResponseBytes: int64(len(response)),
+		})
+		if err != nil || got.Name != "Ada" {
+			t.Fatalf("CallWithOptions = %+v, %v", got, err)
+		}
+	})
+
+	t.Run("oversized response", func(t *testing.T) {
+		response = `{"name":"Ada"}`
+		var got result
+		err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{
+			MaxResponseBytes: int64(len(response) - 1),
+		})
+		if !errors.Is(err, ErrCallResponseTooLarge) {
+			t.Fatalf("error = %v, want ErrCallResponseTooLarge", err)
+		}
+	})
+
+	t.Run("strict unknown field", func(t *testing.T) {
+		response = `{"name":"Ada","admin":true}`
+		var got result
+		err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{StrictJSON: true})
+		if err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("error = %v, want unknown-field rejection", err)
+		}
+	})
+
+	t.Run("strict second value", func(t *testing.T) {
+		response = `{"name":"Ada"} {"name":"Grace"}`
+		var got result
+		if err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{StrictJSON: true}); err == nil {
+			t.Fatal("strict call accepted a second response value")
+		}
+	})
+
+	t.Run("zero options preserve permissive decode", func(t *testing.T) {
+		response = `{"name":"Ada","future":true} {"ignored":true}`
+		var got result
+		if err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{}); err != nil {
+			t.Fatalf("zero-options CallWithOptions: %v", err)
+		}
+		if got.Name != "Ada" {
+			t.Fatalf("name = %q, want Ada", got.Name)
+		}
+	})
+
+	t.Run("nil output skips response", func(t *testing.T) {
+		response = strings.Repeat("x", 100)
+		if err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, nil, CallOptions{
+			MaxResponseBytes: 1,
+			StrictJSON:       true,
+		}); err != nil {
+			t.Fatalf("nil-output call: %v", err)
+		}
+	})
+
+	t.Run("negative bound is pre-network", func(t *testing.T) {
+		before := requests
+		var got result
+		err := m.CallWithOptions(context.Background(), "mtarget", http.MethodGet, "/internal/profile", nil, &got, CallOptions{MaxResponseBytes: -1})
+		if err == nil || requests != before {
+			t.Fatalf("error=%v requests=%d, want validation error and %d requests", err, requests, before)
+		}
+	})
+}
+
 func TestCallDependency_UsesAuthenticatedActorlessInternalIngress(t *testing.T) {
 	var gotMethod, gotPath, gotQuery, gotAppID, gotSecret string
 	var gotDelegation []string

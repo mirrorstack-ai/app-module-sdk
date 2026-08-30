@@ -1,9 +1,11 @@
 package system
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -45,11 +47,28 @@ func resourceEntries(decls []registry.MCPResourceDecl) []MCPResourceEntry {
 	return out
 }
 
-// MCPToolsCallHandler invokes a registered tool by name with the given args.
+// MCPFailureLogger records an unexpected tool or resource failure. The SDK
+// always keeps the underlying error out of the response; a caller may provide
+// this hook to attach its request-scoped correlation fields to the log.
+type MCPFailureLogger func(ctx context.Context, kind, name string, err error)
+
+// MCPToolsCallHandler invokes a registered tool by name with the given args,
+// logging unexpected handler failures through the process default logger.
 // Body: {"name": "...", "args": {...}}. Returns {"result": ...} on success.
 // 404 for unknown name, 400 for invalid body or args that fail the tool's
 // handler, 500 for handler errors.
 func MCPToolsCallHandler(reg *registry.Registry) http.HandlerFunc {
+	return mcpToolsCallHandler(reg, nil)
+}
+
+// MCPToolsCallHandlerWithFailureLogger is MCPToolsCallHandler with a callback
+// for unexpected handler failures. The callback receives the request context
+// so the SDK runtime can attach trusted correlation fields to its log.
+func MCPToolsCallHandlerWithFailureLogger(reg *registry.Registry, failureLogger MCPFailureLogger) http.HandlerFunc {
+	return mcpToolsCallHandler(reg, failureLogger)
+}
+
+func mcpToolsCallHandler(reg *registry.Registry, failureLogger MCPFailureLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req mcpToolCallRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -79,7 +98,8 @@ func MCPToolsCallHandler(reg *registry.Registry) http.HandlerFunc {
 				httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: err.Error()})
 				return
 			}
-			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
+			logMCPFailure(r.Context(), "tool", req.Name, err, failureLogger)
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "request could not be completed"})
 			return
 		}
 		response := mcpToolCallResponse{Result: result}
@@ -106,8 +126,21 @@ func MCPResourcesListHandler(reg *registry.Registry) http.HandlerFunc {
 	}
 }
 
-// MCPResourcesReadHandler returns the handler for GET /__mirrorstack/mcp/resources/read?name=...
+// MCPResourcesReadHandler returns the handler for GET
+// /__mirrorstack/mcp/resources/read?name=..., logging unexpected handler
+// failures through the process default logger.
 func MCPResourcesReadHandler(reg *registry.Registry) http.HandlerFunc {
+	return mcpResourcesReadHandler(reg, nil)
+}
+
+// MCPResourcesReadHandlerWithFailureLogger is MCPResourcesReadHandler with a
+// callback for unexpected handler failures. The callback receives the request
+// context so the SDK runtime can attach trusted correlation fields to its log.
+func MCPResourcesReadHandlerWithFailureLogger(reg *registry.Registry, failureLogger MCPFailureLogger) http.HandlerFunc {
+	return mcpResourcesReadHandler(reg, failureLogger)
+}
+
+func mcpResourcesReadHandler(reg *registry.Registry, failureLogger MCPFailureLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		if name == "" {
@@ -125,11 +158,20 @@ func MCPResourcesReadHandler(reg *registry.Registry) http.HandlerFunc {
 		}
 		content, err := rc.Handler(r.Context())
 		if err != nil {
-			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: err.Error()})
+			logMCPFailure(r.Context(), "resource", name, err, failureLogger)
+			httputil.JSON(w, http.StatusInternalServerError, httputil.ErrorResponse{Error: "request could not be completed"})
 			return
 		}
 		httputil.JSON(w, http.StatusOK, mcpResourceReadResponse{Content: content})
 	}
+}
+
+func logMCPFailure(ctx context.Context, kind, name string, err error, failureLogger MCPFailureLogger) {
+	if failureLogger != nil {
+		failureLogger(ctx, kind, name, err)
+		return
+	}
+	slog.ErrorContext(ctx, "MCP handler failed", "kind", kind, "name", name, "error", err)
 }
 
 // ErrInvalidArgs signals a 400-class error from an MCP tool handler (bad input

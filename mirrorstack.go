@@ -391,6 +391,14 @@ func RecordWithID(ctx context.Context, eventID, name string, value float64) erro
 
 // --- Inter-module calls ---
 
+// CallOptions opts one inter-module response into a byte bound and/or strict
+// JSON decoding. Its zero value preserves Call behavior.
+type CallOptions = core.CallOptions
+
+// ErrCallResponseTooLarge is returned when a successful response exceeds
+// CallOptions.MaxResponseBytes. Use errors.Is to match it.
+var ErrCallResponseTooLarge = core.ErrCallResponseTooLarge
+
 // Call makes one server-mediated module-to-module hop through the platform
 // dispatch, scoped to the current app (app id read from ctx via the SDK's
 // auth identity — callers don't pass it). It JSON-marshals body, sends
@@ -407,6 +415,12 @@ func RecordWithID(ctx context.Context, eventID, name string, value float64) erro
 // documented #146 seam (see core.resolveCallURL).
 func Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
 	return core.Call(ctx, targetModuleID, method, path, body, out)
+}
+
+// CallWithOptions is Call with opt-in bounded and strict response decoding.
+// A negative MaxResponseBytes is rejected before any network I/O.
+func CallWithOptions(ctx context.Context, targetModuleID, method, path string, body, out any, options CallOptions) error {
+	return core.CallWithOptions(ctx, targetModuleID, method, path, body, out, options)
 }
 
 // CallGet is Call specialized to GET (no request body) on the default module.
@@ -608,6 +622,15 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // an ad-hoc map so module errors match the SDK's own error wire format.
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	WriteJSON(w, status, ErrorResponse{Error: msg})
+}
+
+// WriteServerError logs err with the request's trusted correlation fields and
+// returns a fixed, non-sensitive 500 response. operation is an internal log
+// label; it is never copied to the response. Use this boundary instead of
+// returning err.Error(), which can expose SQL, credentials, or topology.
+func WriteServerError(w http.ResponseWriter, r *http.Request, operation string, err error) {
+	Log(r.Context()).Error(operation, "error", err)
+	WriteError(w, http.StatusInternalServerError, "request could not be completed")
 }
 
 // --- Dependency declarations ---
@@ -935,9 +958,9 @@ type ContributionSlot = contributions.SlotInfo
 // register requests must unmarshal cleanly into T. The SDK
 // auto-mounts:
 //
-//	POST   /__mirrorstack/contrib/<key>/<id>   register/upsert
-//	DELETE /__mirrorstack/contrib/<key>/<id>   unregister
-//	GET    /__mirrorstack/contrib/<key>        list all registered
+//	POST   /__mirrorstack/contrib/<key>/<module-uuid>   register/upsert
+//	DELETE /__mirrorstack/contrib/<key>/<module-uuid>   unregister
+//	GET    /__mirrorstack/contrib/<key>                 list all registered
 //
 // Each is Internal-scoped (HMAC-gated by the SDK). Host modules that
 // want to expose a Platform-scoped read with permission gating wrap
@@ -964,8 +987,9 @@ func Provide[T any](key string) {
 // a /platform/* read endpoint listing what they accept.
 func Contributions() []ContributionSlot { return core.Contributions() }
 
-// Contribution is a stored contribution row: ID is the contributing module's
-// id (the registration key), Payload is its JSON contribution.
+// Contribution is a stored contribution row: OwnerModuleID is the canonical
+// UUID of the contributing module, Payload is its JSON contribution, and ID is
+// retained as a compatibility alias for OwnerModuleID.
 type Contribution = contributions.Contribution
 
 // StoredContributions returns the contributions other modules have registered

@@ -4,12 +4,12 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
+	"github.com/mirrorstack-ai/app-module-sdk/httpx"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 )
 
@@ -26,10 +26,12 @@ func (m *Module) ProvideSlot(slot contributions.Slot) {
 	}
 }
 
-// NewContributionSlot builds a Slot whose validator unmarshals into
-// T with DisallowUnknownFields so contributors can't sneak in extra
-// fields the host doesn't expect (silent jsonb pollution). Schema
-// tag is the Go type name, surfaced on the manifest.
+// NewContributionSlot builds a Slot whose validator first unmarshals into T
+// with DisallowUnknownFields, then validates against the same JSON Schema
+// published in the manifest. Strict decoding rejects undeclared fields and
+// trailing values; schema validation also enforces required keys that Go's
+// decoder would otherwise silently replace with zero values. Schema tag is the
+// Go type name, surfaced on the manifest.
 func NewContributionSlot[T any](key string) contributions.Slot {
 	var zero T
 	schemaTag := fmt.Sprintf("%T", zero)
@@ -37,11 +39,16 @@ func NewContributionSlot[T any](key string) contributions.Slot {
 	if err != nil {
 		panic("mirrorstack: Provide(" + key + ") payload schema derivation failed: " + err.Error())
 	}
+	validateSchema, err := contributions.CompilePayloadValidator(payloadSchema)
+	if err != nil {
+		panic("mirrorstack: Provide(" + key + ") payload schema compilation failed: " + err.Error())
+	}
 	return contributions.NewSlot(key, schemaTag, payloadSchema, func(data json.RawMessage) error {
 		var v T
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.DisallowUnknownFields()
-		return dec.Decode(&v)
+		if err := httpx.UnmarshalStrict(data, &v); err != nil {
+			return err
+		}
+		return validateSchema(data)
 	})
 }
 
@@ -70,9 +77,10 @@ func Contributions() []contributions.SlotInfo {
 // into one of THIS module's slots (slot key as declared via Provide),
 // newest first. It reads the SDK-managed <moduleID>_contributions store — the
 // canonical registry the platform's install-time auto-register writes to. Each
-// entry's ID is the contributing module's id (the registration key), which a
-// host can use to address that module. Use this on the HOST side to consume
-// contributions (e.g. oauth-core listing its registered auth providers).
+// entry's OwnerModuleID is the contributing module's canonical UUID, which a
+// host can use to address that module. ID remains populated as a compatibility
+// alias. Use this on the HOST side to consume contributions (e.g. oauth-core
+// listing its registered auth providers).
 //
 // A host installed before the SDK provisioned this store on install has no
 // table for the app yet; the first read creates it (see Storage.WithTable) and

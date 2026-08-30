@@ -29,6 +29,12 @@ type cyclicNode struct {
 	Kids []cyclicNode `json:"kids"`
 }
 
+type requiredContributionPayload struct {
+	Component string `json:"component"`
+	Label     string `json:"label"`
+	Optional  string `json:"optional,omitempty"`
+}
+
 func deriveSchemaDocument[T any](t *testing.T) (json.RawMessage, map[string]any) {
 	t.Helper()
 	raw, err := derivePayloadSchema[T]()
@@ -223,6 +229,37 @@ func TestNewContributionSlotProjectsPayloadSchema(t *testing.T) {
 	}
 	if string(got[0].Payload) != string(want) {
 		t.Fatalf("slot payload schema = %s, want %s", got[0].Payload, want)
+	}
+}
+
+func TestNewContributionSlotValidatesRequiredProperties(t *testing.T) {
+	t.Parallel()
+
+	slot := NewContributionSlot[requiredContributionPayload]("user-detail-blocks")
+	tests := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{name: "all properties", payload: `{"component":"profile","label":"Profile","optional":"Description"}`},
+		{name: "optional property omitted", payload: `{"component":"profile","label":"Profile"}`},
+		{name: "required property has zero value", payload: `{"component":"","label":""}`},
+		{name: "missing required component", payload: `{"label":"Profile"}`, wantErr: true},
+		{name: "missing required label", payload: `{"component":"profile"}`, wantErr: true},
+		{name: "null object", payload: `null`, wantErr: true},
+		{name: "unknown property", payload: `{"component":"profile","label":"Profile","href":"/profile"}`, wantErr: true},
+		{name: "trailing value", payload: `{"component":"profile","label":"Profile"} {}`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := slot.Validate(json.RawMessage(tc.payload))
+			if tc.wantErr && err == nil {
+				t.Fatal("Validate accepted an invalid contribution payload")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Validate rejected a valid contribution payload: %v", err)
+			}
+		})
 	}
 }
 

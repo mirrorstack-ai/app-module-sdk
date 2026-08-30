@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
 )
 
@@ -54,15 +55,15 @@ func (h *Handlers) Routes() chi.Router {
 // hitting storage.
 func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 	slotKey := chi.URLParam(r, "slot")
-	id := chi.URLParam(r, "id")
+	id, idOK := ids.CanonicalModuleID(chi.URLParam(r, "id"))
 
-	slot, ok := h.registry.Get(slotKey)
-	if !ok {
+	slot, slotOK := h.registry.Get(slotKey)
+	if !slotOK {
 		httputil.JSON(w, http.StatusNotFound, httputil.ErrorResponse{Error: "unknown contribution slot"})
 		return
 	}
-	if id == "" {
-		httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "contribution id is required"})
+	if !idOK {
+		httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "contribution id must be a module UUID"})
 		return
 	}
 
@@ -99,10 +100,14 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 // 404 if the contribution wasn't registered.
 func (h *Handlers) unregister(w http.ResponseWriter, r *http.Request) {
 	slotKey := chi.URLParam(r, "slot")
-	id := chi.URLParam(r, "id")
+	id, idOK := ids.CanonicalModuleID(chi.URLParam(r, "id"))
 
 	if _, ok := h.registry.Get(slotKey); !ok {
 		httputil.JSON(w, http.StatusNotFound, httputil.ErrorResponse{Error: "unknown contribution slot"})
+		return
+	}
+	if !idOK {
+		httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{Error: "contribution id must be a module UUID"})
 		return
 	}
 

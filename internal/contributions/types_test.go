@@ -2,6 +2,7 @@ package contributions
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -28,5 +29,33 @@ func TestRegistryListCopiesPayloadSchema(t *testing.T) {
 	again := r.List()
 	if string(again[0].Payload) != want {
 		t.Fatalf("mutating List payload corrupted registry: got %s, want %s", again[0].Payload, want)
+	}
+}
+
+func TestContributionDecodeIsStrict(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		Name string `json:"name"`
+	}
+	for name, raw := range map[string]string{
+		"unknown field": `{"name":"Ada","admin":true}`,
+		"second value":  `{"name":"Ada"} {"name":"Grace"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var got payload
+			if err := (Contribution{Payload: json.RawMessage(raw)}).Decode(&got); err == nil {
+				t.Fatal("Decode accepted a non-contract payload")
+			}
+		})
+	}
+
+	var got payload
+	if err := (Contribution{Payload: json.RawMessage(`{"name":"Ada"}`)}).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if strings.TrimSpace(got.Name) != "Ada" {
+		t.Fatalf("name = %q, want Ada", got.Name)
 	}
 }

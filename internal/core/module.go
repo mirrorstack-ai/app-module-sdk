@@ -16,8 +16,9 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	publicids "github.com/mirrorstack-ai/app-module-sdk/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
-	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
+	internalids "github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 )
@@ -35,14 +36,14 @@ func New(cfg Config) (*Module, error) {
 	// while module schemas and manifests use the identifier-safe m<32hex>
 	// representation. Normalize at the construction boundary so every internal
 	// consumer sees one stable form. Legacy human-readable dev IDs remain valid.
-	if normalized, ok := ids.NormalizeModuleID(cfg.ID); ok {
+	if normalized, ok := internalids.NormalizeModuleID(cfg.ID); ok {
 		cfg.ID = normalized
 	}
 	if !moduleIDPattern.MatchString(cfg.ID) {
 		return nil, fmt.Errorf("mirrorstack: Config.ID %q must match %s (lowercase, starts with letter, max 36 chars)", cfg.ID, moduleIDPattern)
 	}
-	if cfg.Slug != "" && !moduleSlugPattern.MatchString(cfg.Slug) {
-		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must match %s (lowercase, starts with letter, hyphens allowed, max 16 chars)", cfg.Slug, moduleSlugPattern)
+	if cfg.Slug != "" && !publicids.ValidModuleSlug(cfg.Slug) {
+		return nil, fmt.Errorf("mirrorstack: Config.Slug %q must be lowercase, start with a letter, contain only letters, digits, or hyphens, and be at most 16 bytes", cfg.Slug)
 	}
 	if err := validateClientSpec(cfg.Client); err != nil {
 		return nil, err

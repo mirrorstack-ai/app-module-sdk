@@ -2,9 +2,11 @@ package contributions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -153,4 +155,88 @@ func TestWithTable(t *testing.T) {
 			t.Errorf("WithTable = %v, want a provisioning failure", err)
 		}
 	})
+}
+
+type oneContributionQuerier struct {
+	owner       string
+	payload     json.RawMessage
+	registered  time.Time
+	queryCalled bool
+}
+
+func (*oneContributionQuerier) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (q *oneContributionQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	q.queryCalled = true
+	return &oneContributionRows{owner: q.owner, payload: q.payload, registered: q.registered}, nil
+}
+
+func (*oneContributionQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
+
+type oneContributionRows struct {
+	owner      string
+	payload    json.RawMessage
+	registered time.Time
+	ready      bool
+	done       bool
+}
+
+func (*oneContributionRows) Close()                                       {}
+func (*oneContributionRows) Err() error                                   { return nil }
+func (*oneContributionRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (*oneContributionRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (*oneContributionRows) Values() ([]any, error)                       { return nil, nil }
+func (*oneContributionRows) RawValues() [][]byte                          { return nil }
+func (*oneContributionRows) Conn() *pgx.Conn                              { return nil }
+
+func (r *oneContributionRows) Next() bool {
+	if r.done {
+		return false
+	}
+	r.ready = true
+	r.done = true
+	return true
+}
+
+func (r *oneContributionRows) Scan(dest ...any) error {
+	if !r.ready || len(dest) != 3 {
+		return errors.New("unexpected Scan call")
+	}
+	owner, ownerOK := dest[0].(*string)
+	payload, payloadOK := dest[1].(*json.RawMessage)
+	registered, registeredOK := dest[2].(*time.Time)
+	if !ownerOK || !payloadOK || !registeredOK {
+		return errors.New("unexpected Scan destinations")
+	}
+	*owner = r.owner
+	*payload = append((*payload)[:0], r.payload...)
+	*registered = r.registered
+	return nil
+}
+
+func TestListPopulatesOwnerAndCompatibilityID(t *testing.T) {
+	t.Parallel()
+
+	const owner = "123e4567-e89b-12d3-a456-426614174000"
+	wantTime := time.Date(2026, 8, 30, 4, 5, 6, 0, time.UTC)
+	q := &oneContributionQuerier{
+		owner:      owner,
+		payload:    json.RawMessage(`{"name":"Ada"}`),
+		registered: wantTime,
+	}
+	got, err := NewStorage("mhost").List(context.Background(), q, "profiles")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !q.queryCalled || len(got) != 1 {
+		t.Fatalf("queryCalled=%v rows=%d, want true and 1", q.queryCalled, len(got))
+	}
+	if got[0].OwnerModuleID != owner || got[0].ID != owner {
+		t.Fatalf("owner=%q id=%q, want both %q", got[0].OwnerModuleID, got[0].ID, owner)
+	}
+	if string(got[0].Payload) != `{"name":"Ada"}` || !got[0].RegisteredAt.Equal(wantTime) {
+		t.Fatalf("row = %+v", got[0])
+	}
 }

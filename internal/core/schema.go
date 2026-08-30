@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 
-	"github.com/invopop/jsonschema"
+	jsonschemagenerator "github.com/invopop/jsonschema"
 )
 
 // deriveMCPSchema returns the JSON Schema of T for an MCP tool/resource
@@ -26,7 +26,7 @@ func deriveMCPSchema[T any]() (json.RawMessage, error) {
 	// tokens on every tools/list — the listing is re-sent each turn, so it is
 	// paid per turn, per tool, forever. derivePayloadSchema already set this;
 	// the two paths simply never got the same treatment.
-	r := &jsonschema.Reflector{DoNotReference: true, Anonymous: true}
+	r := &jsonschemagenerator.Reflector{DoNotReference: true, Anonymous: true}
 	schema := r.Reflect(zero)
 	// $schema is dialect metadata an MCP client never reads — it consumes
 	// inputSchema as a JSON Schema object and looks at type/properties/required.
@@ -54,6 +54,6 @@ func deriveMCPSchema[T any]() (json.RawMessage, error) {
 // takes an any, so T = any (or any interface) arrives as a nil interface and
 // invopop nil-dereferences.
 func derivePayloadSchema[T any]() (json.RawMessage, error) {
-	r := &jsonschema.Reflector{Anonymous: true}
+	r := &jsonschemagenerator.Reflector{Anonymous: true}
 	return json.Marshal(r.ReflectFromType(reflect.TypeFor[T]()))
 }
