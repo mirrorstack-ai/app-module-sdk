@@ -7,6 +7,8 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.9] - 2026-08-30
+
 ### Added
 
 - `invocation.Context` and `invocation.FromContext` expose one read-only,
@@ -15,6 +17,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   cookie capabilities and opaque audit provenance. Returned slices are
   defensively copied; transport setters and wire decoders remain internal to
   the SDK.
+- `meter.Observation` and `RecordObservation` module/client/root facades carry
+  a stable event ID, end-user subject, bounded diagnostic metadata and original
+  occurrence time. Gauge metrics can opt into `BySubject`, serialized as
+  `aggregationKey: "subject"` in the manifest.
 
 ### Changed
 
@@ -27,12 +33,17 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   without a typed invocation during the platform's fixed migration window.
   When typed and legacy authoritative values are both present, a mismatch
   fails closed with a value-free 400 response.
+- Observation recording uses the private v2 meter envelope while the existing
+  v1 API and its exact wire bytes remain unchanged. The SDK validates only the
+  structural occurrence shape and normalizes it to UTC; the API and Billing
+  service remain authoritative for replay, time-window and billing-period
+  policy.
 
 This is additive public surface: `go doc -all` reports 17 exported symbols in
-the new `invocation` package (7 constants, 9 types and `FromContext`), while no
-existing exported signature is removed or changed. Existing v0.4.8 APIs and
-legacy request behavior remain source compatible, so this is a PATCH under the
-repository's pre-1.0 convention.
+the new `invocation` package (7 constants, 9 types and `FromContext`), and the
+meter observation API adds no signature removal. Existing v0.4.8 APIs, v1 meter
+wire bytes and legacy request behavior remain source compatible, so this is a
+PATCH under the repository's pre-1.0 convention.
 
 ## [v0.4.8] - 2026-08-30
 
