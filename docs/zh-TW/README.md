@@ -12,6 +12,7 @@
 
 - [Module structure](./concepts/module-structure.md) — 每個已發布模組共用的骨架，以及決定檔案該放哪個目錄的那一個問題。
 - [Agent tools](./concepts/agent-tools.md) — MCP tools 與 resources 的差別,以及為什麼 module 是 agent-first。
+- [Durable audit records](./concepts/audit.md) — mutation 內原子寫入、平台驗證 actor/request provenance，以及共用 outbox delivery。
 - [Dependencies](./concepts/dependencies.md) — Required 與 optional 相依、SemVer version constraint、 `ms.Needs` 用法。
 - [Manifest](./concepts/manifest.md) — Manifest endpoint 的完整欄位與用途。
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal 三種 scope 的選用時機。

@@ -179,6 +179,12 @@ func DB(ctx context.Context) (db.Querier, func(), error) { return core.DB(ctx) }
 // Tx runs fn inside a per-app transaction on the default module.
 func Tx(ctx context.Context, fn func(q db.Querier) error) error { return core.Tx(ctx, fn) }
 
+// DrainAudit forwards one bounded batch from the current app's durable audit
+// outbox. Tx already attempts this after a successful commit; cron and worker
+// handlers can call DrainAudit to work through older backlog without owning
+// lease, retry, or transport code themselves.
+func DrainAudit(ctx context.Context) error { return core.DrainAudit(ctx) }
+
 // ModuleDB returns a connection scoped to the module's shared schema.
 func ModuleDB(ctx context.Context) (db.Querier, func(), error) { return core.ModuleDB(ctx) }
 

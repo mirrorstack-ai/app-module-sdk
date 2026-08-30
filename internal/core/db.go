@@ -8,6 +8,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/audit"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/auditstate"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -58,9 +59,20 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 		return err
 	}
 	defer releasePool()
-	return db.Tx(ctx, pool, func(q db.Querier) error {
-		return fn(m.devGuardFor(ctx, m.withModuleID(q), db.CredentialFrom))
+	var recordedAudit bool
+	err = db.Tx(ctx, pool, func(q db.Querier) error {
+		tracked := auditstate.Track(m.devGuardFor(ctx, m.withModuleID(q), db.CredentialFrom))
+		err := fn(tracked)
+		recordedAudit = tracked.Recorded()
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	if recordedAudit {
+		m.drainAuditAfterCommit(ctx)
+	}
+	return nil
 }
 
 // resolvePool returns the per-app credential pool (production) or the dev

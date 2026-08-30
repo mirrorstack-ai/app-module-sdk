@@ -36,6 +36,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,6 +44,8 @@ import (
 	"strings"
 
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/auditstate"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/invocationwire"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/pgerr"
 )
 
@@ -67,13 +70,24 @@ type Entry struct {
 	Details any
 }
 
-var ErrInvalidEntry = errors.New("mirrorstack/audit: an entry needs a subject kind, a subject id and an action")
+var (
+	ErrInvalidEntry = errors.New("mirrorstack/audit: an entry needs a subject kind, a subject id and an action")
+	// ErrProvenanceUnavailable means Record did not run inside an authenticated
+	// typed invocation. Failing the caller's transaction is safer than creating
+	// an audit row whose actor or request provenance can never be proven.
+	ErrProvenanceUnavailable = errors.New("mirrorstack/audit: authenticated invocation provenance is required")
+)
 
 // maxDetailBytes mirrors the platform's cap so an entry that the platform will
 // refuse fails HERE — inside the caller's transaction, where the module can
 // still do something about it — rather than later, in a drain, where the only
 // options are drop it or retry it forever.
-const maxDetailBytes = 8 << 10
+const (
+	maxSubjectKindBytes = 64
+	maxSubjectIDBytes   = 512
+	maxActionBytes      = 128
+	maxDetailBytes      = 8 << 10
+)
 
 // Record appends one entry to the module's local outbox, inside the caller's
 // transaction.
@@ -96,7 +110,9 @@ func Record(ctx context.Context, q db.Querier, entry Entry) error {
 	entry.SubjectKind = strings.TrimSpace(entry.SubjectKind)
 	entry.SubjectID = strings.TrimSpace(entry.SubjectID)
 	entry.Action = strings.TrimSpace(entry.Action)
-	if entry.SubjectKind == "" || entry.SubjectID == "" || entry.Action == "" {
+	if entry.SubjectKind == "" || entry.SubjectID == "" || entry.Action == "" ||
+		len(entry.SubjectKind) > maxSubjectKindBytes || len(entry.SubjectID) > maxSubjectIDBytes ||
+		len(entry.Action) > maxActionBytes {
 		return ErrInvalidEntry
 	}
 
@@ -110,13 +126,32 @@ func Record(ctx context.Context, q db.Querier, entry Entry) error {
 			return fmt.Errorf("mirrorstack/audit: details are %d bytes; the limit is %d",
 				len(encoded), maxDetailBytes)
 		}
-		details = encoded
+		if bytes.Equal(encoded, []byte("null")) {
+			details = nil
+		} else {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &object); err != nil || object == nil {
+				return errors.New("mirrorstack/audit: details must encode a JSON object")
+			}
+			details = encoded
+		}
+	}
+	proof := invocationwire.ProofFromContext(ctx)
+	if len(proof) == 0 {
+		return ErrProvenanceUnavailable
+	}
+	if _, err := invocationwire.Parse(proof); err != nil {
+		return fmt.Errorf("%w: %v", ErrProvenanceUnavailable, err)
 	}
 
 	_, err := q.Exec(ctx, `
-		INSERT INTO __MODULE_ID___audit_outbox (subject_kind, subject_id, action, details)
-		VALUES ($1, $2, $3, $4)`,
-		entry.SubjectKind, entry.SubjectID, entry.Action, details)
+		INSERT INTO __MODULE_ID___audit_outbox
+		    (subject_kind, subject_id, action, details, invocation_proof)
+		VALUES ($1, $2, $3, $4, $5)`,
+		entry.SubjectKind, entry.SubjectID, entry.Action, details, proof)
+	if err == nil {
+		auditstate.Mark(q)
+	}
 	return err
 }
 
@@ -138,23 +173,124 @@ func EnsureTable(ctx context.Context, q db.Querier) error {
 		SELECT pg_advisory_xact_lock(hashtext(current_schema() || '.__MODULE_ID___audit_outbox'));
 
 		CREATE TABLE IF NOT EXISTS __MODULE_ID___audit_outbox (
-		    id           bigserial PRIMARY KEY,
-		    occurred_at  timestamptz NOT NULL DEFAULT now(),
-		    subject_kind text NOT NULL,
-		    subject_id   text NOT NULL,
-		    action       text NOT NULL,
-		    details      jsonb,
-		    -- NULL until the drain has handed this row to the platform. The
-		    -- column is what makes delivery resumable across a restart: an
-		    -- undelivered row is simply one that is still NULL.
-		    delivered_at timestamptz
+		    id               bigserial PRIMARY KEY,
+		    event_id         uuid NOT NULL DEFAULT gen_random_uuid(),
+		    occurred_at      timestamptz NOT NULL DEFAULT now(),
+		    subject_kind     text NOT NULL,
+		    subject_id       text NOT NULL,
+		    action           text NOT NULL,
+		    details          jsonb,
+		    invocation_proof bytea,
+		    attempts         integer NOT NULL DEFAULT 0,
+		    available_at     timestamptz NOT NULL DEFAULT now(),
+		    lease_token      uuid,
+		    lease_expires_at timestamptz,
+		    delivered_at     timestamptz,
+		    quarantined_at   timestamptz,
+		    last_error_code  text
 		);
 
-		-- The drain reads exactly this: undelivered, oldest first. A partial
-		-- index keeps it the size of the BACKLOG rather than of the history,
-		-- so a module with a million delivered rows still drains in one seek.
-		CREATE INDEX IF NOT EXISTS __MODULE_ID___audit_outbox_pending_idx
-		    ON __MODULE_ID___audit_outbox (id) WHERE delivered_at IS NULL;`)
+		-- Upgrade tables provisioned by SDK versions that could enqueue but not
+		-- forward. Their proof-less rows are retained for operator inspection and
+		-- quarantined; the SDK never invents provenance for them.
+		ALTER TABLE __MODULE_ID___audit_outbox
+		    ADD COLUMN IF NOT EXISTS event_id uuid NOT NULL DEFAULT gen_random_uuid(),
+		    ADD COLUMN IF NOT EXISTS invocation_proof bytea,
+		    ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
+		    ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT now(),
+		    ADD COLUMN IF NOT EXISTS lease_token uuid,
+		    ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz,
+		    ADD COLUMN IF NOT EXISTS quarantined_at timestamptz,
+		    ADD COLUMN IF NOT EXISTS last_error_code text;
+
+		UPDATE __MODULE_ID___audit_outbox
+		SET quarantined_at = COALESCE(quarantined_at, now()),
+		    last_error_code = COALESCE(last_error_code, 'missing_invocation_proof'),
+		    lease_token = NULL,
+		    lease_expires_at = NULL
+		WHERE delivered_at IS NULL
+		  AND invocation_proof IS NULL;
+
+		DO $audit_constraints$
+		BEGIN
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_evt_key'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_evt_key UNIQUE (event_id);
+		    END IF;
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_proof_ck'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_proof_ck CHECK (
+		                invocation_proof IS NULL OR
+		                octet_length(invocation_proof) BETWEEN 1 AND 6144
+		            );
+		    END IF;
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_proof_state_ck'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_proof_state_ck CHECK (
+		                invocation_proof IS NOT NULL OR
+		                delivered_at IS NOT NULL OR quarantined_at IS NOT NULL
+		            );
+		    END IF;
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_entry_ck'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_entry_ck CHECK (
+		                delivered_at IS NOT NULL OR quarantined_at IS NOT NULL OR (
+		                    octet_length(subject_kind) BETWEEN 1 AND 64 AND
+		                    octet_length(subject_id) BETWEEN 1 AND 512 AND
+		                    octet_length(action) BETWEEN 1 AND 128 AND
+		                    (details IS NULL OR jsonb_typeof(details) = 'object') AND
+		                    attempts >= 0 AND
+		                    (last_error_code IS NULL OR octet_length(last_error_code) <= 96)
+		                )
+		            );
+		    END IF;
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_lease_ck'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_lease_ck CHECK (
+		                (lease_token IS NULL) = (lease_expires_at IS NULL)
+		            );
+		    END IF;
+		    IF NOT EXISTS (
+		        SELECT 1 FROM pg_constraint
+		        WHERE conrelid = '__MODULE_ID___audit_outbox'::regclass
+		          AND conname = '__MODULE_ID___audit_terminal_ck'
+		    ) THEN
+		        ALTER TABLE __MODULE_ID___audit_outbox
+		            ADD CONSTRAINT __MODULE_ID___audit_terminal_ck CHECK (
+		                NOT (delivered_at IS NOT NULL AND quarantined_at IS NOT NULL) AND
+		                ((delivered_at IS NULL AND quarantined_at IS NULL) OR
+		                 (lease_token IS NULL AND lease_expires_at IS NULL))
+		            );
+		    END IF;
+		END
+		$audit_constraints$;
+
+		-- Recreate the old index because CREATE IF NOT EXISTS would preserve its
+		-- proof-unaware predicate during an in-place SDK upgrade.
+		DROP INDEX IF EXISTS __MODULE_ID___audit_outbox_pending_idx;
+		CREATE INDEX __MODULE_ID___audit_outbox_pending_idx
+		    ON __MODULE_ID___audit_outbox (available_at, id)
+		    WHERE delivered_at IS NULL AND quarantined_at IS NULL;`)
 	if err != nil && !pgerr.RelationAlreadyExists(err) {
 		return err
 	}

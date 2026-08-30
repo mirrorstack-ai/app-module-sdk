@@ -132,6 +132,28 @@ ms.Tx(ctx, func(q db.Querier) error {
 })
 ```
 
+## Audit
+
+| Function | 用途 |
+|---|---|
+| `audit.Record(ctx, q, entry)` | 把 module 擁有的 fact 與 request 的 private authenticated proof 寫入目前 app outbox。必須使用 mutation transaction 的 querier。 |
+| `ms.DrainAudit(ctx)` | Claim 並轉送一個有界 outbox batch。可由多個 cron/worker 安全並行呼叫；`ms.Tx` 也會在 commit 後嘗試執行。 |
+
+```go
+ms.Tx(r.Context(), func(q db.Querier) error {
+    if _, err := q.Exec(r.Context(), "UPDATE items SET state = $1 WHERE id = $2", "ready", id); err != nil {
+        return err
+    }
+    return audit.Record(r.Context(), q, audit.Entry{
+        SubjectKind: "item", SubjectID: id, Action: "readied",
+    })
+})
+```
+
+`audit.Entry` 沒有 actor 或 provenance field。API Platform 從原始 signed
+invocation 推導 trusted identity。若不存在，`audit.Record` 會在 SQL 前回傳
+`audit.ErrProvenanceUnavailable`。詳見 [Durable audit records](./concepts/audit.md)。
+
 ## Cache / Storage / Meter
 
 | Function | 用途 |

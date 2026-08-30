@@ -13,34 +13,42 @@ import (
 
 const invalidInvocationError = "invalid invocation context"
 
-func parseLambdaInvocation(req LambdaRequest, moduleID, moduleSlug string) (invocation.Context, bool, error) {
+type lambdaInvocation struct {
+	context invocation.Context
+	proof   []byte
+}
+
+func parseLambdaInvocation(req LambdaRequest, moduleID, moduleSlug string) (lambdaInvocation, bool, error) {
 	if len(req.Invocation) == 0 {
-		return invocation.Context{}, false, nil
+		return lambdaInvocation{}, false, nil
 	}
 	trusted, err := invocationwire.Parse(req.Invocation)
 	if err != nil || req.Method != trusted.Request.Method || req.Path != trusted.Request.Path ||
 		!invocationwire.BodyMatches(trusted, []byte(req.Body)) ||
 		(trusted.Identity.ActorDelegation != "" && !actor.ValidTransportValue(trusted.Identity.ActorDelegation)) {
-		return invocation.Context{}, true, errors.New(invalidInvocationError)
+		return lambdaInvocation{}, true, errors.New(invalidInvocationError)
 	}
 	if moduleID != "" {
 		canonical, ok := ids.CanonicalModuleID(moduleID)
 		if !ok || canonical != trusted.Module.ID {
-			return invocation.Context{}, true, errors.New(invalidInvocationError)
+			return lambdaInvocation{}, true, errors.New(invalidInvocationError)
 		}
 	}
 	if moduleSlug != "" && moduleSlug != trusted.Module.Slug {
-		return invocation.Context{}, true, errors.New(invalidInvocationError)
+		return lambdaInvocation{}, true, errors.New(invalidInvocationError)
 	}
 	for name := range req.Headers {
 		if strings.EqualFold(name, invocationwire.Header) {
-			return invocation.Context{}, true, errors.New(invalidInvocationError)
+			return lambdaInvocation{}, true, errors.New(invalidInvocationError)
 		}
 	}
 	if err := invocationwire.ValidateLegacyHeaders(trusted, req.Headers); err != nil || !lambdaTopLevelMatches(req, trusted) {
-		return invocation.Context{}, true, errors.New(invalidInvocationError)
+		return lambdaInvocation{}, true, errors.New(invalidInvocationError)
 	}
-	return trusted, true, nil
+	return lambdaInvocation{
+		context: trusted,
+		proof:   append([]byte(nil), req.Invocation...),
+	}, true, nil
 }
 
 func lambdaTopLevelMatches(req LambdaRequest, trusted invocation.Context) bool {

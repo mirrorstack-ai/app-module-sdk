@@ -49,9 +49,27 @@ const (
 
 // WithContext installs a defensive copy under the SDK-private context key.
 func WithContext(ctx context.Context, trusted invocation.Context) context.Context {
+	return withContext(ctx, trusted, nil)
+}
+
+// WithContextAndProof installs the public typed projection together with the
+// exact canonical bytes authenticated by the transport. Only SDK internals can
+// retrieve the proof; invocation.FromContext deliberately exposes no setter or
+// proof accessor to module code.
+func WithContextAndProof(ctx context.Context, trusted invocation.Context, proof []byte) context.Context {
+	return withContext(ctx, trusted, proof)
+}
+
+func withContext(ctx context.Context, trusted invocation.Context, proof []byte) context.Context {
 	trusted.Routes.Redirects = append([]string(nil), trusted.Routes.Redirects...)
 	trusted.Cookies.Capabilities = append([]string(nil), trusted.Cookies.Capabilities...)
-	return invocationstate.With(ctx, trusted)
+	return invocationstate.WithProof(ctx, trusted, proof)
+}
+
+// ProofFromContext returns an owned copy of the authenticated invocation wire.
+// A nil result means the request did not arrive through a typed transport.
+func ProofFromContext(ctx context.Context) []byte {
+	return invocationstate.Proof(ctx)
 }
 
 // Marshal validates trusted and returns its canonical JSON representation.
