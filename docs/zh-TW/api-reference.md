@@ -55,6 +55,24 @@ ms.Platform(func(r chi.Router) {
 })
 ```
 
+## Trusted invocation
+
+`invocation` package 提供 SDK 在驗證平台 request 後安裝的完整唯讀 context。
+詳見 [Trusted invocation context](./concepts/invocation.md)。
+
+| Function | 用途 |
+|---|---|
+| `invocation.FromContext(ctx)` | 在存在時回傳 canonical v1 invocation 的 defensive copy。 |
+
+```go
+import "github.com/mirrorstack-ai/app-module-sdk/invocation"
+
+trusted, ok := invocation.FromContext(r.Context())
+```
+
+SDK 不公開 setter 或 wire decoder。一般 identity 與 authorization 繼續使用
+`ms.UserID`、`ms.AppID`、`ms.AppRole` 與 `ms.RequirePermission`。
+
 ## Events
 
 | Function | 用途 |

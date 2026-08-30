@@ -7,6 +7,33 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- `invocation.Context` and `invocation.FromContext` expose one read-only,
+  versioned request contract with authoritative app/module scope, identity
+  namespace, canonical routes, occurrence data, trusted connection facts,
+  cookie capabilities and opaque audit provenance. Returned slices are
+  defensively copied; transport setters and wire decoders remain internal to
+  the SDK.
+
+### Changed
+
+- Authenticated direct HTTP, WSS/local relay and deployed Lambda requests now
+  consume the same canonical invocation bytes. The SDK binds method, path,
+  body, module identity and compatibility claims before installing typed
+  identity/schema/delegation, then strips every typed and legacy wire field
+  before the handler runs.
+- Legacy HTTP headers and Lambda envelope fields remain accepted for callers
+  without a typed invocation during the platform's fixed migration window.
+  When typed and legacy authoritative values are both present, a mismatch
+  fails closed with a value-free 400 response.
+
+This is additive public surface: `go doc -all` reports 17 exported symbols in
+the new `invocation` package (7 constants, 9 types and `FromContext`), while no
+existing exported signature is removed or changed. Existing v0.4.8 APIs and
+legacy request behavior remain source compatible, so this is a PATCH under the
+repository's pre-1.0 convention.
+
 ## [v0.4.8] - 2026-08-30
 
 ### Added

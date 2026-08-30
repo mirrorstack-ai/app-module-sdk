@@ -15,6 +15,7 @@
 - [Dependencies](./concepts/dependencies.md) — Required 與 optional 相依、SemVer version constraint、 `ms.Needs` 用法。
 - [Manifest](./concepts/manifest.md) — Manifest endpoint 的完整欄位與用途。
 - [Scopes](./concepts/scopes.md) — Platform / Public / Internal 三種 scope 的選用時機。
+- [Trusted invocation context](./concepts/invocation.md) — 平台認證後安裝、唯讀且與 transport 無關的 request contract。
 
 ## Reference
 

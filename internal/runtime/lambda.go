@@ -14,7 +14,9 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/invocationwire"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
 
@@ -57,11 +59,15 @@ type DependencyGrant = db.DependencyGrant
 
 // LambdaRequest is the payload format sent by the platform via Lambda Invoke SDK.
 type LambdaRequest struct {
-	Method    string            `json:"method"`
-	Path      string            `json:"path"`
-	Headers   map[string]string `json:"headers"`
-	Body      string            `json:"body"`
-	Resources *Resources        `json:"resources,omitempty"`
+	Method  string            `json:"method"`
+	Path    string            `json:"path"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+	// Invocation is the canonical v1 request-serving context. Its exact bytes
+	// are shared with direct HTTP and WSS transports. Control-plane envelopes
+	// omit it and retain the legacy fields below.
+	Invocation json.RawMessage `json:"invocation,omitempty"`
+	Resources  *Resources      `json:"resources,omitempty"`
 	// Dependencies is the platform-resolved cross-module read manifest — one
 	// entry per installed declared producer, holding only exposed+consented
 	// tables at the running version (decision 18 §3). Advisory routing only;
@@ -186,6 +192,10 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return jsonError(400, "invalid request payload"), nil
 		}
+		trustedInvocation, typed, err := parseLambdaInvocation(req, moduleID, moduleRef)
+		if err != nil {
+			return invocationBadRequest(), nil
+		}
 
 		// Ensure path is relative to prevent host injection
 		path := req.Path
@@ -211,7 +221,7 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 		// platform builds a fresh header set per invoke — nothing client-supplied
 		// reaches here.
 		for k, v := range req.Headers {
-			if isStrippedIdentityHeader(k) {
+			if isStrippedIdentityHeader(k) || typed && isTypedInvocationWireHeader(k) {
 				continue
 			}
 			httpReq.Header.Set(k, v)
@@ -220,17 +230,20 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 		// Inject trusted values from typed payload fields into context.
 		// InjectResources is the shared injection function used by both
 		// Lambda and task worker paths — see inject.go.
-		reqCtx, err := InjectResources(httpReq.Context(), InjectParams{
-			Resources:       req.Resources,
-			Dependencies:    req.Dependencies,
-			UserID:          req.UserID,
-			AppID:           req.AppID,
-			AppRole:         req.AppRole,
-			AppSchema:       req.AppSchema,
-			ActorDelegation: req.ActorDelegation,
-		})
+		params := legacyInjectParams(req)
+		if typed {
+			params = typedInjectParams(req, trustedInvocation)
+			httpReq = httpReq.WithContext(actor.WithoutDelegation(httpReq.Context()))
+		}
+		reqCtx, err := InjectResources(httpReq.Context(), params)
 		if err != nil {
+			if typed {
+				return invocationBadRequest(), nil
+			}
 			return jsonError(400, err.Error()), nil
+		}
+		if typed {
+			reqCtx = invocationwire.WithContext(reqCtx, trustedInvocation)
 		}
 		// Payload-trust mark: RequireProxy passes a marked request through
 		// exactly like Lambda mode (the envelope never carries the per-session

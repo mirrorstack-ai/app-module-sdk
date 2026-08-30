@@ -18,7 +18,14 @@ On **both** Platform and Public routes, read your module's app id from the trust
 appID := ms.AppID(r.Context())
 ```
 
-The SDK promotes the platform's trusted, dispatch-injected app id into the context **before your handler runs**: on Platform via the session auth, on Public via the proxy guard's validated-token path (the guard proves the request came through dispatch, so the `X-MS-App-ID` header it forwards is trustworthy). `ms.AppID` returns it; it returns `""` only in a standalone unit test where no platform token is configured. `ms.AppID` is the inbound twin of `ms.WithAppID` (which *retargets* an outbound `ms.Call` at a different app).
+The SDK promotes the platform's authoritative app id into the context **before
+your handler runs**. Current direct HTTP, WSS/local and Lambda paths consume the
+same [typed invocation context](./invocation.md) after authenticating the
+platform; the raw wire and compatibility headers are removed before the
+handler. `ms.AppID` returns the promoted value. It returns `""` only when no
+identity was installed, such as a standalone unit test. `ms.AppID` is the
+inbound twin of `ms.WithAppID` (which *retargets* an outbound `ms.Call` at a
+different app).
 
 ## Platform
 
@@ -55,7 +62,14 @@ The SDK does not run user auth here, but the proxy guard still fronts every Publ
 
 Platform-to-module. Requests must carry `X-MS-Internal-Secret: <shared secret>` (via `MS_INTERNAL_SECRET` env var); once a secret source is configured the SDK rejects a missing or wrong secret with 401. On a bare local run with no secret configured the SDK bypasses the check so `mirrorstack dev` can curl its own routes — `--tunnel` and deployed mode both configure one.
 
-**The secret is what the SDK middleware checks.** Forwarder identity headers are promoted only on the secret-validated path, never on the local bypass or a rejection; empty headers never mint an identity. `TestCharacterization_ForwarderIdentityTrustedOnlyOnSecretValidatedPath` pins that behavior. Who can reach a given route class through the platform is a property of the platform edge, pinned by api-platform's `TestModuleEdge_RouteClassTrustMatrix`, not by this page.
+**The secret is what the SDK middleware checks.** A typed invocation is parsed
+only after that credential succeeds, and its method, path, body, app/module
+scope and any dual-sent legacy claims must agree. On a local bypass the SDK
+strips a caller-supplied typed header instead of trusting it. During the bounded
+compatibility window, forwarder identity headers are promoted only on the
+secret-validated path; empty headers never mint an identity. Who can reach a
+route class through the platform remains a property of the platform edge,
+pinned by api-platform's `TestModuleEdge_RouteClassTrustMatrix`.
 
 Used for:
 
@@ -76,7 +90,10 @@ ms.Internal(func(r chi.Router) {
 
 ## The auth matrix
 
-Measured on the real `m.Router()` with `MS_INTERNAL_SECRET` set and the process not in Lambda. "Identity headers" means all three of `X-MS-User-ID` / `X-MS-App-ID` / `X-MS-App-Role`:
+This table characterizes the bounded legacy projection on the real `m.Router()`
+with `MS_INTERNAL_SECRET` set and the process not in Lambda. New platform
+traffic uses the typed invocation described above. "Identity headers" means all
+three of `X-MS-User-ID` / `X-MS-App-ID` / `X-MS-App-Role`:
 
 | Request carries | Platform | Public | Internal |
 |---|---:|---:|---:|
