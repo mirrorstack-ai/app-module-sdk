@@ -147,7 +147,7 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | Purpose |
 |---|---|
 | `audit.Record(ctx, q, entry)` | Append a module-owned fact and the request's private authenticated proof to the current app's outbox. Use the mutation's transaction querier. |
-| `ms.DrainAudit(ctx)` | Claim and forward one bounded outbox batch. Safe for concurrent cron/worker calls; `ms.Tx` also attempts it after commit. |
+| `ms.DrainAudit(ctx)` | Claim and forward one bounded outbox batch. Safe for concurrent cron/worker calls; `ms.Tx` also attempts it after commit. Scoped database connections and pool mappings are released before network delivery. |
 
 ```go
 ms.Tx(r.Context(), func(q db.Querier) error {

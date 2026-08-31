@@ -83,6 +83,14 @@ lease, and a rotating fence token, so multiple workers can call it safely. A
 stable event id makes an exact replay idempotent at API Platform; reusing that
 id for changed content is a conflict.
 
+Delivery has three non-overlapping resource phases: claim inside a database
+scope, release that scoped connection and pool mapping before outbound HTTP,
+then reacquire a detached bounded database scope to acknowledge, retry, or
+quarantine with the original fence token. The automatic post-commit path also
+releases the mutation transaction's pool mapping before it starts the drain.
+A slow audit ingress therefore never consumes the app's database connection
+budget while the SDK waits on the network.
+
 Modules do not own delivery SQL, HTTP headers, endpoint paths, backoff, or
 credential refresh. `ms.DrainAudit` gets renewable module authority from the
 current execution context and restores the stored invocation proof only at the

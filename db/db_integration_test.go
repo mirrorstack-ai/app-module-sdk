@@ -4,10 +4,13 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func testDB(t *testing.T) *DB {
@@ -18,6 +21,26 @@ func testDB(t *testing.T) *DB {
 	}
 	t.Cleanup(db.Close)
 	return db
+}
+
+func testDBWithMaxConns(t *testing.T, maxConns int32) *DB {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(devEnvURL())
+	if err != nil {
+		t.Fatalf("parse database config: %v", err)
+	}
+	configurePoolDefaults(cfg)
+	cfg.MaxConns = maxConns
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Skipf("skipping: cannot create postgres pool: %v", err)
+	}
+	if err := pool.Ping(context.Background()); err != nil {
+		pool.Close()
+		t.Skipf("skipping: cannot connect to postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return &DB{pool: pool}
 }
 
 // connURLWithRole builds a connection URL using the same host/port/dbname
@@ -55,6 +78,40 @@ func TestIntegration_ConnectAndPing(t *testing.T) {
 	}
 	if result != 1 {
 		t.Errorf("expected 1, got %d", result)
+	}
+}
+
+func TestIntegration_ReleaseReturnsPoolSlotSynchronously(t *testing.T) {
+	database := testDB(t)
+	ctx := context.Background()
+
+	_, release, err := database.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	if acquired := database.Pool().Stat().AcquiredConns(); acquired != 1 {
+		t.Fatalf("acquired connections before release = %d, want 1", acquired)
+	}
+	// A healthy, idle connection must return its slot before release returns.
+	release()
+	if acquired := database.Pool().Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("acquired connections after release = %d, want 0", acquired)
+	}
+}
+
+func TestIntegration_PrepareConnResetPreservesCallerCancellation(t *testing.T) {
+	database := testDB(t)
+	conn, err := database.Pool().Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire raw connection: %v", err)
+	}
+	defer conn.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ok, err := prepareConnReset(ctx, conn.Conn())
+	if ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("prepare reset = ok:%v err:%v, want false/context.Canceled", ok, err)
 	}
 }
 
@@ -106,8 +163,8 @@ func TestIntegration_SchemaIsolation(t *testing.T) {
 	}
 }
 
-func TestIntegration_SchemaResetOnRelease(t *testing.T) {
-	db := testDB(t)
+func TestIntegration_SchemaSanitizedBeforeNextBorrow(t *testing.T) {
+	db := testDBWithMaxConns(t, 1)
 	ctx := context.Background()
 
 	mustExec(t, db, ctx, "DROP SCHEMA IF EXISTS test_leak CASCADE")
@@ -125,9 +182,17 @@ func TestIntegration_SchemaResetOnRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var val string
-	conn.QueryRow(schemaCtx, "SELECT val FROM secret").Scan(&val)
-	release() // should reset search_path
+	var (
+		val             string
+		firstBackendPID int
+	)
+	if err := conn.QueryRow(schemaCtx, "SELECT val FROM secret").Scan(&val); err != nil {
+		t.Fatalf("read scoped table: %v", err)
+	}
+	if err := conn.QueryRow(schemaCtx, "SELECT pg_backend_pid()").Scan(&firstBackendPID); err != nil {
+		t.Fatalf("read first backend pid: %v", err)
+	}
+	release()
 
 	// Acquire WITHOUT schema — should NOT see test_leak tables
 	conn2, release2, err := db.Conn(ctx)
@@ -135,10 +200,24 @@ func TestIntegration_SchemaResetOnRelease(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	defer release2()
+	var nextBackendPID int
+	if err := conn2.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&nextBackendPID); err != nil {
+		t.Fatalf("read next backend pid: %v", err)
+	}
+	if nextBackendPID != firstBackendPID {
+		t.Fatalf("next borrow used backend %d, want reused backend %d", nextBackendPID, firstBackendPID)
+	}
 
 	err = conn2.QueryRow(ctx, "SELECT val FROM secret").Scan(&val)
 	if err == nil {
 		t.Error("expected error — schema should not leak to next borrower, but 'secret' table was visible")
+	}
+	var appID string
+	if err := conn2.QueryRow(ctx, "SELECT current_setting('ms.app_id', true)").Scan(&appID); err != nil {
+		t.Fatalf("read sanitized ms.app_id: %v", err)
+	}
+	if appID != "" {
+		t.Fatalf("ms.app_id leaked to next borrower: %q", appID)
 	}
 }
 

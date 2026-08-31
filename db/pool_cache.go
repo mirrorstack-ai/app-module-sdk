@@ -85,14 +85,20 @@ func (c *PoolCache) Close() {
 
 // configurePoolDefaults applies the standard MirrorStack pool settings:
 // connection lifetime, idle timeout, health-check period, and the
-// AfterRelease scope-cleanup hook. Shared by createPool (per-credential
+// PrepareConn scope-sanitizer hook. Shared by createPool (per-credential
 // production pools) and db.New (single dev pool) so dev mode cannot silently
 // drift from prod settings.
 func configurePoolDefaults(cfg *pgxpool.Config) {
 	cfg.MaxConnIdleTime = defaultIdleTimeout
 	cfg.MaxConnLifetime = defaultMaxConnLifetime
 	cfg.HealthCheckPeriod = defaultHealthCheckPeriod
-	cfg.AfterRelease = afterReleaseReset
+	// pgx runs AfterRelease asynchronously while the resource still counts as
+	// acquired. Keeping cleanup there can exhaust a bounded pool after the SDK
+	// has logically released its database scope. Return resources immediately;
+	// sanitize them synchronously before the next borrower can observe them.
+	cfg.AfterRelease = nil
+	cfg.BeforeAcquire = nil
+	cfg.PrepareConn = prepareConnReset
 }
 
 // createPool builds a pgxpool.Pool from a credential. The token is set
@@ -175,25 +181,34 @@ func connectPool(ctx context.Context, cfg *pgxpool.Config, cred Credential) (*pg
 	return pool, nil
 }
 
-// afterReleaseReset is the pgxpool.Config.AfterRelease hook. It clears
-// search_path and ms.app_id on every connection release before the connection
-// goes back to the pool — defense in depth against SDK release paths that
-// might skip resetScope (caller panic, missing defer, future bug). If the
-// reset fails, the connection is destroyed instead of being reused.
+// prepareConnReset is the pgxpool.Config.PrepareConn hook. It clears
+// search_path and ms.app_id after pool acquisition but before the connection
+// reaches any borrower. Release therefore returns the resource synchronously,
+// while cross-borrow isolation still fails closed.
 //
-// set_config(_, ”, false) is used instead of RESET ms.app_id because RESET
-// errors out if the custom GUC was never set on this connection (fresh conn
-// returning to the pool for the first time).
-func afterReleaseReset(conn *pgx.Conn) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultResetTimeout)
+// A reset failure returns false so pgx destroys the connection and retries a
+// different resource. Caller cancellation is returned explicitly instead of
+// being hidden behind pgx's bounded retry error.
+//
+// set_config with an empty-string value is used instead of RESET ms.app_id
+// because RESET errors out if the custom GUC was never set on this connection
+// (fresh conn entering the pool for the first time).
+func prepareConnReset(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	resetCtx, cancel := context.WithTimeout(ctx, defaultResetTimeout)
 	defer cancel()
-	_, err := conn.Exec(ctx, "RESET search_path; SELECT set_config('ms.app_id', '', false)")
-	return err == nil
+	_, err := conn.Exec(resetCtx, "RESET search_path; SELECT set_config('ms.app_id', '', false)")
+	if err == nil {
+		return true, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return false, nil
 }
 
 // AcquireScoped acquires a connection from the pool, sets search_path and
-// ms.app_id from context via a single batch round trip. The pool's
-// AfterRelease hook clears scope on release — no separate reset needed here.
+// ms.app_id from context via a single batch round trip. The pool's PrepareConn
+// hook cleared the previous borrower's scope before Acquire returned.
 //
 // This entry point is for non-transactional access (no surrounding BEGIN), so
 // it uses session-scoped SET / set_config(_, _, false). The Tx() function uses

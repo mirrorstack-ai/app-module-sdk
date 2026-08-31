@@ -137,7 +137,7 @@ ms.Tx(ctx, func(q db.Querier) error {
 | Function | 用途 |
 |---|---|
 | `audit.Record(ctx, q, entry)` | 把 module 擁有的 fact 與 request 的 private authenticated proof 寫入目前 app outbox。必須使用 mutation transaction 的 querier。 |
-| `ms.DrainAudit(ctx)` | Claim 並轉送一個有界 outbox batch。可由多個 cron/worker 安全並行呼叫；`ms.Tx` 也會在 commit 後嘗試執行。 |
+| `ms.DrainAudit(ctx)` | Claim 並轉送一個有界 outbox batch。可由多個 cron/worker 安全並行呼叫；`ms.Tx` 也會在 commit 後嘗試執行。Network delivery 前會先釋放 scoped database connection 與 pool mapping。 |
 
 ```go
 ms.Tx(r.Context(), func(q db.Querier) error {

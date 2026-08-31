@@ -67,7 +67,7 @@ func devEnvURL() string {
 }
 
 // New creates a DB with the given connection string. The pool gets the same
-// AfterRelease scope-reset hook as production pools so dev mode has identical
+// pre-borrow scope sanitizer as production pools so dev mode has identical
 // session-state guarantees.
 func New(ctx context.Context, connStr string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(connStr)
@@ -99,8 +99,8 @@ func (d *DB) Pool() *pgxpool.Pool {
 	return d.pool
 }
 
-// Conn acquires a scoped connection. Sets search_path and ms.app_id if schema is in context.
-// Resets both on release.
+// Conn acquires a scoped connection. It sanitizes prior session scope before
+// applying search_path and ms.app_id from context.
 func (d *DB) Conn(ctx context.Context) (Querier, func(), error) {
 	return AcquireScoped(ctx, d.pool)
 }

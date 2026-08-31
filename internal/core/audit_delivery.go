@@ -51,24 +51,20 @@ func (m *Module) DrainAudit(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, auditDrainTimeout)
 	defer cancel()
 
-	q, release, err := m.DB(ctx)
-	if err != nil {
-		return fmt.Errorf("mirrorstack: Audit: open outbox: %w", err)
-	}
-	defer release()
-
 	var deliveryErrors []error
-	for processed := 0; processed < auditDrainBatch && ctx.Err() == nil; processed++ {
-		deliveries, claimErr := auditoutbox.Claim(ctx, q, 1, time.Now().Add(auditLeaseDuration))
+	for processed := 0; processed < auditDrainBatch; processed++ {
+		delivery, claimed, claimErr := m.claimAudit(ctx)
 		if claimErr != nil {
-			deliveryErrors = append(deliveryErrors,
-				fmt.Errorf("mirrorstack: Audit: claim outbox: %w", claimErr))
+			deliveryErrors = append(deliveryErrors, claimErr)
 			break
 		}
-		if len(deliveries) == 0 {
+		if !claimed {
 			break
 		}
-		delivery := deliveries[0]
+
+		// claimAudit has released both the scoped connection and its pool-cache
+		// reference before transport begins. Audit ingress may be slow or blocked;
+		// it must never consume an app's bounded database budget while waiting.
 		disposition, code, deliveryErr := deliverAudit(ctx, delivery)
 		if disposition == auditRetry && delivery.Attempts >= auditMaximumAttempts {
 			disposition = auditQuarantine
@@ -76,19 +72,11 @@ func (m *Module) DrainAudit(ctx context.Context) error {
 		}
 
 		finalizeCtx, finalizeCancel := context.WithTimeout(context.WithoutCancel(ctx), auditFinalizeTimeout)
-		switch disposition {
-		case auditAcknowledge:
-			err = auditoutbox.Acknowledge(finalizeCtx, q, delivery.ID, delivery.LeaseToken)
-		case auditRetry:
-			err = auditoutbox.Retry(finalizeCtx, q, delivery.ID, delivery.LeaseToken, code,
-				time.Now().Add(auditRetryBackoff(delivery.Attempts)))
-		case auditQuarantine:
-			err = auditoutbox.Quarantine(finalizeCtx, q, delivery.ID, delivery.LeaseToken, code)
-		}
+		finalizeErr := m.finalizeAudit(finalizeCtx, delivery, disposition, code)
 		finalizeCancel()
-		if err != nil {
+		if finalizeErr != nil {
 			deliveryErrors = append(deliveryErrors,
-				fmt.Errorf("event %s finalize: %w", delivery.EventID, err))
+				fmt.Errorf("event %s finalize: %w", delivery.EventID, finalizeErr))
 		}
 		if deliveryErr != nil {
 			deliveryErrors = append(deliveryErrors,
@@ -99,6 +87,47 @@ func (m *Module) DrainAudit(ctx context.Context) error {
 		}
 	}
 	return errors.Join(deliveryErrors...)
+}
+
+// claimAudit owns one short database scope and returns only copied delivery
+// data. No querier, scoped connection, or pool-cache reference escapes it.
+func (m *Module) claimAudit(ctx context.Context) (auditoutbox.Delivery, bool, error) {
+	q, release, err := m.DB(ctx)
+	if err != nil {
+		return auditoutbox.Delivery{}, false, fmt.Errorf("mirrorstack: Audit: open outbox: %w", err)
+	}
+	defer release()
+
+	deliveries, err := auditoutbox.Claim(ctx, q, 1, time.Now().Add(auditLeaseDuration))
+	if err != nil {
+		return auditoutbox.Delivery{}, false, fmt.Errorf("mirrorstack: Audit: claim outbox: %w", err)
+	}
+	if len(deliveries) == 0 {
+		return auditoutbox.Delivery{}, false, nil
+	}
+	return deliveries[0], true, nil
+}
+
+// finalizeAudit reacquires the app database only after transport completes.
+// Every mutation remains fenced by the rotating lease token captured at claim.
+func (m *Module) finalizeAudit(ctx context.Context, delivery auditoutbox.Delivery, disposition auditDisposition, code string) error {
+	q, release, err := m.DB(ctx)
+	if err != nil {
+		return fmt.Errorf("mirrorstack: Audit: open outbox: %w", err)
+	}
+	defer release()
+
+	switch disposition {
+	case auditAcknowledge:
+		return auditoutbox.Acknowledge(ctx, q, delivery.ID, delivery.LeaseToken)
+	case auditRetry:
+		return auditoutbox.Retry(ctx, q, delivery.ID, delivery.LeaseToken, code,
+			time.Now().Add(auditRetryBackoff(delivery.Attempts)))
+	case auditQuarantine:
+		return auditoutbox.Quarantine(ctx, q, delivery.ID, delivery.LeaseToken, code)
+	default:
+		return fmt.Errorf("unknown disposition %d", disposition)
+	}
 }
 
 func deliverAudit(ctx context.Context, delivery auditoutbox.Delivery) (auditDisposition, string, error) {

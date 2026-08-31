@@ -22,7 +22,8 @@ func safeRollback(tx pgx.Tx) {
 //
 // Inside the transaction, search_path and ms.app_id are set transaction-local
 // (SET LOCAL / set_config is_local=true) so they are automatically cleared on
-// COMMIT or ROLLBACK. The pool's AfterRelease hook is the defense-in-depth backstop.
+// COMMIT or ROLLBACK. The pool's pre-borrow sanitizer is the defense-in-depth
+// backstop before any later caller receives the connection.
 //
 //	err := db.Tx(ctx, pool, func(q db.Querier) error {
 //	    queries := generated.New(q)
@@ -84,8 +85,8 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(q Querier) error) error
 // app schema (search_path + ms.app_id) is pinned transaction-local from ctx
 // (WithSchema) via the shared applyScope so SET LOCAL auto-clears on
 // COMMIT/ROLLBACK and RLS on the producer's exposed relation resolves to this
-// tenant — SET LOCAL is legal in a read-only tx. The pool's AfterRelease hook
-// is the defense-in-depth backstop.
+// tenant — SET LOCAL is legal in a read-only tx. The pool's pre-borrow
+// sanitizer is the defense-in-depth backstop.
 //
 // Acquire-a-conn (like Tx) rather than pool.BeginTx so the tenant-scoping SQL
 // routes through the single applyScope seam (one batched round trip, one place

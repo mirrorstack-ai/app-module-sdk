@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/auditoutbox"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/invocationwire"
 )
+
+type canceledAuditCredentialProvider struct{}
+
+func (canceledAuditCredentialProvider) Credential(ctx context.Context) (db.Credential, error) {
+	return db.Credential{}, ctx.Err()
+}
+
+func TestDrainAuditPreservesCanceledContextError(t *testing.T) {
+	m, err := New(Config{ID: "mauditcancel", Slug: "audit-cancel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = db.WithCredentialProvider(ctx, canceledAuditCredentialProvider{})
+
+	err = m.DrainAudit(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DrainAudit error = %v, want context.Canceled", err)
+	}
+}
 
 func auditDeliveryFixture(t *testing.T) (auditoutbox.Delivery, []byte, string) {
 	t.Helper()
