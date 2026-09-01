@@ -7,6 +7,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.13] - 2026-09-01
+
+### Fixed
+
+- Explicit `ms.DrainAudit` now claims within one short database scope, releases
+  the scoped connection and pool-cache reference before outbound HTTP, then
+  reacquires a detached bounded scope for fenced acknowledge, retry, or
+  quarantine.
+- Automatic post-commit delivery now releases the mutation transaction's
+  connection and pool-cache reference before starting the audit drain, so a
+  slow audit ingress cannot consume an application's bounded database budget.
+- PostgreSQL sessions are now sanitized in `PrepareConn` before each borrower
+  can observe `search_path` or `ms.app_id`. Logical release returns the pool
+  slot synchronously; reset failure destroys and retries a different
+  connection, while caller cancellation remains visible.
+
+These corrections change internal database-resource lifetimes without changing
+an exported signature, audit wire format, stable event identity, signed
+invocation proof, or lease/fence/retry/quarantine behavior, so this remains a
+PATCH under the repository's pre-1.0 convention.
+
 ## [v0.4.12] - 2026-08-30
 
 ### Added
