@@ -15,7 +15,8 @@ import (
 // caller MUST be inside an active transaction — SET LOCAL outside a tx is a
 // silent no-op. Use local=true from Tx() and local=false from AcquireScoped.
 //
-// Cleanup on release is handled by the pool's AfterRelease hook (afterReleaseReset).
+// Before each borrow, the pool's PrepareConn hook (prepareConnReset) clears any
+// session scope left by the previous borrower.
 //
 // Postgres custom GUC requirement:
 // `ms.app_id` is a custom GUC under the `ms.*` namespace. Postgres auto-creates

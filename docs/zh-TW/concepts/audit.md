@@ -69,6 +69,13 @@ err := ms.DrainAudit(ctx)
 每次更新的 fence token，所以多個 worker 可以安全並行。穩定 event id 讓完全
 相同的 replay 在 API Platform 冪等；相同 id 搭配不同內容則是 conflict。
 
+Delivery 分成三個不重疊的 resource phase：先在 database scope 內 claim，接著在
+outbound HTTP 前釋放 scoped connection 與 pool mapping，最後重新取得 detached、
+有界的 database scope，使用原本的 fence token acknowledge、retry 或 quarantine。
+自動 post-commit path 也會先釋放 mutation transaction 的 pool mapping，再開始
+drain。因此即使 audit ingress 很慢，SDK 等待 network 時也不會占用 app 的 database
+connection budget。
+
 Module 不擁有 delivery SQL、HTTP header、endpoint path、backoff 或 credential
 refresh。`ms.DrainAudit` 從目前 execution context 取得 renewable module authority，
 而 stored invocation proof 只會在 platform ingress boundary 被還原。

@@ -292,7 +292,7 @@ Keys auto-prefixed: developer writes `"views:123"`, Redis stores `"app_abc123:mo
 - [x] `ms.DB(ctx)` — scoped connection with schema-per-app isolation
 - [x] `ms.Tx(ctx, fn)` — atomic transactions
 - [x] Per-app credential pools (PoolCache with LRU eviction)
-- [x] Schema leak prevention (RESET on release, destroy dirty connections)
+- [x] Schema leak prevention (sanitize before borrow, destroy dirty connections)
 - [x] RLS support (`ms.app_id` session variable)
 - [x] sqlc-compatible `Querier` interface
 
@@ -356,8 +356,8 @@ app-module-sdk/
   db/
     credential.go              Credential struct, context helpers
     db.go                      Dev-mode client, Querier interface
-    pool_cache.go              PoolCache (LRU), AcquireScoped
-    scope.go                   applyScope/resetScope (batch SET/RESET)
+    pool_cache.go              PoolCache (LRU), AcquireScoped, prepareConnReset
+    scope.go                   applyScope (batch SET)
     tx.go                      Transaction support
     [test files]               Unit + integration tests
   system/

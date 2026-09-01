@@ -4,7 +4,26 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestConfigurePoolDefaultsSanitizesBeforeBorrowWithoutAsyncRelease(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig(defaultDevURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configurePoolDefaults(cfg)
+	if cfg.PrepareConn == nil {
+		t.Fatal("PrepareConn scope sanitizer is missing")
+	}
+	if cfg.BeforeAcquire != nil {
+		t.Fatal("deprecated BeforeAcquire hook must remain unset")
+	}
+	if cfg.AfterRelease != nil {
+		t.Fatal("AfterRelease keeps pool resources acquired asynchronously")
+	}
+}
 
 func TestWithSchema(t *testing.T) {
 	ctx := context.Background()

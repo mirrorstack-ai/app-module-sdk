@@ -54,11 +54,29 @@ func (m *Module) DB(ctx context.Context) (db.Querier, func(), error) {
 //	    return queries.DeductBalance(ctx, params)
 //	})
 func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
-	pool, releasePool, err := m.resolvePool(ctx)
+	recordedAudit, err := m.runAppTx(ctx, fn)
 	if err != nil {
 		return err
 	}
+	if recordedAudit {
+		// runAppTx has released the transaction connection and pool-cache
+		// reference. The best-effort drain is allowed to perform outbound HTTP,
+		// so no database mapping from the committed mutation may survive here.
+		m.drainAuditAfterCommit(ctx)
+	}
+	return nil
+}
+
+// runAppTx contains the complete lifetime of the app pool mapping used by Tx.
+// Keeping post-commit work outside this helper makes it structurally impossible
+// for an automatic audit drain to inherit that database reference.
+func (m *Module) runAppTx(ctx context.Context, fn func(q db.Querier) error) (bool, error) {
+	pool, releasePool, err := m.resolvePool(ctx)
+	if err != nil {
+		return false, err
+	}
 	defer releasePool()
+
 	var recordedAudit bool
 	err = db.Tx(ctx, pool, func(q db.Querier) error {
 		tracked := auditstate.Track(m.devGuardFor(ctx, m.withModuleID(q), db.CredentialFrom))
@@ -67,12 +85,9 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 		return err
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	if recordedAudit {
-		m.drainAuditAfterCommit(ctx)
-	}
-	return nil
+	return recordedAudit, nil
 }
 
 // resolvePool returns the per-app credential pool (production) or the dev
