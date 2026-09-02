@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
-	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
 func TestDispatchBaseFallsBackWhenUnset(t *testing.T) {
@@ -80,161 +79,90 @@ func TestResolveCallURL_Building(t *testing.T) {
 	}
 }
 
-func TestIsPlatformCallPath(t *testing.T) {
+func TestResolveDependencyCallURLUsesAppScopedRoute(t *testing.T) {
+	t.Setenv("MS_DISPATCH_URL", "http://dispatch:8083")
+	appID := "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+	consumerID := "m14b4db3ac7f34e6a880ebc763cb3ca55"
+	if got := resolveDependencyCallURL(appID, consumerID, "video-transcode", "/internal/jobs/start"); got != "http://dispatch:8083/internal/apps/"+appID+"/module-calls/"+consumerID+"/video-transcode/internal/jobs/start" {
+		t.Fatalf("slug call URL = %q", got)
+	}
+}
+
+func TestIsInternalCallPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
 	}{
-		{path: "/platform", want: true},
-		{path: "/platform/", want: true},
-		{path: "/platform/users", want: true},
-		{path: "/platform/users?limit=10", want: true},
-		{path: "/public/users", want: false},
-		{path: "/internal/users", want: false},
-		{path: "/platformish/users", want: false},
-		{path: "/platform/../internal/users", want: false},
-		{path: "/platform/%2e%2e/internal/users", want: false},
-		{path: "https://example.test/platform/users", want: false},
+		{path: "/internal", want: true},
+		{path: "/internal/jobs/start", want: true},
+		{path: "/internal/jobs/start?retry=1", want: true},
+		{path: "/public/jobs/start", want: false},
+		{path: "/platform/jobs/start", want: false},
+		{path: "/internalish/jobs/start", want: false},
+		{path: "/internal/../platform/jobs", want: false},
+		{path: "/internal/%2e%2e/platform/jobs", want: false},
+		{path: "https://example.test/internal/jobs/start", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
-			if got := isPlatformCallPath(tc.path); got != tc.want {
-				t.Errorf("isPlatformCallPath(%q) = %v, want %v", tc.path, got, tc.want)
+			if got := isInternalCallPath(tc.path); got != tc.want {
+				t.Errorf("isInternalCallPath(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestCall_SendsAppIDServiceSecretActorDelegationAndDecodesResponse(t *testing.T) {
-	var gotMethod, gotPath, gotAppID, gotCT string
-	var gotSecrets, gotDelegations []string
+func TestCallDependency_UsesAuthenticatedInternalIngress(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotAppID, gotSecret string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
 		gotAppID = r.Header.Get("X-MS-App-ID")
-		gotCT = r.Header.Get("Content-Type")
-		gotSecrets = r.Header.Values("X-MS-Service-Secret")
-		gotDelegations = r.Header.Values(actor.HeaderDelegation)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
-	t.Setenv("MS_DISPATCH_URL", srv.URL)
-	t.Setenv("MS_INTERNAL_SECRET", "session-secret-1")
-
-	m, _ := New(Config{ID: "demo"})
-	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
-	ctx = actor.WithDelegation(ctx, "msa1.payload.signature")
-
-	var out struct {
-		OK bool `json:"ok"`
-	}
-	if err := m.CallPost(ctx, "m0123", "/platform/exchange", map[string]string{"code": "x"}, &out); err != nil {
-		t.Fatalf("CallPost: %v", err)
-	}
-	if !out.OK {
-		t.Errorf("out.OK = false, want true")
-	}
-	if gotMethod != http.MethodPost {
-		t.Errorf("method = %q, want POST", gotMethod)
-	}
-	if gotPath != "/module/m0123/platform/exchange" {
-		t.Errorf("path = %q, want /module/m0123/platform/exchange", gotPath)
-	}
-	if gotAppID != "a-456" {
-		t.Errorf("X-MS-App-ID = %q, want a-456", gotAppID)
-	}
-	if gotCT != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", gotCT)
-	}
-	if len(gotSecrets) != 1 || gotSecrets[0] != "session-secret-1" {
-		t.Errorf("X-MS-Service-Secret values = %q, want exactly [session-secret-1]", gotSecrets)
-	}
-	if len(gotDelegations) != 1 || gotDelegations[0] != "msa1.payload.signature" {
-		t.Errorf("%s values = %q, want exactly one trusted assertion", actor.HeaderDelegation, gotDelegations)
-	}
-}
-
-func TestCall_OmitsActorDelegationOutsidePlatformRoutes(t *testing.T) {
-	var requests [][]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.Header.Values(actor.HeaderDelegation))
+		gotSecret = r.Header.Get("X-MS-Service-Secret")
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
 	t.Setenv("MS_DISPATCH_URL", srv.URL)
+	t.Setenv("MS_INTERNAL_SECRET", "caller-session-secret")
 
-	m, _ := New(Config{ID: "demo"})
-	ctx := actor.WithDelegation(context.Background(), "msa1.payload.signature")
-	for _, callPath := range []string{"/internal/exchange", "/public/catalog", "/platformish/not-platform"} {
-		if err := m.CallGet(ctx, "m0123", callPath, nil); err != nil {
-			t.Fatalf("CallGet(%q): %v", callPath, err)
-		}
+	const appID = "a722a8a8-d413-435b-b21b-f4cbacb5ef73"
+	const consumerID = "m14b4db3ac7f34e6a880ebc763cb3ca55"
+	m, err := New(Config{ID: consumerID})
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	for index, values := range requests {
-		if len(values) != 0 {
-			t.Errorf("request %d actor values = %q, want none", index, values)
-		}
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: appID})
+	if err := m.CallDependencyPost(ctx, "@mirrorstack/video-transcode@^0.1", "/internal/jobs/start?retry=1", map[string]string{"videoId": "v1"}, nil); err != nil {
+		t.Fatalf("CallDependencyPost: %v", err)
+	}
+
+	wantPath := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs/start"
+	if gotMethod != http.MethodPost || gotPath != wantPath || gotQuery != "retry=1" {
+		t.Fatalf("request = %s %s?%s, want POST %s?retry=1", gotMethod, gotPath, gotQuery, wantPath)
+	}
+	if gotAppID != appID {
+		t.Errorf("X-MS-App-ID = %q, want %q", gotAppID, appID)
+	}
+	if gotSecret != "caller-session-secret" {
+		t.Errorf("X-MS-Service-Secret = %q, want caller session secret", gotSecret)
 	}
 }
 
-func TestCall_OmitsEmptyServiceSecret(t *testing.T) {
-	var gotSecrets, gotDelegations []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSecrets = r.Header.Values("X-MS-Service-Secret")
-		gotDelegations = r.Header.Values(actor.HeaderDelegation)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	t.Setenv("MS_DISPATCH_URL", srv.URL)
-	t.Setenv("MS_INTERNAL_SECRET", "")
-
-	m, _ := New(Config{ID: "demo"})
-	ctx := auth.Set(context.Background(), auth.Identity{AppID: "a-456"})
-	if err := m.CallGet(ctx, "m0123", "/internal/ping", nil); err != nil {
-		t.Fatalf("CallGet: %v", err)
+func TestCallDependency_RejectsNonInternalAndMissingApp(t *testing.T) {
+	m, err := New(Config{ID: "consumer_id"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if len(gotSecrets) != 0 {
-		t.Errorf("X-MS-Service-Secret values = %q, want no header", gotSecrets)
+	withApp := auth.Set(context.Background(), auth.Identity{AppID: "app-id"})
+	for _, path := range []string{"/public/jobs", "/platform/jobs", "/internal/../platform/jobs"} {
+		if err := m.CallDependencyPost(withApp, "video-transcode", path, nil, nil); err == nil || !strings.Contains(err.Error(), "canonical /internal") {
+			t.Errorf("CallDependencyPost(%q) error = %v, want internal-path rejection", path, err)
+		}
 	}
-	if len(gotDelegations) != 0 {
-		t.Errorf("%s values = %q, want no header", actor.HeaderDelegation, gotDelegations)
-	}
-}
-
-func TestCall_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
-	const serviceSecret = "session-secret-must-not-leak"
-	const actorDelegation = "msa1.actor-must-not-leak.signature"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte("upstream module unavailable"))
-	}))
-	defer srv.Close()
-	t.Setenv("MS_DISPATCH_URL", srv.URL)
-	t.Setenv("MS_INTERNAL_SECRET", serviceSecret)
-
-	m, _ := New(Config{ID: "demo"})
-	ctx := actor.WithDelegation(context.Background(), actorDelegation)
-	err := m.CallGet(ctx, "m0123", "/internal/users", nil)
-	if err == nil {
-		t.Fatal("expected error on non-2xx, got nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "502") {
-		t.Errorf("error %q missing status 502", msg)
-	}
-	if !strings.Contains(msg, "upstream module unavailable") {
-		t.Errorf("error %q missing upstream body", msg)
-	}
-	if !strings.Contains(msg, "/module/m0123/internal/users") {
-		t.Errorf("error %q missing request path", msg)
-	}
-	if strings.Contains(msg, serviceSecret) {
-		t.Errorf("error leaked X-MS-Service-Secret: %q", msg)
-	}
-	if strings.Contains(msg, actorDelegation) {
-		t.Errorf("error leaked %s: %q", actor.HeaderDelegation, msg)
+	if err := m.CallDependencyPost(context.Background(), "video-transcode", "/internal/jobs", nil, nil); err == nil || !strings.Contains(err.Error(), "no app scope") {
+		t.Fatalf("missing-app error = %v", err)
 	}
 }
 

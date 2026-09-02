@@ -20,6 +20,7 @@ package meter
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,8 +74,8 @@ const (
 	// via the Counter option.
 	counterKind Kind = "counter"
 	// gaugeKind is an absolute current level the platform never SUMs — it
-	// takes the MAX or a time-weighted integral (stored bytes, active rows,
-	// open connections). Set via the Gauge option.
+	// takes the MAX (stored bytes, active rows, open connections). Set via the
+	// Gauge option.
 	gaugeKind Kind = "gauge"
 )
 
@@ -119,7 +120,7 @@ const (
 	// transcoded, messages sent. Pass it to Meter as the kind option.
 	Counter kindOption = kindOption(counterKind)
 	// Gauge declares the metric as an absolute current level the platform
-	// never SUMs — it takes the MAX or a time-weighted integral. Use it for
+	// never SUMs — it takes the MAX. Use it for
 	// levels you can safely re-report on a heartbeat: stored bytes, active
 	// rows, open connections. Gauge is self-healing: a lost sample only loses
 	// resolution. Pass it to Meter as the kind option.
@@ -336,7 +337,7 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 		}
 	} else {
 		// Custom metric: a kind is mandatory so the platform knows SUM vs
-		// MAX/integral, and a call site can never mislabel it.
+		// MAX, and a call site can never mislabel it.
 		if !decl.KindSet {
 			panic(fmt.Sprintf("mirrorstack/meter: Meter(%q) needs a kind — pass ms.Counter or ms.Gauge", decl.Name))
 		}
@@ -361,7 +362,7 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 // Record emits a usage event for the metric declared under name with the given
 // value. It mirrors ms.Emit: resolve the declared name, build the envelope,
 // hand it to the transport. The platform reads the declared kind from its
-// manifest-fed catalog to decide SUM vs MAX/integral, so a call site can never
+// manifest-fed catalog to decide SUM vs MAX, so a call site can never
 // mislabel a metric.
 //
 // Declaration-first: if name was never declared via ms.Meter, Record returns an
@@ -385,6 +386,27 @@ func (c *Client) Declare(moduleID string, decl Decl) {
 // any transport retry of the same call) so the platform's ON CONFLICT(event_id)
 // dedupe holds and a retried delivery is not double-counted.
 func (c *Client) Record(ctx context.Context, name string, value float64) error {
+	return c.record(ctx, ids.NewUUID(), name, value)
+}
+
+// RecordWithID emits a usage event with a caller-owned, persisted UUID as its
+// deduplication key. It is the durable-outbox counterpart to Record: callers
+// must insert eventID in the same transaction as the billable state change,
+// then reuse that exact ID for every delivery retry. The platform deduplicates
+// usage on eventId, so an ambiguous timeout can be retried without charging the
+// same logical action twice.
+//
+// Use Record for ordinary one-shot metering. RecordWithID deliberately does
+// not generate or persist an ID for the caller, and a new logical action must
+// never reuse an earlier action's eventID.
+func (c *Client) RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	if err := validateEventID(eventID); err != nil {
+		return err
+	}
+	return c.record(ctx, eventID, name, value)
+}
+
+func (c *Client) record(ctx context.Context, eventID, name string, value float64) error {
 	c.mu.RLock()
 	decl, declared := c.metrics[name]
 	moduleID := c.moduleID
@@ -418,7 +440,7 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 	// manifest/catalog is authoritative.
 	event := Event{
 		V:              envelopeVersion,
-		EventID:        ids.NewUUID(),
+		EventID:        eventID,
 		AppIDHint:      appID,
 		ModuleIDHint:   moduleID,
 		Metric:         decl.Name,
@@ -426,6 +448,29 @@ func (c *Client) Record(ctx context.Context, name string, value float64) error {
 		RecordedAtHint: time.Now().UTC(),
 	}
 	return c.dispatch(ctx, appID, event)
+}
+
+// validateEventID accepts the canonical lowercase RFC 4122 text form. Keeping
+// one canonical spelling matters because billing's idempotency key is textual:
+// accepting case variants would allow one UUID to become two distinct keys.
+func validateEventID(eventID string) error {
+	if len(eventID) != 36 || eventID[8] != '-' || eventID[13] != '-' || eventID[18] != '-' || eventID[23] != '-' {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a canonical lowercase RFC 4122 UUID")
+	}
+	compact := strings.ReplaceAll(eventID, "-", "")
+	decoded, err := hex.DecodeString(compact)
+	if err != nil || len(decoded) != 16 || compact != strings.ToLower(compact) {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a canonical lowercase RFC 4122 UUID")
+	}
+	allZero := true
+	for _, value := range decoded {
+		allZero = allZero && value == 0
+	}
+	version := decoded[6] >> 4
+	if allZero || version == 0 || version > 8 || decoded[8]&0xc0 != 0x80 {
+		return fmt.Errorf("mirrorstack/meter: event ID must be a non-zero RFC 4122 UUID with a version and variant")
+	}
+	return nil
 }
 
 // resolveUsageURL builds the platform-dispatch usage-ingress URL the Event is

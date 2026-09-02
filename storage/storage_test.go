@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/url"
 	"strings"
 	"testing"
@@ -78,6 +79,35 @@ func TestMultipartPresignStaysWithinCredentialLifetime(t *testing.T) {
 	}
 	if got, want := parsed.Query().Get("X-Amz-Expires"), "570"; got != want {
 		t.Fatalf("X-Amz-Expires=%q, want %q", got, want)
+	}
+}
+
+func TestPresignDownloadForcesAttachmentWithUnicodeFilename(t *testing.T) {
+	c, err := newClient(Credential{
+		Bucket: "bucket", Region: "ap-northeast-1", Prefix: "apps/app/mod/", CDNBase: "https://cdn.example.com",
+		AccessKeyID: "key", SecretAccessKey: "secret",
+	}, "http://localhost:9000", "http://localhost:9000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.PresignDownload(context.Background(), "videos/id/source.mp4", "課程\r\n.mp4", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disposition := parsed.Query().Get("response-content-disposition")
+	mediaType, params, err := mime.ParseMediaType(disposition)
+	if err != nil {
+		t.Fatalf("parse disposition %q: %v", disposition, err)
+	}
+	if mediaType != "attachment" || params["filename"] != "課程.mp4" {
+		t.Fatalf("disposition=%q filename=%q, want attachment/課程.mp4", mediaType, params["filename"])
+	}
+	if parsed.Query().Get("X-Amz-Signature") == "" {
+		t.Fatal("download response override was not signed")
 	}
 }
 

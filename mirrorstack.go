@@ -150,7 +150,7 @@ type MetricOption = meter.MetricOption
 
 // Counter and Gauge are the metric-kind options passed to Meter. Counter is
 // additive (the platform SUMs it); Gauge is an absolute level (MAX or a
-// time-weighted integral, never summed).
+// maximum, never summed).
 //
 // They are CONSTANTS, not vars, so a third-party module cannot reassign
 // ms.Counter / ms.Gauge (the SDK is a trust boundary). The call site stays
@@ -187,7 +187,7 @@ func MetricUnitLabel(l Label) MetricOption { return meter.MetricUnitLabel(l) }
 // authoritative before any event arrives.
 //
 // The kind is an OPTION: pass ms.Counter (additive; platform SUMs) or ms.Gauge
-// (absolute level; platform takes MAX or a time-weighted integral). Emit at
+// (absolute level; platform takes MAX). Emit at
 // runtime BY NAME with ms.Record(ctx, name, value) — mirroring ms.Emits/ms.Emit;
 // the platform reads the declared kind from the catalog, so a call site can
 // never mislabel a metric.
@@ -220,6 +220,15 @@ func Record(ctx context.Context, name string, value float64) error {
 	return core.Record(ctx, name, value)
 }
 
+// RecordWithID emits a usage event with a caller-persisted UUID as its
+// idempotency key. It is intended for durable transactional outboxes: persist
+// eventID atomically with the billable state change, then reuse the exact same
+// ID for every retry. The platform deduplicates that ID, making an ambiguous
+// delivery safe to repeat. Use Record for ordinary one-shot metering.
+func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return core.RecordWithID(ctx, eventID, name, value)
+}
+
 // --- Inter-module calls ---
 
 // Call makes one server-mediated module-to-module hop through the platform
@@ -248,6 +257,13 @@ func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
 // CallPost is Call specialized to POST with a JSON body on the default module.
 func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return core.CallPost(ctx, targetModuleID, path, body, out)
+}
+
+// CallDependencyPost makes a POST to a declared dependency addressed by the
+// same stable ref accepted by DependsOn (owner/constraint forms are normalized
+// to the producer slug and resolved inside the current app).
+func CallDependencyPost(ctx context.Context, producerRef, path string, body, out any) error {
+	return core.CallDependencyPost(ctx, producerRef, path, body, out)
 }
 
 // Emit publishes an event to every LIVE module that subscribes to name within

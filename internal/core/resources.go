@@ -112,8 +112,8 @@ func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
 // Record can resolve the metric.
 //
 // The kind is an OPTION: meter.Counter (additive; the platform SUMs) or
-// meter.Gauge (absolute level; the platform takes MAX or a time-weighted
-// integral, never a SUM). meter.Unit / meter.Price set the unit and the
+// meter.Gauge (absolute level; the platform takes MAX, never a SUM).
+// meter.Unit / meter.Price set the unit and the
 // per-unit customer price (both optional).
 //
 // Emit at runtime with the package-level Record(ctx, name, value) — BY NAME,
@@ -157,6 +157,12 @@ func (m *Module) Record(ctx context.Context, name string, value float64) error {
 	return m.meterClient.Record(ctx, name, value)
 }
 
+// RecordWithID is Record with a caller-persisted UUID deduplication key. It is
+// intended for transactional outboxes whose retries must remain idempotent.
+func (m *Module) RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return m.meterClient.RecordWithID(ctx, eventID, name, value)
+}
+
 // Package-level convenience wrappers — dispatch to defaultModule.
 
 // Cache returns a scoped cache client on the default module.
@@ -181,4 +187,10 @@ func Meter(name string, opts ...meter.MetricOption) {
 // Record emits a usage event by name on the default module. Panics before Init.
 func Record(ctx context.Context, name string, value float64) error {
 	return mustDefault("Record").Record(ctx, name, value)
+}
+
+// RecordWithID emits a usage event using a caller-persisted UUID deduplication
+// key. Panics before Init, matching Record.
+func RecordWithID(ctx context.Context, eventID, name string, value float64) error {
+	return mustDefault("RecordWithID").RecordWithID(ctx, eventID, name, value)
 }

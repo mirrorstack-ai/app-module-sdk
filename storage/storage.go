@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"mime"
 	"strings"
 	"time"
 
@@ -220,6 +221,30 @@ func (c *Client) PresignPut(ctx context.Context, key string, expires time.Durati
 // PresignGet generates a presigned S3 GET URL for direct download (bypasses CDN).
 // Requires storage credentials in context (Platform/Internal routes only).
 func (c *Client) PresignGet(ctx context.Context, key string, expires time.Duration) (string, error) {
+	return c.presignGet(ctx, key, "", expires)
+}
+
+// PresignDownload generates a presigned S3 GET URL whose response is an
+// attachment. Unlike an HTML download attribute, the signed response override
+// also works across origins and keeps large objects on the direct S3 path.
+func (c *Client) PresignDownload(ctx context.Context, key, filename string, expires time.Duration) (string, error) {
+	filename = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, filename))
+	if filename == "" {
+		filename = "download"
+	}
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if disposition == "" {
+		return "", fmt.Errorf("mirrorstack/storage: invalid download filename")
+	}
+	return c.presignGet(ctx, key, disposition, expires)
+}
+
+func (c *Client) presignGet(ctx context.Context, key, disposition string, expires time.Duration) (string, error) {
 	if err := c.requireCredential(); err != nil {
 		return "", err
 	}
@@ -231,10 +256,14 @@ func (c *Client) PresignGet(ctx context.Context, key string, expires time.Durati
 		return "", err
 	}
 	fullKey := c.prefix + key
-	req, err := c.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(fullKey),
-	}, s3.WithPresignExpires(expires))
+	}
+	if disposition != "" {
+		input.ResponseContentDisposition = aws.String(disposition)
+	}
+	req, err := c.presigner.PresignGetObject(ctx, input, s3.WithPresignExpires(expires))
 	if err != nil {
 		return "", fmt.Errorf("mirrorstack/storage: presign get failed: %w", err)
 	}

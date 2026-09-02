@@ -40,8 +40,7 @@ func registerMeter() {
 	// Gauge: an absolute current level of a MODULE-OWNED metric (here, total
 	// bytes in the module's own external store). ms.Record reports the CURRENT
 	// absolute level (not a delta); the platform never sums a gauge — it takes
-	// the MAX or a time-weighted integral over the billing period, so the price
-	// is charged per aggregated byte-hour / peak (the platform's rollup choice),
+	// the MAX over the billing period, so the price is charged per peak unit,
 	// NOT once per reported sample. Re-report on a heartbeat (design §7). The
 	// price here is illustrative — a real byte gauge with a per-byte price can
 	// produce large invoices, so pick the cadence + price deliberately.

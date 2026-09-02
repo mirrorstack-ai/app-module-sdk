@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
-	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
 // devDispatchFallback is used when MS_DISPATCH_URL is unset. Modules run inside
@@ -48,18 +48,26 @@ func resolveCallURL(targetModuleID, path string) string {
 	return fmt.Sprintf("%s/module/%s%s", dispatchBase(), targetModuleID, path)
 }
 
+func resolveDependencyCallURL(appID, consumer, producer, path string) string {
+	return fmt.Sprintf(
+		"%s/internal/apps/%s/module-calls/%s/%s%s",
+		dispatchBase(),
+		url.PathEscape(appID),
+		url.PathEscape(consumer),
+		url.PathEscape(producer),
+		path,
+	)
+}
+
 // Call makes one server-mediated module-to-module hop through the platform
 // dispatch. It marshals body to JSON (omitted for a nil body), POST/GET/etc to
 // the resolved dispatch URL scoped to the current app, and decodes the JSON
 // response into out (skipped when out is nil).
 //
 // The app id is read from the request context (auth.Get) — the same identity
-// the SDK injects for handlers — and sent as X-MS-App-ID so the dispatch can
-// resolve the install. X-MS-Service-Secret carries this CALLING module's live
-// session/deploy credential, allowing dispatch to authenticate which installed
-// module initiated the internal hop. The caller never holds the CALLEE's
-// credentials: dispatch injects the target module's per-session token and
-// identity before forwarding.
+// the SDK injects for handlers — and sent as X-MS-App-ID so dispatch can resolve
+// the install. Prefer CallDependency for service calls to declared dependencies:
+// that path authenticates this module and verifies its dependency declaration.
 //
 // path must include its leading slash and any raw query string, e.g.
 // "/internal/exchange" or "/platform/users?limit=10". A verified actor
@@ -70,6 +78,31 @@ func resolveCallURL(targetModuleID, path string) string {
 // DEV/DISPATCH TRANSPORT — see resolveCallURL for the prod (#146) seam.
 func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, body, out any) error {
 	appID := AppID(ctx)
+	return m.callURL(ctx, appID, method, resolveCallURL(targetModuleID, path), path, body, out)
+}
+
+// CallDependency addresses a declared dependency by the same stable ref used
+// in DependsOn. Dispatch authenticates this module from its session/deploy
+// credential, verifies the dependency declaration, resolves the normalized
+// producer slug within the current app, and forwards an actorless request to
+// the producer's Internal surface. The caller never receives the producer's
+// credential or registration-specific UUID.
+func (m *Module) CallDependency(ctx context.Context, producerRef, method, path string, body, out any) error {
+	appID := AppID(ctx)
+	if appID == "" {
+		return errors.New("ms.CallDependency: request context has no app scope")
+	}
+	if !isInternalCallPath(path) {
+		return errors.New("ms.CallDependency: path must be a canonical /internal route")
+	}
+	producer, err := parseProducerRef(producerRef)
+	if err != nil {
+		return err
+	}
+	return m.callURL(ctx, appID, method, resolveDependencyCallURL(appID, m.config.ID, producer, path), path, body, out)
+}
+
+func (m *Module) callURL(ctx context.Context, appID, method, targetURL, rawPath string, body, out any) error {
 
 	var reader io.Reader
 	if body != nil {
@@ -80,8 +113,7 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 		reader = bytes.NewReader(buf)
 	}
 
-	u := resolveCallURL(targetModuleID, path)
-	req, err := http.NewRequestWithContext(ctx, method, u, reader)
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, reader)
 	if err != nil {
 		return err
 	}
@@ -92,13 +124,9 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 	if secret := moduleSessionSecret(); secret != "" {
 		req.Header.Set("X-MS-Service-Secret", secret)
 	}
-	if delegation := actor.Delegation(ctx); delegation != "" && isPlatformCallPath(path) {
-		req.Header.Set(actor.HeaderDelegation, delegation)
-	}
-
 	resp, err := callHTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("ms.Call %s %s: %w", method, u, err)
+		return fmt.Errorf("ms.Call %s %s: %w", method, targetURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -111,11 +139,14 @@ func (m *Module) Call(ctx context.Context, targetModuleID, method, path string, 
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// isPlatformCallPath recognizes only canonical module Platform routes. It
-// parses the request target before classification so dot-segment or encoded
-// traversal cannot make an assertion appear to target /platform while the
-// receiving HTTP stack resolves it somewhere else.
-func isPlatformCallPath(raw string) bool {
+// isInternalCallPath limits declared-dependency calls to the service-only
+// Internal surface. Public and Platform routes have user/browser semantics and
+// must not become reachable through an actorless module credential.
+func isInternalCallPath(raw string) bool {
+	return isCanonicalCallPath(raw, "/internal")
+}
+
+func isCanonicalCallPath(raw, prefix string) bool {
 	u, err := url.ParseRequestURI(raw)
 	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" {
 		return false
@@ -124,7 +155,7 @@ func isPlatformCallPath(raw string) bool {
 	if cleaned != u.Path && !(u.Path == "/platform/" && cleaned == "/platform") {
 		return false
 	}
-	return u.Path == "/platform" || strings.HasPrefix(u.Path, "/platform/")
+	return u.Path == prefix || strings.HasPrefix(u.Path, prefix+"/")
 }
 
 // CallGet is Call specialized to GET (no request body). path carries any raw
@@ -136,6 +167,11 @@ func (m *Module) CallGet(ctx context.Context, targetModuleID, path string, out a
 // CallPost is Call specialized to POST with a JSON body.
 func (m *Module) CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return m.Call(ctx, targetModuleID, http.MethodPost, path, body, out)
+}
+
+// CallDependencyPost is CallDependency specialized to POST with a JSON body.
+func (m *Module) CallDependencyPost(ctx context.Context, producerRef, path string, body, out any) error {
+	return m.CallDependency(ctx, producerRef, http.MethodPost, path, body, out)
 }
 
 // Package-level convenience wrappers — dispatch to defaultModule.
@@ -154,6 +190,11 @@ func CallGet(ctx context.Context, targetModuleID, path string, out any) error {
 // CallPost is Call specialized to POST on the default module. Panics before Init.
 func CallPost(ctx context.Context, targetModuleID, path string, body, out any) error {
 	return mustDefault("CallPost").CallPost(ctx, targetModuleID, path, body, out)
+}
+
+// CallDependencyPost addresses a declared dependency by its stable ref.
+func CallDependencyPost(ctx context.Context, producerRef, path string, body, out any) error {
+	return mustDefault("CallDependencyPost").CallDependencyPost(ctx, producerRef, path, body, out)
 }
 
 // identity returns the context's auth identity, or the zero Identity when

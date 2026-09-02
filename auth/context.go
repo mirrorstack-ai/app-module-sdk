@@ -47,9 +47,7 @@ const proxyTrustKey = contextKey("ms-proxy-trust")
 
 // withProxyTrust marks the HTTP request after RequireProxy validates the
 // server-only platform token. PlatformAuth uses this private mark to know that
-// it may capture the dispatch-issued actor delegation header. Public routes do
-// not run PlatformAuth, so they never gain a delegation merely by being
-// proxied.
+// it may promote the dispatch-issued platform identity.
 func withProxyTrust(ctx context.Context) context.Context {
 	return context.WithValue(ctx, proxyTrustKey, true)
 }

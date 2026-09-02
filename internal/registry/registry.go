@@ -133,7 +133,7 @@ type OutboundContribution struct {
 // price) at install/publish — BEFORE any usage event arrives, so the catalog
 // is authoritative for how a metric aggregates and is priced.
 //
-// Kind is "counter" (additive; SUM) or "gauge" (absolute level; MAX/integral).
+// Kind is "counter" (additive; SUM) or "gauge" (absolute level; MAX).
 // For a custom metric Kind is always set; for a reserved infra.*/platform.*
 // PRICE-OVERRIDE entry Kind and Unit are EMPTY (omitempty) — the platform
 // catalog supplies the kind/unit, the module only overrides the customer price.

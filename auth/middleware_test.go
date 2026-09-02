@@ -8,8 +8,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 )
 
 func okHandler(w http.ResponseWriter, r *http.Request) {
@@ -445,44 +443,6 @@ func TestInternalAuth_PlatformToken_FallbackToInternalSecret(t *testing.T) {
 	}
 }
 
-func TestInternalAuth_StripsActorDelegationWithoutActivatingIt(t *testing.T) {
-	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
-	t.Setenv("MS_PLATFORM_TOKEN", "")
-	t.Setenv("MS_INTERNAL_SECRET", "internal-secret")
-
-	for _, tc := range []struct {
-		name   string
-		values []string
-	}{
-		{name: "valid", values: []string{"msa1.payload.signature"}},
-		{name: "duplicate", values: []string{"msa1.first.signature", "msa1.second.signature"}},
-		{name: "invalid", values: []string{"contains whitespace"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var gotHeader, gotActor string
-			handler := internalAuth(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotHeader = r.Header.Get(actor.HeaderDelegation)
-				gotActor = actor.Delegation(r.Context())
-				w.WriteHeader(http.StatusNoContent)
-			}))
-			req := httptest.NewRequest(http.MethodPost, "/internal/work", nil)
-			req.Header.Set(HeaderInternalSecret, "internal-secret")
-			for _, value := range tc.values {
-				req.Header.Add(actor.HeaderDelegation, value)
-			}
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusNoContent {
-				t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
-			}
-			if gotHeader != "" || gotActor != "" {
-				t.Errorf("internal handler saw header=%q actor=%q, want both empty", gotHeader, gotActor)
-			}
-		})
-	}
-}
-
 func TestInternalAuth_PlatformToken_NeitherSet_Bypass(t *testing.T) {
 	t.Setenv("MS_PLATFORM_TOKEN", "")
 	t.Setenv("MS_INTERNAL_SECRET", "")
@@ -521,71 +481,6 @@ func TestPlatformAuth_PlatformToken_ValidToken_InjectsIdentity(t *testing.T) {
 	}
 	if seen.UserID != "u-pt-1" || seen.AppID != "a-pt-2" || seen.AppRole != RoleMember {
 		t.Errorf("identity mismatch: got %+v", seen)
-	}
-}
-
-func withPlatformSurfaceForTest(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(actor.WithPlatformSurface(r.Context())))
-	})
-}
-
-func TestPlatformAuth_TrustedProxyActivatesPrivateActorDelegation(t *testing.T) {
-	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
-	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
-	t.Setenv("MS_INTERNAL_SECRET", "")
-	const assertion = "msa1.payload.signature"
-	var gotActor, gotHeader string
-	handler := withPlatformSurfaceForTest(requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotActor = actor.Delegation(r.Context())
-		gotHeader = r.Header.Get(actor.HeaderDelegation)
-		w.WriteHeader(http.StatusOK)
-	}))))
-
-	req := httptest.NewRequest("GET", "/platform/users", nil)
-	req.Header.Set(HeaderPlatformToken, "pt-secret-789")
-	req.Header.Set(HeaderUserID, "u-pt-1")
-	req.Header.Set(HeaderAppID, "a-pt-2")
-	req.Header.Set(HeaderAppRole, RoleMember)
-	req.Header.Set(actor.HeaderDelegation, assertion)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if gotActor != assertion {
-		t.Errorf("private actor delegation = %q, want trusted assertion", gotActor)
-	}
-	if gotHeader != "" {
-		t.Errorf("module handler saw private actor header %q, want it removed", gotHeader)
-	}
-}
-
-func TestPlatformAuth_DuplicateActorDelegationFailsClosed(t *testing.T) {
-	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
-	t.Setenv("MS_PLATFORM_TOKEN", "pt-secret-789")
-	t.Setenv("MS_INTERNAL_SECRET", "")
-	reached := false
-	handler := withPlatformSurfaceForTest(requireProxy(false)(platformAuth(false)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		reached = true
-	}))))
-
-	req := httptest.NewRequest("GET", "/platform/users", nil)
-	req.Header.Set(HeaderPlatformToken, "pt-secret-789")
-	req.Header.Set(HeaderUserID, "u-pt-1")
-	req.Header.Set(HeaderAppID, "a-pt-2")
-	req.Header.Set(HeaderAppRole, RoleMember)
-	req.Header.Add(actor.HeaderDelegation, "msa1.first.signature")
-	req.Header.Add(actor.HeaderDelegation, "msa1.second.signature")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if reached {
-		t.Fatal("handler reached with an ambiguous actor delegation")
 	}
 }
 
@@ -851,35 +746,6 @@ func TestRequireProxy_ValidToken_PromotesIdentity(t *testing.T) {
 	}
 }
 
-func TestRequireProxy_PublicRouteCannotUseActorDelegation(t *testing.T) {
-	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
-	t.Setenv("MS_PLATFORM_TOKEN", "real-token")
-	t.Setenv("MS_INTERNAL_SECRET", "")
-	const assertion = "msa1.payload.signature"
-	var gotActor, gotHeader string
-	handler := requireProxy(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotActor = actor.Delegation(r.Context())
-		gotHeader = r.Header.Get(actor.HeaderDelegation)
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest("GET", "/public/items", nil)
-	req.Header.Set(HeaderPlatformToken, "real-token")
-	req.Header.Set(actor.HeaderDelegation, assertion)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	if gotActor != "" {
-		t.Errorf("public handler received active actor delegation %q", gotActor)
-	}
-	if gotHeader != "" {
-		t.Errorf("public handler saw private actor header %q, want it removed", gotHeader)
-	}
-}
-
 func TestRequireProxy_RejectedRequest_NeverPromotes(t *testing.T) {
 	// A request rejected by the guard (no/wrong token) must NEVER reach the
 	// handler, so no identity is ever promoted from its (spoofable) headers.
@@ -902,39 +768,6 @@ func TestRequireProxy_RejectedRequest_NeverPromotes(t *testing.T) {
 	}
 	if reached {
 		t.Error("handler must not run on a rejected request — promotion would trust spoofed headers")
-	}
-}
-
-func TestRequireProxy_NoSecretInert_DoesNotPromote(t *testing.T) {
-	// Standalone `go test` (no token configured): the guard is inert and passes
-	// through, but it must NOT promote spoofable headers — nothing validated
-	// that they came from dispatch. Documented behavior: surface is open, app id
-	// unset (a module's own unit test injects identity explicitly if it needs
-	// one).
-	t.Setenv("MS_PLATFORM_TOKEN_FILE", "")
-	t.Setenv("MS_PLATFORM_TOKEN", "")
-	t.Setenv("MS_INTERNAL_SECRET", "")
-	var seen *Identity
-	var gotActorHeader string
-	handler := requireProxy(false)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		seen = Get(r.Context())
-		gotActorHeader = r.Header.Get(actor.HeaderDelegation)
-	}))
-
-	req := httptest.NewRequest("GET", "/public/me", nil)
-	req.Header.Set(HeaderAppID, "spoofed-app")
-	req.Header.Set(actor.HeaderDelegation, "browser-supplied")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (inert without configured token), got %d", rec.Code)
-	}
-	if seen != nil {
-		t.Errorf("inert guard must not promote unvalidated headers; got identity %+v", seen)
-	}
-	if gotActorHeader != "" {
-		t.Errorf("inert guard exposed private actor header %q", gotActorHeader)
 	}
 }
 

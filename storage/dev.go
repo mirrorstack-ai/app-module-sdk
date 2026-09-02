@@ -244,17 +244,29 @@ type sessionPolicy struct {
 	Statement []policyStatement `json:"Statement"`
 }
 type policyStatement struct {
-	Sid      string   `json:"Sid"`
-	Effect   string   `json:"Effect"`
-	Action   []string `json:"Action"`
-	Resource string   `json:"Resource"`
+	Sid       string           `json:"Sid"`
+	Effect    string           `json:"Effect"`
+	Action    []string         `json:"Action"`
+	Resource  string           `json:"Resource"`
+	Condition *policyCondition `json:"Condition,omitempty"`
+}
+type policyCondition struct {
+	StringLike map[string]string `json:"StringLike,omitempty"`
 }
 
 func devSessionPolicy(bucket, prefix string) (string, error) {
-	p := sessionPolicy{Version: "2012-10-17", Statement: []policyStatement{{
-		Sid: "OwnPrefixRW", Effect: "Allow", Action: []string{"s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"},
-		Resource: "arn:aws:s3:::" + bucket + "/" + prefix + "*",
-	}}}
+	p := sessionPolicy{Version: "2012-10-17", Statement: []policyStatement{
+		{
+			Sid: "OwnPrefixObjects", Effect: "Allow",
+			Action:   []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"},
+			Resource: "arn:aws:s3:::" + bucket + "/" + prefix + "*",
+		},
+		{
+			Sid: "ListOwnPrefix", Effect: "Allow", Action: []string{"s3:ListBucket"},
+			Resource:  "arn:aws:s3:::" + bucket,
+			Condition: &policyCondition{StringLike: map[string]string{"s3:prefix": prefix + "*"}},
+		},
+	}}
 	b, err := json.Marshal(p)
 	if err != nil {
 		return "", fmt.Errorf("mirrorstack/storage: encode dev session policy: %w", err)
