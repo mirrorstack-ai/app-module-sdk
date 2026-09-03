@@ -22,6 +22,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 26  # p95 12.8m over 20 runs (gh-hosted); 2x p95
     runs-on: ubuntu-latest
     services:
       postgres:
