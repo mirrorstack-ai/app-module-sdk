@@ -5,17 +5,16 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.14] - 2026-09-05
+## [Unreleased]
 
-This is the module URL cut-over.
+This is the module URL cut-over. **It should be cut as v0.4.14 — a PATCH.**
 
-**Why v0.4.14 and not v0.5.0.** The number is decided against the API, per
-release.yml's own header ("pre-1.0 the convention is patch-only bumps even for
-new SDK surface") and the v0.4.1 precedent. Exported symbols across every
-non-`internal/`, non-`examples/` package: **0 added, 0 removed, 0 changed**
-(506 before, 506 after). Both changes live in `internal/`. So: PATCH — and the
-behavioural break gets a callout instead of an inflated number, exactly as the
-RunTask fallback change did.
+The number is decided against the API, per release.yml's own header ("pre-1.0
+the convention is patch-only bumps even for new SDK surface") and the v0.4.1
+precedent. Exported symbols across every non-`internal/`, non-`examples/`
+package: **0 added, 0 removed, 0 changed** (506 before, 506 after). Both changes
+live in `internal/`. So: PATCH — and the behavioural break gets a callout instead
+of an inflated number, exactly as the RunTask fallback change did.
 
 > [!IMPORTANT]
 > 🔴 **This patch is a FLAG DAY. Every module must adopt it in the same wave as
@@ -66,10 +65,10 @@ matters — this release must be CUT before the modules bump, and the modules mu
 be running it before api-platform's cut-over serves the new envelope. A module
 still on v0.4.13 after that point answers 400 on every route.
 
-Cutting it is `release.yml`'s normal flow and nothing else: `VERSION` is bumped
-and this section is already moved under its heading, so all that remains is the
-`release` label and the merge. A hand-pushed `git tag` is WRONG — it skips the
-GitHub Release, and the Go proxy caches a bad number permanently.
+Cutting it is `release.yml`'s normal flow: a separate `chore: release v0.4.14`
+PR touching only `VERSION` and this file, carrying the `release` label. A
+hand-pushed `git tag` is WRONG — it skips the GitHub Release, and the Go proxy
+caches a bad number permanently.
 
 **On the "live repair" above, precisely.** `MS_DISPATCH_URL` is the bare API
 host only for a DEPLOYED module Lambda (mirrorstack-infra sets
