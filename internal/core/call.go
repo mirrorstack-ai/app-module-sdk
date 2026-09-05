@@ -112,10 +112,13 @@ func callTransport() *http.Transport {
 
 // resolveCallURL builds the platform-dispatch URL for a module->module hop:
 //
-//	{base}/module/{targetModuleID}{path}
+//	{base}/v1/dispatch/apps/module/{targetModuleID}{path}
 //
-// base is MS_DISPATCH_URL (the container->dispatch base) with the
-// host.docker.internal:8083 dev fallback when unset.
+// base is MS_DISPATCH_URL — the bare API host (https://api.<domain>), on which
+// /v1/dispatch is path-routed to the dispatch Lambda — with the
+// host.docker.internal:8083 dev fallback when unset. The module-keyed dispatch
+// edge resolves the app from X-MS-App-ID (else the app_id query, else a
+// single-install auto-resolve) and keeps /internal/* open to module callers.
 //
 // DEV/DISPATCH TRANSPORT. Prod catalog/Lambda endpoint resolution is task
 // #146 — this resolver is the seam where that plugs in. In prod the target
@@ -128,7 +131,7 @@ func resolveCallURL(targetModuleID, path string) string {
 }
 
 func resolveCallURLFor(ctx context.Context, targetModuleID, path string) string {
-	return fmt.Sprintf("%s/module/%s%s", dispatchBaseFor(ctx), targetModuleID, path)
+	return fmt.Sprintf("%s/v1/dispatch/apps/module/%s%s", dispatchBaseFor(ctx), targetModuleID, path)
 }
 
 func resolveDependencyCallURL(appRef, consumerRef, producerRef, path string) string {
@@ -236,11 +239,11 @@ func (m *Module) CallDependency(ctx context.Context, producerRef, method, path s
 	return m.callURLWithCredential(ctx, appID, method, directEndpoint, path, body, out, maxDependencyCallBody, auth.HeaderPlatformToken, directToken)
 }
 
-// resolveDevDependencyCall turns a declared dependency into the direct
-// /module/{id}/internal/... route only while both modules are in the same
-// leased mirrorstack-dev session. Discovery is never authority: the caller's
-// normalized ref must match an explicit DependsOn declaration before the
-// directory (and therefore any I/O) is consulted.
+// resolveDevDependencyCall turns a declared dependency into the direct local
+// module-proxy route (/_m/{slug}/internal/...) only while both modules are in
+// the same leased mirrorstack-dev session. Discovery is never authority: the
+// caller's normalized ref must match an explicit DependsOn declaration before
+// the directory (and therefore any I/O) is consulted.
 //
 // handled=false preserves the authenticated platform dependency ingress's 404
 // for a declared producer that is remote, whose lease expired, or whose

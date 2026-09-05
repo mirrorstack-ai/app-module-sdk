@@ -7,6 +7,40 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+This is the module-keyed dispatch cut-over. It is a **minor** release (v0.5.0
+under the repository's pre-1.0 convention) because the wire route every
+`ms.Call` / `ms.CallGet` / `ms.CallPost` hop resolves to changes shape, and a
+module built against an older SDK stops reaching other modules once
+api-platform removes the old route. Every module must adopt this version in
+the same wave as that removal.
+
+### Changed (BREAKING)
+
+- **`ms.Call` / `ms.CallGet` / `ms.CallPost` now resolve to the module-keyed
+  dispatch edge
+  `{MS_DISPATCH_URL | dev fallback}/v1/dispatch/apps/module/{targetModuleID}{path}`**
+  instead of `{base}/module/{targetModuleID}{path}`. The platform is removing
+  `/module/{id}/*` in a one-wave cut-over and serving the same handler under
+  the new path with the same app-resolution rules (`X-MS-App-ID` header, else
+  the `app_id` query, else single-install auto-resolve); `/internal/*` stays
+  open to module callers on this edge. Nothing else about the hop changes: the
+  `X-MS-App-ID` + `X-MS-Service-Secret` headers, actor-delegation forwarding,
+  JSON marshal/decode, the error contract, and the once-per-process
+  dev-fallback warning are untouched. This is also a live repair:
+  `MS_DISPATCH_URL` is the bare API host (`https://api.<domain>`), where
+  `/v1/dispatch` is path-routed to the dispatch Lambda, so the old
+  `/module/...` on that host reached the account Lambda and 404ed.
+- The other dispatch resolvers (`ms.Emit`, `ms.Notify`, `ms.Record`, the
+  dependency-DB ingress and `ms.CallDependency`) keep their `/apps/...` and
+  `/internal/apps/...` routes; only the module-keyed hop moves. The
+  `resolveCallURL` seam comment (task #146) is kept — this is exactly the
+  single-function swap it was reserved for.
+
+**Migration:** bump the SDK dependency and rebuild; no call-site changes. A
+module still on v0.4.x keeps working only until api-platform's `/module/{id}/*`
+removal lands; after that every `ms.Call` hop it makes fails with a 404 from
+the account Lambda.
+
 ## [v0.4.13] - 2026-09-01
 
 ### Fixed

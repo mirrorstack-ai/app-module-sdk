@@ -59,7 +59,13 @@ func TestNestedPlatformAuthCannotActivateActorDelegationOnHTTPNonPlatformSurface
 	}
 
 	for _, scope := range []string{"public", "internal"} {
-		if got := seen["/module/target/platform/"+scope]; len(got) != 0 {
+		dispatchPath := "/v1/dispatch/apps/module/target/platform/" + scope
+		got, ok := seen[dispatchPath]
+		if !ok {
+			t.Errorf("%s nested call never reached dispatch at %s", scope, dispatchPath)
+			continue
+		}
+		if len(got) != 0 {
 			t.Errorf("%s nested PlatformAuth forwarded %s = %q, want none", scope, actor.HeaderDelegation, got)
 		}
 	}
@@ -119,7 +125,13 @@ func TestNestedPlatformAuthCannotActivateActorDelegationOnLambdaNonPlatformSurfa
 	}
 
 	for _, scope := range []string{"public", "internal"} {
-		if got := seen["/module/target/platform/"+scope]; len(got) != 0 {
+		dispatchPath := "/v1/dispatch/apps/module/target/platform/" + scope
+		got, ok := seen[dispatchPath]
+		if !ok {
+			t.Errorf("%s nested call never reached dispatch at %s", scope, dispatchPath)
+			continue
+		}
+		if len(got) != 0 {
 			t.Errorf("%s nested PlatformAuth forwarded %s = %q, want none", scope, actor.HeaderDelegation, got)
 		}
 	}
