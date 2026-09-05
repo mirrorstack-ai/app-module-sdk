@@ -254,9 +254,9 @@ func Validate(trusted invocation.Context) error {
 		parsedOrigin.User != nil || parsedOrigin.Path != "" || parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" || parsedOrigin.Opaque != "" {
 		return errors.New("mirrorstack/invocation: malformed trusted origin")
 	}
-	base := moduleRouteBase(trusted.App.ID, trusted.Module.Slug)
-	if trusted.Routes.Module != base || trusted.Routes.Public != base+"/public" ||
-		trusted.Routes.Platform != base+"/platform" || trusted.Routes.CurrentLocal != trusted.Request.Path {
+	module, public, platform := moduleRoutes(trusted.App.ID, trusted.Module.Slug)
+	if trusted.Routes.Module != module || trusted.Routes.Public != public ||
+		trusted.Routes.Platform != platform || trusted.Routes.CurrentLocal != trusted.Request.Path {
 		return errors.New("mirrorstack/invocation: inconsistent canonical routes")
 	}
 	if trusted.Routes.Redirects == nil {
@@ -332,8 +332,26 @@ func appSchemaName(appID string) string {
 	return "app_" + strings.ReplaceAll(appID, "-", "_")
 }
 
-func moduleRouteBase(appID, moduleSlug string) string {
-	return "/v1/dispatch/apps/" + url.PathEscape(appID) + "/" + url.PathEscape(moduleSlug)
+// moduleRoutes is the SDK half of a two-sided contract: api-platform
+// internal/shared/moduleinvoke.ModuleRoutes builds these exact strings and this
+// function re-derives them to reject a tampered envelope. The two are a
+// TRANSCRIPTION of one another — a change on either side that the other does not
+// mirror rejects every typed invocation with "invalid invocation context", which
+// is a 400 on every module route, so they move together or not at all.
+//
+// 🔴 SCOPE BEFORE MODULE (owner contract 2026-09-05):
+//
+//	module   /v1/apps/app/{app}                 — the APP base
+//	public   /v1/apps/app/{app}/public/{slug}
+//	platform /v1/apps/app/{app}/platform/{slug}
+//
+// The old shape was /v1/dispatch/apps/{app}/{slug} with "/public" and
+// "/platform" appended, so there is no longer a single module base to append a
+// scope to — which is why this returns the triple rather than one prefix.
+func moduleRoutes(appID, moduleSlug string) (module, public, platform string) {
+	module = "/v1/apps/app/" + url.PathEscape(appID)
+	slug := url.PathEscape(moduleSlug)
+	return module, module + "/public/" + slug, module + "/platform/" + slug
 }
 
 func cookieNamespace(appID, moduleID string) string {

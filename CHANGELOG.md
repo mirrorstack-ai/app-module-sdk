@@ -7,6 +7,79 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+This is the module URL cut-over. **It should be cut as v0.4.14 — a PATCH.**
+
+The number is decided against the API, per release.yml's own header ("pre-1.0
+the convention is patch-only bumps even for new SDK surface") and the v0.4.1
+precedent. Exported symbols across every non-`internal/`, non-`examples/`
+package: **0 added, 0 removed, 0 changed** (506 before, 506 after). Both changes
+live in `internal/`. So: PATCH — and the behavioural break gets a callout instead
+of an inflated number, exactly as the RunTask fallback change did.
+
+> [!IMPORTANT]
+> 🔴 **This patch is a FLAG DAY. Every module must adopt it in the same wave as
+> the api-platform cut-over, and BEFORE that platform deploy.**
+>
+> A module left on v0.4.13 does not merely lose its module-to-module calls: it
+> rejects EVERY typed invocation with `invalid invocation context` — a 400 on
+> every route it serves — because the envelope api-platform now signs carries
+> canonical routes this SDK's older validator refuses. The version number
+> understates that on purpose; this callout is where the break is stated.
+
+### Changed (BREAKING)
+
+- **`ms.Call` / `ms.CallGet` / `ms.CallPost` now resolve to the module-keyed
+  dispatch edge
+  `{MS_DISPATCH_URL | dev fallback}/v1/dispatch/apps/module/{targetModuleID}{path}`**
+  instead of `{base}/module/{targetModuleID}{path}`. The platform is removing
+  `/module/{id}/*` in a one-wave cut-over and serving the same handler under
+  the new path with the same app-resolution rules (`X-MS-App-ID` header, else
+  the `app_id` query, else single-install auto-resolve); `/internal/*` stays
+  open to module callers on this edge. Nothing else about the hop changes: the
+  `X-MS-App-ID` + `X-MS-Service-Secret` headers, actor-delegation forwarding,
+  JSON marshal/decode, the error contract, and the once-per-process
+  dev-fallback warning are untouched. This is also a live repair:
+  `MS_DISPATCH_URL` is the bare API host (`https://api.<domain>`), where
+  `/v1/dispatch` is path-routed to the dispatch Lambda, so the old
+  `/module/...` on that host reached the account Lambda and 404ed.
+- **The canonical-routes check now expects scope BEFORE module.** A typed
+  invocation must carry
+  `routes.module = /v1/apps/app/{app}`,
+  `routes.public = /v1/apps/app/{app}/public/{slug}` and
+  `routes.platform = /v1/apps/app/{app}/platform/{slug}`, where it previously
+  required `/v1/dispatch/apps/{app}/{slug}` with `/public` and `/platform`
+  appended. There is no longer a single module base to append a scope to, so
+  the internal helper returns the triple rather than one prefix. This mirrors
+  api-platform `internal/shared/moduleinvoke.ModuleRoutes` exactly, and the two
+  sides share the same `invocation_v1.json` golden byte for byte — they are a
+  transcription of one another and move together or not at all.
+  `invocation.Routes` itself is unchanged; only the values it may hold are.
+- The other dispatch resolvers (`ms.Emit`, `ms.Notify`, `ms.Record`, the
+  dependency-DB ingress and `ms.CallDependency`) keep their `/apps/...` and
+  `/internal/apps/...` routes; only the module-keyed hop moves. The
+  `resolveCallURL` seam comment (task #146) is kept — this is exactly the
+  single-function swap it was reserved for.
+
+**Migration:** bump the SDK dependency and rebuild; no call-site changes. Order
+matters — this release must be CUT before the modules bump, and the modules must
+be running it before api-platform's cut-over serves the new envelope. A module
+still on v0.4.13 after that point answers 400 on every route.
+
+Cutting it is `release.yml`'s normal flow: a separate `chore: release v0.4.14`
+PR touching only `VERSION` and this file, carrying the `release` label. A
+hand-pushed `git tag` is WRONG — it skips the GitHub Release, and the Go proxy
+caches a bad number permanently.
+
+**On the "live repair" above, precisely.** `MS_DISPATCH_URL` is the bare API
+host only for a DEPLOYED module Lambda (mirrorstack-infra sets
+`MODULEHOST_DISPATCH_URL` to `https://api.<domain>`). A module served through
+`mirrorstack dev --tunnel` gets `https://api.mirrorstack.ai/dispatch` from
+`docker-compose.yml`, i.e. WITH the API-mapping key, so its `/module/{id}` hops
+resolve today and its `/v1/dispatch/...` hops resolve after this change (the
+key strips its own prefix). No module is deployed at the time of writing, so
+the 404 is a repair of a path nothing currently takes — and the new address is
+the one that works under both bases.
+
 ## [v0.4.13] - 2026-09-01
 
 ### Fixed

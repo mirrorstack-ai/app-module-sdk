@@ -44,28 +44,28 @@ func TestResolveCallURL_Building(t *testing.T) {
 			dispatch: "",
 			target:   "m0123",
 			path:     "/internal/exchange",
-			want:     devDispatchFallback + "/module/m0123/internal/exchange",
+			want:     devDispatchFallback + "/v1/dispatch/apps/module/m0123/internal/exchange",
 		},
 		{
 			name:     "explicit base",
 			dispatch: "http://dispatch:8083",
 			target:   "m0123",
 			path:     "/internal/users",
-			want:     "http://dispatch:8083/module/m0123/internal/users",
+			want:     "http://dispatch:8083/v1/dispatch/apps/module/m0123/internal/users",
 		},
 		{
 			name:     "trailing slash on base is trimmed",
 			dispatch: "http://dispatch:8083/",
 			target:   "m0123",
 			path:     "/internal/users",
-			want:     "http://dispatch:8083/module/m0123/internal/users",
+			want:     "http://dispatch:8083/v1/dispatch/apps/module/m0123/internal/users",
 		},
 		{
 			name:     "raw query carried in path",
 			dispatch: "http://dispatch:8083",
 			target:   "m0123",
 			path:     "/internal/users?limit=10",
-			want:     "http://dispatch:8083/module/m0123/internal/users?limit=10",
+			want:     "http://dispatch:8083/v1/dispatch/apps/module/m0123/internal/users?limit=10",
 		},
 	}
 	for _, tc := range cases {
@@ -658,8 +658,8 @@ func TestCall_SendsAppIDServiceSecretActorDelegationAndDecodesResponse(t *testin
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
-	if gotPath != "/module/m0123/platform/exchange" {
-		t.Errorf("path = %q, want /module/m0123/platform/exchange", gotPath)
+	if gotPath != "/v1/dispatch/apps/module/m0123/platform/exchange" {
+		t.Errorf("path = %q, want /v1/dispatch/apps/module/m0123/platform/exchange", gotPath)
 	}
 	if gotAppID != "a-456" {
 		t.Errorf("X-MS-App-ID = %q, want a-456", gotAppID)
@@ -746,7 +746,7 @@ func TestCall_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
 	if !strings.Contains(msg, "upstream module unavailable") {
 		t.Errorf("error %q missing upstream body", msg)
 	}
-	if !strings.Contains(msg, "/module/m0123/internal/users") {
+	if !strings.Contains(msg, "/v1/dispatch/apps/module/m0123/internal/users") {
 		t.Errorf("error %q missing request path", msg)
 	}
 	if strings.Contains(msg, serviceSecret) {

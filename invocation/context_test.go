@@ -27,9 +27,9 @@ func fixture() invocation.Context {
 		},
 		Routes: invocation.Routes{
 			Origin:       "https://api.mirrorstack.ai",
-			Module:       "/v1/dispatch/apps/22222222-2222-4222-8222-222222222222/user-core",
-			Public:       "/v1/dispatch/apps/22222222-2222-4222-8222-222222222222/user-core/public",
-			Platform:     "/v1/dispatch/apps/22222222-2222-4222-8222-222222222222/user-core/platform",
+			Module:       "/v1/apps/app/22222222-2222-4222-8222-222222222222",
+			Public:       "/v1/apps/app/22222222-2222-4222-8222-222222222222/public/user-core",
+			Platform:     "/v1/apps/app/22222222-2222-4222-8222-222222222222/platform/user-core",
 			CurrentLocal: "/platform/users/44444444-4444-4444-8444-444444444444?tab=profile",
 			Redirects:    []string{"https://app.example/callback", "https://app.example/callback,secondary"},
 		},
@@ -71,6 +71,52 @@ func TestV1FixtureMatchesAPIPlatform(t *testing.T) {
 	decoded, decodedRaw, err := invocationwire.DecodeHeader(header)
 	if err != nil || decoded.Request.ID != fixture().Request.ID || !bytes.Equal(decodedRaw, raw) {
 		t.Fatalf("header round trip: decoded=%+v bytes_equal=%v err=%v", decoded, bytes.Equal(decodedRaw, raw), err)
+	}
+}
+
+// 🔴 The canonical-routes rule is a TRANSCRIPTION of api-platform
+// internal/shared/moduleinvoke.ModuleRoutes. TestV1FixtureMatchesAPIPlatform
+// above compares whole fixtures, which catches drift only while both repos edit
+// the same golden; this pins the RULE itself, in the form a reader of either
+// repo can compare by eye, and proves the validator actually rejects the shape
+// this release replaces. Without the negative case the check is vacuous: a
+// validator that accepted everything would pass the positive one.
+func TestCanonicalRoutesAreScopeBeforeModule(t *testing.T) {
+	const app = "22222222-2222-4222-8222-222222222222"
+
+	valid := fixture()
+	if valid.Routes.Module != "/v1/apps/app/"+app ||
+		valid.Routes.Public != "/v1/apps/app/"+app+"/public/user-core" ||
+		valid.Routes.Platform != "/v1/apps/app/"+app+"/platform/user-core" {
+		t.Fatalf("fixture routes are not the canonical shape: %+v", valid.Routes)
+	}
+	if _, err := invocationwire.Marshal(valid); err != nil {
+		t.Fatalf("canonical routes rejected: %v", err)
+	}
+
+	// The retired shape: app first, scope appended to a single module base.
+	for name, mutate := range map[string]func(*invocation.Routes){
+		"retired module-first shape": func(r *invocation.Routes) {
+			base := "/v1/dispatch/apps/" + app + "/user-core"
+			r.Module, r.Public, r.Platform = base, base+"/public", base+"/platform"
+		},
+		"scope after module": func(r *invocation.Routes) {
+			r.Public = "/v1/apps/app/" + app + "/user-core/public"
+		},
+		"module base carrying a scope": func(r *invocation.Routes) {
+			r.Module = "/v1/apps/app/" + app + "/public/user-core"
+		},
+		"wrong module slug in a scope": func(r *invocation.Routes) {
+			r.Platform = "/v1/apps/app/" + app + "/platform/oauth-google"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := fixture()
+			mutate(&bad.Routes)
+			if _, err := invocationwire.Marshal(bad); err == nil {
+				t.Fatalf("routes %+v were accepted; the canonical check is not running", bad.Routes)
+			}
+		})
 	}
 }
 
