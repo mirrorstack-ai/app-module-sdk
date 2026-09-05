@@ -7,12 +7,16 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-This is the module-keyed dispatch cut-over. It is a **minor** release (v0.5.0
-under the repository's pre-1.0 convention) because the wire route every
-`ms.Call` / `ms.CallGet` / `ms.CallPost` hop resolves to changes shape, and a
-module built against an older SDK stops reaching other modules once
-api-platform removes the old route. Every module must adopt this version in
-the same wave as that removal.
+This is the module URL cut-over. It is a **minor** release (v0.5.0 under the
+repository's pre-1.0 convention) with TWO breaking halves: the route every
+`ms.Call` hop resolves to, and — the one that decides the wave — the canonical
+routes this SDK will ACCEPT inside a typed invocation.
+
+🔴 Every module must adopt this version in the same wave as the platform
+change. A module left on v0.4.x does not merely lose module-to-module calls: it
+rejects EVERY typed invocation with `invalid invocation context` (400 on every
+route), because the envelope api-platform now signs carries routes its
+validator refuses.
 
 ### Changed (BREAKING)
 
@@ -30,16 +34,38 @@ the same wave as that removal.
   `MS_DISPATCH_URL` is the bare API host (`https://api.<domain>`), where
   `/v1/dispatch` is path-routed to the dispatch Lambda, so the old
   `/module/...` on that host reached the account Lambda and 404ed.
+- **The canonical-routes check now expects scope BEFORE module.** A typed
+  invocation must carry
+  `routes.module = /v1/apps/app/{app}`,
+  `routes.public = /v1/apps/app/{app}/public/{slug}` and
+  `routes.platform = /v1/apps/app/{app}/platform/{slug}`, where it previously
+  required `/v1/dispatch/apps/{app}/{slug}` with `/public` and `/platform`
+  appended. There is no longer a single module base to append a scope to, so
+  the internal helper returns the triple rather than one prefix. This mirrors
+  api-platform `internal/shared/moduleinvoke.ModuleRoutes` exactly, and the two
+  sides share the same `invocation_v1.json` golden byte for byte — they are a
+  transcription of one another and move together or not at all.
+  `invocation.Routes` itself is unchanged; only the values it may hold are.
 - The other dispatch resolvers (`ms.Emit`, `ms.Notify`, `ms.Record`, the
   dependency-DB ingress and `ms.CallDependency`) keep their `/apps/...` and
   `/internal/apps/...` routes; only the module-keyed hop moves. The
   `resolveCallURL` seam comment (task #146) is kept — this is exactly the
   single-function swap it was reserved for.
 
-**Migration:** bump the SDK dependency and rebuild; no call-site changes. A
-module still on v0.4.x keeps working only until api-platform's `/module/{id}/*`
-removal lands; after that every `ms.Call` hop it makes fails with a 404 from
-the account Lambda.
+**Migration:** bump the SDK dependency and rebuild; no call-site changes. Order
+matters — this SDK must be tagged BEFORE the modules bump, and the modules must
+be running it before api-platform's cut-over serves the new envelope. A module
+still on v0.4.x after that point answers 400 on every route.
+
+**On the "live repair" above, precisely.** `MS_DISPATCH_URL` is the bare API
+host only for a DEPLOYED module Lambda (mirrorstack-infra sets
+`MODULEHOST_DISPATCH_URL` to `https://api.<domain>`). A module served through
+`mirrorstack dev --tunnel` gets `https://api.mirrorstack.ai/dispatch` from
+`docker-compose.yml`, i.e. WITH the API-mapping key, so its `/module/{id}` hops
+resolve today and its `/v1/dispatch/...` hops resolve after this change (the
+key strips its own prefix). No module is deployed at the time of writing, so
+the 404 is a repair of a path nothing currently takes — and the new address is
+the one that works under both bases.
 
 ## [v0.4.13] - 2026-09-01
 
