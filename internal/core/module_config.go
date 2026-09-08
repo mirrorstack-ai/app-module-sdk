@@ -66,6 +66,18 @@ type Config struct {
 	// routes (install/upgrade/downgrade) read it to apply migrations.
 	SQL fs.FS
 
+	// Readme is an optional filesystem holding the module's long-form README
+	// files (typically an embed.FS from `//go:embed README*.md`). README.md is
+	// the default; README.<tag>.md adds that locale.
+	//
+	// 🔴 THIS EXISTS SO A DEV-MOUNTED MODULE SHOWS ITS CURRENT README. The
+	// platform records a README map on a published VERSION, so a module running
+	// on a dev tunnel shows whatever its last release recorded — text that can be
+	// months old, and in the wrong language if the localized README was added
+	// since. Shipping it in the manifest lets the console read the running
+	// module, exactly as it already does for the description.
+	Readme fs.FS
+
 	// Versions optionally maps semver release tags to per-scope migration
 	// numbers, e.g.:
 	//

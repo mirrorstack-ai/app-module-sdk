@@ -128,6 +128,12 @@ func New(cfg Config) (*Module, error) {
 	if !cfg.DescriptionLabel.IsZero() {
 		m.registry.SetDescriptionLabel(cfg.DescriptionLabel)
 	}
+	// The README rides to the manifest as a locale map, read once at Init: the
+	// files are embedded, so re-reading them per manifest request would buy
+	// nothing. A module with no Readme FS ships no readme key at all.
+	if readme := readmeLocales(cfg.Readme); readme != nil {
+		m.registry.SetReadme(readme)
+	}
 
 	// The local dependency plane's directory seams. Bound to the real
 	// Postgres-backed implementations here so they are never nil in production
