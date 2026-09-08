@@ -41,6 +41,17 @@ type ManifestPayload struct {
 	// Omitted when the module declared none, in which case the platform falls
 	// back to Description. Mirrors Permission.Descriptions / MetricDecl.Labels.
 	DescriptionLabels map[string]string `json:"descriptionLabels,omitempty"`
+	// Readme is the module's long-form README as a locale map ("default" =
+	// README.md, "<tag>" = README.<tag>.md), the same shape
+	// `mirrorstack module deploy` records on a published version.
+	//
+	// 🔴 IT IS HERE SO A DEV-MOUNTED MODULE CAN SHOW ITS CURRENT README. The
+	// recorded map belongs to a VERSION, so a module served from a dev tunnel
+	// otherwise shows whatever its last release captured — stale text, and in
+	// the wrong language when the localized README arrived after that release.
+	// The console already prefers the live manifest for the description; this
+	// gives the README the same source of truth.
+	Readme map[string]string `json:"readme,omitempty"`
 	// Client declares the module-local source and build-output directories for
 	// the optional custom-app client. The CLI consumes these paths during local
 	// development; package identity and versioning remain platform-owned.
@@ -327,6 +338,7 @@ func BuildManifest(id, slug, name, icon string, tags []string, sqlFS fs.FS, vers
 		Defaults:          ManifestDefaults{Name: name, Icon: icon, Tags: tags, NameLabels: i18n.Lookup("module.name"), TagLabels: i18n.LookupList(tagCatalogKey, tagLabelSep)},
 		Description:       reg.Description(),
 		DescriptionLabels: reg.DescriptionLabels(),
+		Readme:            reg.Readme(),
 		Client:            client,
 		Dependencies:      reg.Dependencies(),
 		Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},

@@ -242,6 +242,7 @@ type Registry struct {
 	metrics               []MetricDecl
 	exposedTables         []string
 	description           string
+	readme           map[string]string
 	descriptionLabel      i18n.Label // per-locale description (ms.T/ms.Text), resolved at manifest build
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution
@@ -316,6 +317,31 @@ func (r *Registry) Description() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.description
+}
+
+// SetReadme records the module's long-form README as a locale map ("default"
+// plus any README.<tag>.md). Already resolved — unlike DescriptionLabel these
+// come from FILES rather than the i18n catalog, so there is nothing to defer.
+// Last-write-wins.
+func (r *Registry) SetReadme(m map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readme = m
+}
+
+// Readme returns the module's README locale map, or nil when it declared none
+// — nil so the manifest omits the key rather than shipping an empty object.
+func (r *Registry) Readme() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.readme) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(r.readme))
+	for locale, text := range r.readme {
+		out[locale] = text
+	}
+	return out
 }
 
 // SetDescriptionLabel records the module's per-locale description Label (ms.Text
