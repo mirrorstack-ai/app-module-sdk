@@ -5,6 +5,54 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.15] - 2026-09-08
+
+A dev-mounted module can now ship its own README. It is a **PATCH**.
+
+Two exported fields ADDED (`system.ManifestPayload.Readme`, `ms.Config.Readme`),
+none removed, none changed — and per release.yml's own header, pre-1.0 the
+convention is patch-only bumps even for new SDK surface.
+
+Nothing changes for a module that does not set `Config.Readme`: the manifest
+field is `omitempty`, so its payload is byte-identical to v0.4.14.
+
+### Added
+
+- **`ms.Config.Readme`** — an optional `fs.FS` holding the module's long-form
+  README files, typically `//go:embed README*.md`. `README.md` is the default;
+  `README.<tag>.md` adds that locale.
+- **`system.ManifestPayload.Readme`** — the resolved locale map, `omitempty`.
+
+### Why
+
+A module's README is recorded on a published VERSION. A module served from a dev
+tunnel has no such version, so the console showed whatever its last release
+captured. Measured on twkpa-edu: user-core's v1.0.0 was recorded 13 July and its
+`README.zh-TW.md` arrived 7 September, so a zh-TW console rendered two-month-old
+ENGLISH — and an operator could not tell that from the module simply having no
+Chinese README.
+
+The console already preferred the LIVE manifest for the description and fell
+back to the catalog row, which is why the same dialog showed a correct Chinese
+description beside the stale English README. The README was the one field with
+no live source to prefer. This supplies it; web-applications#361 reads it.
+
+> [!NOTE]
+> 🔴 **The map shape is a contract with two other programs, not an internal
+> detail.** `"default"` for `README.md`, the locale tag for `README.<tag>.md` —
+> mirroring what `mirrorstack module deploy` already records on a version row,
+> and resolved by the console with the one candidate order it uses for every
+> localized field. A different shape here would mean a dev-mounted module
+> rendering under different rules from a published one, which is the difference
+> a developer runs the tunnel to eliminate.
+
+Four rules, each with a test proven to fail without it: the locale tag is
+carried VERBATIM (case-folding would silently stop `zh-TW` matching a zh-TW
+reader), a blank README is skipped (an empty panel is worse than the recorded
+text it would replace), no README ships no key at all (`omitempty` lets a
+consumer tell "declared nothing" from "declared empty"), and content is bounded
+to the same 65536 the platform enforces on the version record.
+
 ## [v0.4.14] - 2026-09-05
 
 This is the module URL cut-over. It is a **PATCH**.
