@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,7 +28,64 @@ const (
 // and pool construction. The refcount + LRU + double-checked-locking lifecycle
 // is implemented in refcache.
 type PoolCache struct {
-	cache *refcache.Cache[*pgxpool.Pool]
+	cache *refcache.Cache[*pooledDB]
+	// newPool builds a pool for a credential and its provider. Production
+	// always uses createPoolWithProvider; it is a field only so a test can
+	// assert WHICH provider Get wires in, and that a cache hit refreshes it,
+	// without a live PostgreSQL. Testing the hook in isolation is not enough:
+	// the defect was never in the hook, it was in nothing ever reaching it.
+	newPool func(context.Context, Credential, CredentialProvider) (*pgxpool.Pool, error)
+}
+
+// envelopeCredential is a CredentialProvider fed by the INVOCATION ENVELOPE
+// rather than by a renewal capability.
+//
+// 🔴 THE POOL OUTLIVES THE TOKEN THAT BUILT IT. Every invocation already
+// carries a freshly minted token — the platform mints per (app, role) on a
+// ~15-minute TTL and refreshes ahead of expiry — so a module never needs to
+// fetch one. It only has to stop pinning the FIRST one. Before this, the static
+// path baked that first token into the pool's base config: the cache key
+// excludes the token (correct — rotation must not churn pools) and refcache
+// returns a hit without running the factory, so nothing could ever replace it.
+// Once every pooled connection had cycled (MaxConnIdleTime 5m, MaxConnLifetime
+// 30m, MinConns 0) the pool re-dialled with a dead token and the module lost
+// its database for the life of the container.
+//
+// Measured in production 2026-09-09: user-core answered
+// `failed to acquire connection: ... PAM authentication failed (SQLSTATE
+// 28000)` continuously from 09:29Z. It was the only one of five deployed
+// modules affected, and the only one with a 60-second cron holding a single
+// container warm — every 28000 came from ONE log stream while a healthy
+// module's traffic spanned five. The others went cold and rebuilt their pools
+// with fresh tokens, which is what made a platform-wide defect look like one
+// module's broken grant.
+type envelopeCredential struct {
+	mu   sync.RWMutex
+	cred Credential
+}
+
+func (e *envelopeCredential) set(cred Credential) {
+	e.mu.Lock()
+	e.cred = cred
+	e.mu.Unlock()
+}
+
+// Credential implements CredentialProvider by handing back the most recent
+// envelope credential. It never fails: the value is always one the caller
+// already validated.
+func (e *envelopeCredential) Credential(context.Context) (Credential, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cred, nil
+}
+
+// pooledDB pairs a pool with the envelope holder its BeforeConnect hook reads,
+// so a cache HIT can refresh the credential without rebuilding the pool. The
+// holder is nil for pools built from a real renewal provider, which carry
+// their own.
+type pooledDB struct {
+	pool     *pgxpool.Pool
+	envelope *envelopeCredential
 }
 
 // GetProvider returns a pool whose BeforeConnect hook asks provider for a
@@ -46,23 +104,34 @@ func (c *PoolCache) GetProvider(ctx context.Context, provider CredentialProvider
 	}
 	keyed, ok := provider.(CredentialProviderKey)
 	if !ok || keyed.CredentialProviderKey() == "" {
-		pool, err := createPoolWithProvider(ctx, initial, provider)
+		pool, err := c.newPool(ctx, initial, provider)
 		if err != nil {
 			return nil, nil, err
 		}
 		return pool, pool.Close, nil
 	}
-	return c.cache.Get(initial.cacheKey()+"|renewable|"+keyed.CredentialProviderKey(), func() (*pgxpool.Pool, error) {
-		return createPoolWithProvider(ctx, initial, provider)
+	entry, release, err := c.cache.Get(initial.cacheKey()+"|renewable|"+keyed.CredentialProviderKey(), func() (*pooledDB, error) {
+		pool, err := createPoolWithProvider(ctx, initial, provider)
+		if err != nil {
+			return nil, err
+		}
+		return &pooledDB{pool: pool}, nil
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return entry.pool, release, nil
 }
 
 // NewPoolCache creates a PoolCache with default settings.
 func NewPoolCache() *PoolCache {
 	return &PoolCache{
-		cache: refcache.New[*pgxpool.Pool](defaultMaxPools, "mirrorstack/db: pool", func(p *pgxpool.Pool) {
-			p.Close()
+		cache: refcache.New[*pooledDB](defaultMaxPools, "mirrorstack/db: pool", func(p *pooledDB) {
+			if p.pool != nil {
+				p.pool.Close()
+			}
 		}),
+		newPool: createPoolWithProvider,
 	}
 }
 
@@ -73,9 +142,25 @@ func (c *PoolCache) Get(ctx context.Context, cred Credential) (*pgxpool.Pool, fu
 	if err := cred.validate(); err != nil {
 		return nil, nil, err
 	}
-	return c.cache.Get(cred.cacheKey(), func() (*pgxpool.Pool, error) {
-		return createPool(ctx, cred)
+	entry, release, err := c.cache.Get(cred.cacheKey(), func() (*pooledDB, error) {
+		envelope := &envelopeCredential{}
+		envelope.set(cred)
+		pool, err := c.newPool(ctx, cred, envelope)
+		if err != nil {
+			return nil, err
+		}
+		return &pooledDB{pool: pool, envelope: envelope}, nil
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	// 🔴 REFRESH ON EVERY GET, HIT OR MISS. refcache's fast path returns the
+	// cached value without ever running the factory, so a hit is the ONLY
+	// place a rotated token can reach an existing pool.
+	if entry.envelope != nil {
+		entry.envelope.set(cred)
+	}
+	return entry.pool, release, nil
 }
 
 // Close closes all pools.
@@ -104,14 +189,6 @@ func configurePoolDefaults(cfg *pgxpool.Config) {
 // createPool builds a pgxpool.Pool from a credential. The token is set
 // directly on cfg.ConnConfig.Password instead of being interpolated into a
 // DSN string, so a parse error wrapped with %w cannot leak it to logs.
-func createPool(ctx context.Context, cred Credential) (*pgxpool.Pool, error) {
-	cfg, err := createPoolConfig(cred, nil)
-	if err != nil {
-		return nil, err
-	}
-	return connectPool(ctx, cfg, cred)
-}
-
 func createPoolWithProvider(ctx context.Context, initial Credential, provider CredentialProvider) (*pgxpool.Pool, error) {
 	cfg, err := createPoolConfig(initial, provider)
 	if err != nil {
