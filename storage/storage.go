@@ -61,8 +61,16 @@ func validateKey(key string) error {
 	if strings.HasPrefix(key, "/") {
 		return fmt.Errorf("mirrorstack/storage: key must not start with '/'")
 	}
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("mirrorstack/storage: key must not contain '..'")
+	// 🔴 A SEGMENT CHECK, NOT A SUBSTRING CHECK. Traversal is a path SEGMENT
+	// that is exactly "..", so strings.Contains(key, "..") also rejected names
+	// that merely CONTAIN two dots and escape nothing — Next.js catch-all route
+	// directories (`[...path]`, fixed syntax) among them. See
+	// api-platform#773, where the platform's byte-for-byte copy of this rule
+	// made every Next app with a catch-all route undeployable.
+	for _, segment := range strings.Split(key, "/") {
+		if segment == ".." {
+			return fmt.Errorf("mirrorstack/storage: key must not contain a '..' path segment (key %q)", key)
+		}
 	}
 	if strings.Contains(key, "%") {
 		return fmt.Errorf("mirrorstack/storage: key must not contain '%%' (percent-encoded traversal)")
