@@ -85,7 +85,7 @@ func TestResolveCallURL_Building(t *testing.T) {
 func TestResolveDependencyCallURL_Building(t *testing.T) {
 	t.Setenv("MS_DISPATCH_URL", "http://dispatch:8083")
 	got := resolveDependencyCallURL("app slug", "consumer/ref", "video-transcode", "/internal/jobs/start?retry=1")
-	want := "http://dispatch:8083/internal/apps/app%20slug/module-calls/consumer%2Fref/video-transcode/internal/jobs/start?retry=1"
+	want := "http://dispatch:8083/v1/dispatch/internal/apps/app%20slug/module-calls/consumer%2Fref/video-transcode/internal/jobs/start?retry=1"
 	if got != want {
 		t.Fatalf("resolveDependencyCallURL() = %q, want %q", got, want)
 	}
@@ -262,7 +262,7 @@ func TestCallDependency_UsesAuthenticatedActorlessInternalIngress(t *testing.T) 
 		t.Fatalf("CallDependencyPost: %v", err)
 	}
 
-	wantPath := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs/start"
+	wantPath := "/v1/dispatch/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs/start"
 	if gotMethod != http.MethodPost || gotPath != wantPath || gotQuery != "retry=1" {
 		t.Fatalf("request = %s %s?%s, want POST %s?retry=1", gotMethod, gotPath, gotQuery, wantPath)
 	}
@@ -304,7 +304,7 @@ func TestCallDependency_DevSecureIngressWins(t *testing.T) {
 	if err := m.CallDependencyPost(ctx, "video-transcode", "/internal/jobs", nil, nil); err != nil {
 		t.Fatalf("CallDependencyPost: %v", err)
 	}
-	want := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
+	want := "/v1/dispatch/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
 	if requests != 1 || gotPath != want {
 		t.Fatalf("secure ingress requests=%d path=%q, want one request to %q", requests, gotPath, want)
 	}
@@ -319,7 +319,7 @@ func TestCallDependency_Dev404UsesDeclaredColocatedDirectRoute(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
-		if strings.HasPrefix(r.URL.Path, "/internal/apps/") {
+		if strings.HasPrefix(r.URL.Path, "/v1/dispatch/internal/apps/") {
 			http.NotFound(w, r)
 			return
 		}
@@ -387,7 +387,7 @@ func TestCallDependency_Dev404UsesDeclaredColocatedDirectRoute(t *testing.T) {
 	if len(paths) != before {
 		t.Fatalf("oversized direct call reached network: requests %d -> %d", before, len(paths))
 	}
-	wantSecurePath := "/internal/apps/" + appID + "/module-calls/m14b4db3ac7f34e6a880ebc763cb3ca55/video-transcode/internal/jobs/start"
+	wantSecurePath := "/v1/dispatch/internal/apps/" + appID + "/module-calls/m14b4db3ac7f34e6a880ebc763cb3ca55/video-transcode/internal/jobs/start"
 	if len(paths) != 2 || paths[0] != wantSecurePath || paths[1] != wantPath {
 		t.Fatalf("fallback requests = %q, want [%q %q]", paths, wantSecurePath, wantPath)
 	}
@@ -580,7 +580,7 @@ func TestCallDependency_DevDirectoryMissOrErrorPreservesIngress404(t *testing.T)
 			if err == nil || !callStatusIs(err, http.StatusNotFound) {
 				t.Fatalf("CallDependencyPost error = %v, want preserved ingress 404", err)
 			}
-			want := "/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
+			want := "/v1/dispatch/internal/apps/" + appID + "/module-calls/" + consumerID + "/video-transcode/internal/jobs"
 			if len(paths) != 1 || paths[0] != want {
 				t.Fatalf("requests = %q, want only %q", paths, want)
 			}

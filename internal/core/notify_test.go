@@ -23,19 +23,19 @@ func TestResolveNotifyURL_Building(t *testing.T) {
 			name:     "dev fallback when unset",
 			dispatch: "",
 			appID:    "a-456",
-			want:     devDispatchFallback + "/apps/a-456/notifications",
+			want:     devDispatchFallback + "/v1/dispatch/apps/a-456/notifications",
 		},
 		{
 			name:     "explicit base",
 			dispatch: "http://dispatch:8083",
 			appID:    "a-456",
-			want:     "http://dispatch:8083/apps/a-456/notifications",
+			want:     "http://dispatch:8083/v1/dispatch/apps/a-456/notifications",
 		},
 		{
 			name:     "trailing slash on base is trimmed",
 			dispatch: "http://dispatch:8083/",
 			appID:    "a-456",
-			want:     "http://dispatch:8083/apps/a-456/notifications",
+			want:     "http://dispatch:8083/v1/dispatch/apps/a-456/notifications",
 		},
 	}
 	for _, tc := range cases {
@@ -153,7 +153,7 @@ func TestNotify_PostsFromContextAppID(t *testing.T) {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
 	// appID is taken from ctx via auth.Set, encoded into both URL and header.
-	if gotPath != "/apps/a-456/notifications" {
+	if gotPath != "/v1/dispatch/apps/a-456/notifications" {
 		t.Errorf("path = %q, want /apps/a-456/notifications", gotPath)
 	}
 	if gotAppID != "a-456" {
@@ -304,7 +304,7 @@ func TestNotify_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
 	if !strings.Contains(msg, "notification ingress unavailable") {
 		t.Errorf("error %q missing upstream body", msg)
 	}
-	if !strings.Contains(msg, "/apps/a-456/notifications") {
+	if !strings.Contains(msg, "/v1/dispatch/apps/a-456/notifications") {
 		t.Errorf("error %q missing request path", msg)
 	}
 }
