@@ -1,6 +1,6 @@
 # @mirrorstack-ai/app-module-sdk
 
-[![License: FSL-1.1-ALv2](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Good First Issues](https://img.shields.io/github/issues/mirrorstack-ai/app-module-sdk/good%20first%20issue?color=7057ff&label=good%20first%20issues)](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
 
 Go SDK for building modules on [MirrorStack](https://mirrorstack.ai), the Agentic CMS platform.
@@ -431,4 +431,4 @@ Look for issues labeled [`good first issue`](https://github.com/mirrorstack-ai/a
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE) — free to use for any purpose except building a competing platform. Converts to Apache 2.0 after 2 years.
+[Apache-2.0](LICENSE). Earlier releases were published under FSL-1.1-ALv2.

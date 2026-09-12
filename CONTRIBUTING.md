@@ -88,3 +88,7 @@ Key design decisions are documented in the protocol spec (shared internally). Th
 - **`description` and `category` are platform-only** — modules don't self-describe to prevent prompt injection
 
 If you have questions about design decisions, ask in the issue or on Slack before implementing.
+
+## License
+
+By contributing, you agree that your contributions are licensed under the [Apache License 2.0](LICENSE).
