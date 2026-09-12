@@ -5,6 +5,15 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.17] - 2026-09-12
+
+### Changed
+
+- **License: FSL-1.1-ALv2 → Apache-2.0.** The SDK is now open source under the
+  Apache License 2.0, so pkg.go.dev can display its documentation. Earlier
+  releases remain under FSL-1.1-ALv2. (`v0.4.16` was tagged by hand without a
+  VERSION bump, so this release skips to `v0.4.17`.)
+
 ## [v0.4.15] - 2026-09-08
 
 A dev-mounted module can now ship its own README. It is a **PATCH**.
