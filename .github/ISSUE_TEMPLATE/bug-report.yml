@@ -1,0 +1,47 @@
+name: Bug Report
+description: Report something in the SDK that isn't working
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+      placeholder: A clear description of the bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal module or snippet that shows the problem.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      description: Output of `go list -m github.com/mirrorstack-ai/app-module-sdk`
+      placeholder: "github.com/mirrorstack-ai/app-module-sdk v0.x.y"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Go version / OS
+      placeholder: "e.g. go1.26 / macOS 15"
+    validations:
+      required: false
