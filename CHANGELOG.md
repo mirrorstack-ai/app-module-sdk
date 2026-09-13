@@ -646,6 +646,33 @@ a minor because an exported constructor's signature changed.
   on `ms.Call` and hard-rejected `ms.CallDependency` — it hit the OAuth
   authorize-url hop, whose query is an encoded redirect URI, every time.
 
+## [Unreleased]
+
+### Changed — BREAKING
+
+- **`PresignPut` now takes the content type, and signs it.** The signature is
+  `PresignPut(ctx, key, contentType string, expires time.Duration)`, and
+  `storage.Storer` changes with it, so every caller is found by the compiler.
+
+  🔴 **The old form could not enforce anything.** The type was absent from the
+  signed request, so a module's allow-list — every first-party module has one —
+  decided the *extension of the key* and nothing about the bytes or the type the
+  object would be served with. An uploader could name a `.png` key and store
+  `image/svg+xml` on it, and the CDN replayed that stored type cross-origin from
+  an origin that also serves module JS bundles
+  (mirrorstack-ai/mirrorstack-core-v2#1469).
+
+  Setting `PutObjectInput.ContentType` alone is NOT enough and the tests say so:
+  measured against this SDK, it yields `X-Amz-SignedHeaders=host` — the field is
+  dropped from the presigned URL. A Build-phase middleware puts the header on the
+  request before the signer runs, which is what lands it in the signature.
+
+  **Migration**: pass the type you already validated. An empty content type is
+  refused with `storage.ErrContentTypeRequired` rather than defaulted — a caller
+  that does not know what it is accepting cannot make this decision safely, and
+  "whatever the client says" is the state this change ends. The uploading client
+  must send the same `Content-Type` header on its PUT; browsers already do.
+
 ## [v0.4.0] - 2026-08-06
 
 This release makes module storage an explicit, fail-closed resource and
