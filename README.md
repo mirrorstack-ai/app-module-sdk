@@ -1,5 +1,6 @@
 # @mirrorstack-ai/app-module-sdk
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/mirrorstack-ai/app-module-sdk.svg)](https://pkg.go.dev/github.com/mirrorstack-ai/app-module-sdk)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Good First Issues](https://img.shields.io/github/issues/mirrorstack-ai/app-module-sdk/good%20first%20issue?color=7057ff&label=good%20first%20issues)](https://github.com/mirrorstack-ai/app-module-sdk/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
 
