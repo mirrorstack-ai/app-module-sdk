@@ -58,7 +58,7 @@ func (m *Module) resolveCache(ctx context.Context) (*cache.Client, func(), error
 //
 //	s, err := mod.Storage(r.Context())
 //	if err != nil { ... }
-//	url, err := s.PresignPut(ctx, "photo.jpg", 15*time.Minute)
+//	url, err := s.PresignPut(ctx, "photo.jpg", "image/jpeg", 15*time.Minute)
 //	cdnURL, err := s.URL("photo.jpg")
 //
 // Production enforces that scope with the IAM session policy on the vended

@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/lambdaenv"
 )
@@ -35,7 +37,7 @@ import (
 // so a module should not need a type assertion to do it. Pre-1.0, and *Client is
 // the only implementation in the workspace.
 type Storer interface {
-	PresignPut(ctx context.Context, key string, expires time.Duration) (string, error)
+	PresignPut(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
 	// Get reads an object the MODULE needs, over the S3 API. Distinct from
 	// PresignGet, which builds a URL for a VIEWER against the client-facing
@@ -249,6 +251,11 @@ func (c *Client) ForApp(_, _ string) *Client {
 	}
 }
 
+// ErrContentTypeRequired is returned when PresignPut is called without a
+// content type. Fail closed: see PresignPut's own comment for why there is no
+// default.
+var ErrContentTypeRequired = errors.New("mirrorstack/storage: presign put requires a content type")
+
 // ErrNoCredential is returned when PresignPut/PresignGet is called without storage credentials.
 // A deployed invocation must receive credentials regardless of route class;
 // public delivery routes may legitimately use storage too.
@@ -303,23 +310,56 @@ func (c *Client) presignTTL(ctx context.Context, requested time.Duration) (time.
 }
 
 // PresignPut generates a presigned S3 PUT URL for uploading a file.
+//
+// 🔴 contentType IS PART OF THE SIGNATURE, AND THAT IS THE WHOLE POINT OF THIS
+// PARAMETER. It used to be absent, so the type was whatever the CLIENT sent —
+// and a module's allow-list ("only png, jpeg, webp") decided nothing but the
+// extension of the key. An uploader could name a `.png` key and store
+// `image/svg+xml` on it; the CDN then replayed that stored type, cross-origin,
+// from an origin that also serves every module's JS bundle
+// (mirrorstack-ai/mirrorstack-core-v2#1469).
+//
+// With the type signed, S3 itself refuses a PUT whose Content-Type header does
+// not match — before a byte is stored, with no code of ours in the path. The
+// caller's allow-list becomes the enforced type instead of decoration.
+//
+// The uploading client MUST send the same `Content-Type` header on the PUT.
+// That is not new work: every browser upload already sets one.
+//
+// An empty contentType is REFUSED rather than defaulted. A caller that does not
+// know what it is accepting cannot make this decision safely, and a default
+// (octet-stream, or "whatever the client says") is exactly the state this
+// parameter exists to end.
 // Requires storage credentials in context (Platform/Internal routes only).
-func (c *Client) PresignPut(ctx context.Context, key string, expires time.Duration) (string, error) {
+func (c *Client) PresignPut(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
 	if err := c.requireCredential(); err != nil {
 		return "", err
 	}
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
+	if strings.TrimSpace(contentType) == "" {
+		return "", ErrContentTypeRequired
+	}
 	expires, err := c.presignTTL(ctx, expires)
 	if err != nil {
 		return "", err
 	}
 	fullKey := c.prefix + key
+	// 🔴 PutObjectInput.ContentType ALONE IS NOT SIGNED, and a presigned URL
+	// enforces only what it signed. Measured against this SDK: setting the field
+	// and nothing else yields `X-Amz-SignedHeaders=host` — the type is dropped,
+	// the URL accepts a PUT declaring anything, and the caller's allow-list is
+	// decoration again. The field stays (it is what S3 records on the object);
+	// the middleware below is what puts the header on the request BEFORE the
+	// signer runs, which is what lands it in SignedHeaders.
 	req, err := c.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(fullKey),
-	}, s3.WithPresignExpires(expires))
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(fullKey),
+		ContentType: aws.String(contentType),
+	}, s3.WithPresignExpires(expires), func(o *s3.PresignOptions) {
+		o.ClientOptions = append(o.ClientOptions, s3.WithAPIOptions(signContentType(contentType)))
+	})
 	if err != nil {
 		return "", fmt.Errorf("mirrorstack/storage: presign put failed: %w", err)
 	}
@@ -390,4 +430,28 @@ func (c *Client) URL(key string) (string, error) {
 	}
 	base := strings.TrimRight(c.cdnBase, "/")
 	return base + "/" + c.prefix + key, nil
+}
+
+// signContentType puts the Content-Type header on the request before the signer
+// runs, so it lands in X-Amz-SignedHeaders and S3 refuses a PUT that declares
+// anything else.
+//
+// It is a Build-phase middleware because that is the last phase before signing
+// where the HTTP request exists and the header set is still open. Without it the
+// type reaches S3's metadata only if the uploader chooses to send it — which is
+// the state mirrorstack-ai/mirrorstack-core-v2#1469 is about.
+func signContentType(contentType string) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Build.Add(middleware.BuildMiddlewareFunc(
+			"MirrorStackSignContentType",
+			func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (
+				middleware.BuildOutput, middleware.Metadata, error,
+			) {
+				if req, ok := in.Request.(*smithyhttp.Request); ok {
+					req.Header.Set("Content-Type", contentType)
+				}
+				return next.HandleBuild(ctx, in)
+			},
+		), middleware.After)
+	}
 }
