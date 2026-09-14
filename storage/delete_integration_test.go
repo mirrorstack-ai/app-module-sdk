@@ -84,3 +84,32 @@ func TestDeletePrefixAgainstDevStorage(t *testing.T) {
 		t.Fatal("first app credential listed the second app prefix")
 	}
 }
+
+// TestValidateKeyAllowsDottedSegmentsAndBlocksTraversal mirrors
+// api-platform's test of the same rule. The two copies are deliberately
+// duplicated so app and platform agree on what a safe key is; they must not
+// diverge, so the cases are the same cases.
+func TestValidateKeyAllowsDottedSegmentsAndBlocksTraversal(t *testing.T) {
+	for _, key := range []string{
+		"apps/x/.next/server/app/api/mirrorstack/modules/[...path]/route.js",
+		"apps/x/[[...slug]]/page.js",
+		"apps/x/..hidden",
+		"apps/x/file..name.js",
+		"apps/x/....js",
+	} {
+		if err := validateKey(key); err != nil {
+			t.Errorf("validateKey(%q) = %v, want nil", key, err)
+		}
+	}
+	for _, key := range []string{
+		"../secret",
+		"apps/../../other/secret.jpg",
+		"apps/x/..",
+		"..",
+		"apps/x/../y",
+	} {
+		if err := validateKey(key); err == nil {
+			t.Errorf("validateKey(%q) = nil, want an error", key)
+		}
+	}
+}
