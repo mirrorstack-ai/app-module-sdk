@@ -68,7 +68,7 @@ func TestDeliverAuditUsesOnlyStoredProvenanceAndRenewableAuthority(t *testing.T)
 	var gotCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCalls.Add(1)
-		if r.Method != http.MethodPost || r.URL.Path != "/apps/"+appID+"/audit" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/dispatch/apps/"+appID+"/audit" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("X-MS-App-ID"); got != appID {

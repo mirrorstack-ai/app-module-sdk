@@ -118,9 +118,9 @@ func TestResolveUsageURL_Building(t *testing.T) {
 		appID    string
 		want     string
 	}{
-		{"dev fallback when unset", "", "a-456", devDispatchFallback + "/apps/a-456/usage"},
-		{"explicit base", "http://dispatch:8083", "a-456", "http://dispatch:8083/apps/a-456/usage"},
-		{"trailing slash trimmed", "http://dispatch:8083/", "a-456", "http://dispatch:8083/apps/a-456/usage"},
+		{"dev fallback when unset", "", "a-456", devDispatchFallback + "/v1/dispatch/apps/a-456/usage"},
+		{"explicit base", "http://dispatch:8083", "a-456", "http://dispatch:8083/v1/dispatch/apps/a-456/usage"},
+		{"trailing slash trimmed", "http://dispatch:8083/", "a-456", "http://dispatch:8083/v1/dispatch/apps/a-456/usage"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,7 +148,7 @@ func TestRecord_PostsEventToUsageIngress(t *testing.T) {
 	if g.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", g.method)
 	}
-	if g.path != "/apps/app_abc/usage" {
+	if g.path != "/v1/dispatch/apps/app_abc/usage" {
 		t.Errorf("path = %q, want /apps/app_abc/usage", g.path)
 	}
 	if g.appID != "app_abc" {
@@ -333,7 +333,7 @@ func TestRecord_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
 	if !strings.Contains(msg, "usage ingress unavailable") {
 		t.Errorf("error %q missing upstream body", msg)
 	}
-	if !strings.Contains(msg, "/apps/a-456/usage") {
+	if !strings.Contains(msg, "/v1/dispatch/apps/a-456/usage") {
 		t.Errorf("error %q missing request path", msg)
 	}
 }
