@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -607,5 +608,137 @@ func TestUpgradeHandler_ProvisionRunsOnEmptyWindow(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("provisioner called %d times on an empty upgrade window, want 1", calls)
+	}
+}
+
+// TestRefuseDeployedWithoutSchema covers both axes of the guard. Only one of
+// the four cells refuses, and the three that do not are the ones that keep the
+// dev/tunnel path working — a test that only asserted the refusal would be
+// satisfied by a predicate that refuses everything.
+func TestRefuseDeployedWithoutSchema(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		onLambda bool
+		schema   string
+		want     bool
+	}{
+		{"deployed with no schema is the only refusal", true, "", true},
+		{"deployed with a schema runs", true, "app_6c8d1234", false},
+		{"dev tunnel with no schema runs — it owns its own database", false, "", false},
+		{"dev with a schema runs", false, "app_6c8d1234", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := refuseDeployedWithoutSchema(tc.onLambda, tc.schema); got != tc.want {
+				t.Errorf("refuseDeployedWithoutSchema(%v, %q) = %v, want %v",
+					tc.onLambda, tc.schema, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstallHandler_EmptyBodyStillRunsMigrations pins the dev path the guard
+// must not break.
+//
+// It is the regression test for a specific edit: the empty-body branch used to
+// return BEFORE the shared context folder, so the emptiest body of all skipped
+// every check in it. Folding that branch through means an absent body now
+// reaches the same gate as `{}` — and this test proves the fold did not cost
+// the dev path its migrations. Off Lambda, no schema in the body, the runner
+// still runs, and nothing lands in ctx for search_path.
+func TestInstallHandler_EmptyBodyStillRunsMigrations(t *testing.T) {
+	t.Parallel()
+
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", nil))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — an empty body must still migrate on the dev path")
+	}
+	if got := db.SchemaFrom(captured); got != "" {
+		t.Errorf("SchemaFrom = %q, want empty — an absent body names no schema", got)
+	}
+}
+
+// asDeployed makes the lifecycle handlers believe they are running on Lambda
+// for the duration of one test. Not parallel-safe — it writes a package var —
+// so every test using it runs serially.
+func asDeployed(t *testing.T) {
+	t.Helper()
+	previous := onLambda
+	onLambda = func() bool { return true }
+	t.Cleanup(func() { onLambda = previous })
+}
+
+// TestLifecycleHandlers_RefuseDeployedWithoutSchema is the guard seen in its ON
+// position, through the real handlers, for every verb that runs migrations.
+//
+// The empty-body case is the one worth having: that body used to return from
+// injectInstallContext BEFORE the shared context folder, so the emptiest
+// request of all skipped every check in it. Both bodies must now be refused,
+// and no migration may run — which is what the noop runner asserts by failing
+// the test if it is ever invoked.
+func TestLifecycleHandlers_RefuseDeployedWithoutSchema(t *testing.T) {
+	asDeployed(t)
+
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		body    string
+	}{
+		{"install, empty body", InstallHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), nil), ""},
+		{"install, body with no schema", InstallHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), nil), `{"appId":"6c8d1234-abcd-ef01-2345-6789abcdef00"}`},
+		{"upgrade, window but no schema", UpgradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t), nil), `{"from":"0000","to":"0001"}`},
+		{"downgrade, window but no schema", DowngradeHandler(oneMigrationFS(), migration.ScopeApp, noopTxRunner(t)), `{"from":"0001","to":"0000"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, httptest.NewRequest("POST", "/lifecycle", body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "no schema") {
+				t.Errorf("body = %s, want it to name the missing schema", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestInstallHandler_DeployedWithSchemaStillRuns is the other half: on Lambda
+// WITH a schema, nothing is refused and the migration runs. Without this, a
+// predicate that refused every deployed call would pass the test above.
+func TestInstallHandler_DeployedWithSchemaStillRuns(t *testing.T) {
+	asDeployed(t)
+
+	var captured context.Context
+	h := InstallHandler(oneMigrationFS(), migration.ScopeApp, capturingTxRunner(t, &captured), nil)
+
+	body := strings.NewReader(`{"appId":"6c8d1234-abcd-ef01-2345-6789abcdef00","schema":"app_6c8d1234"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/install", body))
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("runner never invoked — a deployed install WITH a schema must migrate")
+	}
+	if got := db.SchemaFrom(captured); got != "app_6c8d1234" {
+		t.Errorf("SchemaFrom = %q, want app_6c8d1234", got)
 	}
 }
