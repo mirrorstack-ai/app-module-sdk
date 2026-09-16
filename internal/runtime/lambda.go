@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
@@ -91,6 +93,35 @@ type LambdaResponse struct {
 	StatusCode int                 `json:"statusCode"`
 	Headers    map[string][]string `json:"headers"`
 	Body       string              `json:"body"`
+	// IsBase64Encoded says Body is standard base64 of the handler's real bytes.
+	//
+	// 🔴 A Go string CANNOT CARRY ARBITRARY BYTES THROUGH encoding/json, which
+	// is how this envelope travels. The marshaller substitutes U+FFFD for every
+	// invalid UTF-8 sequence, silently and without error, so a handler that
+	// writes binary gets a body of the right shape and the wrong bytes.
+	//
+	// Measured in production 2026-09-16: video-core's 16-byte AES playback key
+	// reached the browser as 28 bytes — six invalid bytes, each replaced by the
+	// three-byte replacement rune — and hls.js decrypted every segment to noise.
+	// Nothing logged anything, on any side, because every side did exactly what
+	// it was written to do.
+	IsBase64Encoded bool `json:"isBase64Encoded,omitempty"`
+}
+
+// lambdaBody renders a handler's bytes for the envelope, base64-encoding them
+// when they are not valid UTF-8.
+//
+// The test is the bytes themselves, not the Content-Type: a module may serve
+// binary under any type it likes (video-core's key is application/octet-stream,
+// an image is image/png), and a text/* body that happens to hold invalid UTF-8
+// is just as corruptible. Valid UTF-8 keeps travelling as a plain string, so
+// every existing consumer — including a platform that predates the flag —
+// sees byte-identical traffic for everything it already handles.
+func lambdaBody(raw []byte) (string, bool) {
+	if utf8.Valid(raw) {
+		return string(raw), false
+	}
+	return base64.StdEncoding.EncodeToString(raw), true
 }
 
 // LambdaTaskEvent is the platform-owned Standard-task pointer. Payload,
@@ -258,10 +289,13 @@ func NewLambdaHandlerWithTasks(handler http.Handler, moduleID, moduleRef string,
 
 		result := rec.Result()
 
+		// `body` above is the REQUEST reader; the response needs its own name.
+		wireBody, encoded := lambdaBody(rec.Body.Bytes())
 		return LambdaResponse{
-			StatusCode: result.StatusCode,
-			Headers:    result.Header,
-			Body:       rec.Body.String(),
+			StatusCode:      result.StatusCode,
+			Headers:         result.Header,
+			Body:            wireBody,
+			IsBase64Encoded: encoded,
 		}, nil
 	}
 }

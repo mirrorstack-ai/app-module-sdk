@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -448,5 +450,65 @@ func TestNewLambdaHandler_ResourcesInjected(t *testing.T) {
 	}
 	if body["cacheUser"] != "mod_media" {
 		t.Errorf("expected cacheUser 'mod_media', got %q", body["cacheUser"])
+	}
+}
+
+// 🔴 THE PRODUCTION INCIDENT, from the producing side (2026-09-16).
+//
+// video-core's 16-byte AES playback key reached the browser as 28 bytes because
+// this envelope carries the body as a Go string and encoding/json substitutes
+// U+FFFD for invalid UTF-8. The control below is the whole point: the same
+// bytes through a plain string body come back CHANGED, and through the flag
+// come back exactly.
+func TestLambdaBody_BinarySurvivesTheEnvelope(t *testing.T) {
+	key := []byte{0x00, 0x01, 0xff, 0xfe, 0x80, 0x7f, 0xc0, 0xc1, 0x10, 0x9a, 0xab, 0xcd, 0xef, 0x42, 0xf5, 0x01}
+
+	body, encoded := lambdaBody(key)
+	if !encoded {
+		t.Fatal("binary was not marked base64")
+	}
+	wire, err := json.Marshal(LambdaResponse{StatusCode: 200, Body: body, IsBase64Encoded: encoded})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back LambdaResponse
+	if err := json.Unmarshal(wire, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got, err := base64.StdEncoding.DecodeString(back.Body)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !bytes.Equal(got, key) {
+		t.Errorf("round-trip = %#v, want the original bytes", got)
+	}
+
+	// Control: the shipped path, so this test fails if someone "simplifies"
+	// lambdaBody back to string(raw).
+	plain, err := json.Marshal(LambdaResponse{StatusCode: 200, Body: string(key)})
+	if err != nil {
+		t.Fatalf("marshal plain: %v", err)
+	}
+	var plainBack LambdaResponse
+	if err := json.Unmarshal(plain, &plainBack); err != nil {
+		t.Fatalf("unmarshal plain: %v", err)
+	}
+	if plainBack.Body == string(key) {
+		t.Fatal("a plain string body preserved invalid UTF-8; this test's premise is wrong")
+	}
+}
+
+// Text must keep travelling as text: a platform that predates the flag sees
+// byte-identical traffic for everything it already handles, which is what makes
+// the consumer-first rollout safe in both orders for UTF-8 bodies.
+func TestLambdaBody_ValidUTF8IsNotEncoded(t *testing.T) {
+	for _, in := range []string{"", "{\"ok\":true}", "通過 · 未通過", "a\tb\nc"} {
+		body, encoded := lambdaBody([]byte(in))
+		if encoded {
+			t.Errorf("%q was base64-encoded; valid UTF-8 must travel as itself", in)
+		}
+		if body != in {
+			t.Errorf("body = %q, want %q", body, in)
+		}
 	}
 }
