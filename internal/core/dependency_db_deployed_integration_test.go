@@ -97,3 +97,74 @@ func mustExecRaw(t *testing.T, d *db.DB, ctx context.Context, sql string) {
 		t.Fatalf("setup exec %q: %v", sql, err)
 	}
 }
+
+// TestDependencyDB_DeployedRead_UUIDColumn_Integration is the regression that
+// only a real Postgres can carry: a uuid PRIMARY KEY must reach the consumer as
+// the canonical text it was inserted as.
+//
+// Deleting normalizeUUIDValues from queryDynamicSelect makes this test fail
+// with [16]uint8, which is exactly what production returned on 2026-09-16:
+// video-watched's `row["id"].(string)` yielded "", every measurable video was
+// skipped on the empty id, and a completed video reported "no duration
+// recorded" because its facts entry was keyed under "". A fixture cannot prove
+// this — the dev/proxy plane JSON-encodes a uuid as a string, so the shape under
+// test never appears there.
+func TestDependencyDB_DeployedRead_UUIDColumn_Integration(t *testing.T) {
+	setup, err := db.Open(context.Background())
+	if err != nil {
+		t.Skipf("skipping: cannot connect to postgres: %v", err)
+	}
+	t.Cleanup(setup.Close)
+
+	m, err := New(Config{ID: "m1234abcd"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Close)
+
+	ctx := context.Background()
+	const schema = "app_dep_uuid_test"
+	const physical = "m81b3ac7081c1409495700c761e23b59e_videos"
+	const videoID = "3bc6dbe1-c5b8-4d77-9da5-2deb1ccccf4e"
+
+	mustExecRaw(t, setup, ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+	mustExecRaw(t, setup, ctx, `CREATE SCHEMA `+schema)
+	t.Cleanup(func() { _, _ = setup.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+	mustExecRaw(t, setup, ctx, `CREATE TABLE `+schema+`."`+physical+`" (id uuid PRIMARY KEY, title text NOT NULL, duration_sec double precision, owner_id uuid)`)
+	mustExecRaw(t, setup, ctx, `INSERT INTO `+schema+`."`+physical+`" (id, title, duration_sec, owner_id) VALUES ('`+videoID+`', 'a video', 154.2, NULL)`)
+
+	readCtx := auth.Set(ctx, auth.Identity{AppID: "app-uuid-1"})
+	readCtx = db.WithSchema(readCtx, schema)
+	readCtx = db.WithDependencies(readCtx, []db.DependencyGrant{
+		{Ref: "video-core", Tables: map[string]string{"videos": physical}},
+	})
+
+	res, err := m.DependencyDB(readCtx, "@mirrorstack/video-core").
+		Select("videos").
+		Columns("id", "title", "duration_sec", "owner_id").
+		WhereIn("id", videoID).
+		result(readCtx, true /* deployed */)
+	if err != nil {
+		t.Fatalf("deployed read: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(res.Rows))
+	}
+
+	// The assertion the consumer actually writes, against a map[string]any.
+	id, ok := res.Rows[0]["id"].(string)
+	if !ok {
+		t.Fatalf(`row["id"].(string) failed: id decoded as %T (%#v) — a consumer reads this as "" and drops the row`, res.Rows[0]["id"], res.Rows[0]["id"])
+	}
+	if id != videoID {
+		t.Errorf("id = %q, want %q", id, videoID)
+	}
+	if got, ok := res.Rows[0]["duration_sec"].(float64); !ok || got != 154.2 {
+		t.Errorf("duration_sec = %#v (%T), want 154.2", res.Rows[0]["duration_sec"], res.Rows[0]["duration_sec"])
+	}
+	// A NULL uuid stays absent rather than becoming the all-zero uuid, which
+	// would read as a real owner.
+	if res.Rows[0]["owner_id"] != nil {
+		t.Errorf("owner_id = %#v, want nil for a NULL uuid", res.Rows[0]["owner_id"])
+	}
+}
