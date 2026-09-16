@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 )
 
 // Gated CDN delivery — the module-facing half.
@@ -156,7 +158,7 @@ type deliveryMintResponse struct {
 // unset — the same resolution Call, Emit and Notify use. DEV/DISPATCH
 // TRANSPORT: this resolver is the #146 seam, mirroring resolveEventBusURL.
 func resolveDeliveryMintURL(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/cdn-tokens", dispatchBaseFor(ctx), appID)
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf("/apps/%s/cdn-tokens", appID))
 }
 
 // Delivery mints ONE delivery credential covering every object under prefix.

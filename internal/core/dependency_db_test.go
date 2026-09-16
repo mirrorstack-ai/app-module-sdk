@@ -72,7 +72,7 @@ func TestDependencyDB_HappyPath(t *testing.T) {
 	if gotReq.Method != http.MethodPost {
 		t.Errorf("method = %q, want POST", gotReq.Method)
 	}
-	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+	if gotReq.URL.Path != "/v1/dispatch/internal/apps/app-uuid-1/read-exposed" {
 		t.Errorf("path = %q, want /internal/apps/app-uuid-1/read-exposed", gotReq.URL.Path)
 	}
 	if got := gotReq.Header.Get("X-MS-Service-Secret"); got != "sess-secret-1" {
@@ -572,7 +572,7 @@ func TestDependencyDB_Result_DeployedFiresInLocalShimNotOnlyRealLambda(t *testin
 		if err != nil {
 			t.Fatalf("proxy read: %v (want a successful dev-tunnel proxy read)", err)
 		}
-		if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+		if gotReq.URL.Path != "/v1/dispatch/internal/apps/app-uuid-1/read-exposed" {
 			t.Errorf("path = %q, want the read-exposed proxy path (proxy branch taken)", gotReq.URL.Path)
 		}
 		if len(res.Rows) != 1 {
@@ -608,7 +608,7 @@ func TestDependencyDB_LocalGateOff_StaysOnProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Result: %v", err)
 	}
-	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+	if gotReq.URL.Path != "/v1/dispatch/internal/apps/app-uuid-1/read-exposed" {
 		t.Errorf("path = %q, want the read-exposed proxy path", gotReq.URL.Path)
 	}
 	var body readExposedRequest
@@ -670,7 +670,7 @@ func TestDependencyDB_ProducerNotColocated_FallsThroughToProxy(t *testing.T) {
 	if asked != "oauth-core" {
 		t.Errorf("directory asked for %q, want the normalized bare ref %q", asked, "oauth-core")
 	}
-	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+	if gotReq.URL.Path != "/v1/dispatch/internal/apps/app-uuid-1/read-exposed" {
 		t.Errorf("path = %q, want the proxy path (directory miss falls through)", gotReq.URL.Path)
 	}
 	// The "no sentinel leaked" guarantee is carried by the t.Fatalf above: it
@@ -696,7 +696,7 @@ func TestDependencyDB_DirectoryReadError_FallsThroughToProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rows: %v (a directory error must degrade to the proxy, not fail the read)", err)
 	}
-	if gotReq.URL.Path != "/internal/apps/app-uuid-1/read-exposed" {
+	if gotReq.URL.Path != "/v1/dispatch/internal/apps/app-uuid-1/read-exposed" {
 		t.Errorf("path = %q, want the proxy path", gotReq.URL.Path)
 	}
 	if rows == nil {
