@@ -5,6 +5,33 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.19] - 2026-09-16
+
+### Fixed
+
+- **A binary response body now survives the envelope.** `runtime.LambdaResponse`
+  carries the body as a Go string, and `encoding/json` substitutes U+FFFD for
+  every invalid UTF-8 sequence — silently, without error. So every binary a
+  module has ever served arrived at the caller with the right shape and the
+  wrong bytes.
+
+  Measured in production on 2026-09-16: video-core's 16-byte AES playback key
+  reached the browser as 28 bytes (six invalid bytes, each replaced by the
+  three-byte replacement rune, `10 + 18`), and the player decrypted every
+  segment to noise. It took three days to find because nothing was wrong at any
+  single layer — the module wrote the right bytes, the platform relayed what it
+  was handed, the CDN served what it was asked for, and every log was green.
+
+  A body that is not valid UTF-8 now travels base64 with `isBase64Encoded` set;
+  a body that IS valid UTF-8 travels exactly as before, unflagged and
+  byte-identical, so nothing that already worked changes. The test is the bytes
+  rather than the Content-Type: a module may serve binary under any type, and a
+  `text/*` body holding invalid UTF-8 is equally corruptible.
+
+  Requires a platform that understands the flag: api-platform's invoker
+  (`moduleinvoke`) was deployed first, on purpose. Reversed, a base64 body
+  would have reached browsers as base64 text.
+
 ## [v0.4.18] - 2026-09-16
 
 ### Fixed
