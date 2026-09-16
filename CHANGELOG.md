@@ -5,6 +5,28 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.18] - 2026-09-16
+
+### Fixed
+
+- **A `uuid` column reaches the consumer as text, not `[16]byte`.** A deployed
+  cross-module read decodes rows with `pgx.RowToMap`, and pgx's default type map
+  has no Go string for OID 2950 — so a `uuid` column arrived as `[16]byte`,
+  every consumer's `row["id"].(string)` yielded `""`, and the zero value
+  travelled as data instead of surfacing as an error.
+
+  Measured in production: a module reading video ids this way served an empty
+  catalogue (every row skipped on the empty id) and reported a fully transcoded
+  video as having no duration, because its facts map keyed itself under `""`
+  while the title from the same row decoded fine.
+
+  Nothing caught it before, because the two planes disagreed: a dev/tunnel read
+  travels as JSON, where a uuid is always a quoted string, so fixtures, local
+  runs and every proxy-path test saw the shape the consumer expects. The
+  normalisation is applied at the one point both planes converge; `uuid[]` is
+  converted element-wise, a NULL uuid stays `nil` rather than becoming the
+  all-zero uuid, and a value that is already text passes through untouched.
+
 ## [v0.4.17] - 2026-09-12
 
 ### Changed
