@@ -105,6 +105,7 @@ func queryDynamicSelect(ctx context.Context, tx pgx.Tx, q DynamicSelect) (_ []ma
 	if err != nil {
 		return nil, false, err
 	}
+	normalizeUUIDValues(out)
 
 	// The SELECT asked for limit+1 rows; an overflow row means truncation.
 	if len(out) > limit {
@@ -192,4 +193,85 @@ func clampDynamicSelectLimit(n int) int {
 	default:
 		return n
 	}
+}
+
+// normalizeUUIDValues rewrites every uuid value a row carries into its canonical
+// 8-4-4-4-12 text form, in place.
+//
+// 🔴 A uuid COLUMN DOES NOT ARRIVE AS A STRING, AND THE CONSUMER THAT ASSUMES
+// IT DOES READS AN EMPTY ROW, NOT AN ERROR (2026-09-16).
+//
+// pgx's default type map has no Go string registered for OID 2950, so
+// RowToMap hands back the codec's native value: [16]byte (measured on
+// v5.9.2 — pgtype.UUIDOID's DecodeValue returns [16]uint8). Every consumer
+// reads these maps with a comma-ok assertion, because a map[string]any has no
+// other affordance:
+//
+//	id, _ := row["id"].(string)   // "" for a uuid, with no second return read
+//
+// The zero value then travels as data. In video-watched it emptied the whole
+// measurable-video catalogue (every row skipped on id == "") and made a
+// completed video report "no duration recorded", because the facts map keyed
+// itself under "" while the title from the same row decoded fine — a defect
+// that looks exactly like missing data and is not.
+//
+// Nothing caught it before production because the two planes disagree: the
+// dev/tunnel read goes out as JSON, where a uuid is always a quoted string, so
+// a fixture, a local run and every proxy-path test see the shape the consumer
+// expects. Only the deployed plane reads pgx values directly. Normalising here
+// — at the one point both planes converge — is what makes the two agree, and it
+// keeps the fix in the SDK rather than in each consumer that has yet to be
+// written.
+//
+// Arrays get the same treatment: a uuid[] decodes to [][16]byte, and an
+// element-wise assertion fails identically.
+func normalizeUUIDValues(rows []map[string]any) {
+	for _, row := range rows {
+		for column, value := range row {
+			row[column] = normalizeUUIDValue(value)
+		}
+	}
+}
+
+// normalizeUUIDValue converts one decoded value if it is a uuid, and returns
+// everything else untouched. A NULL uuid stays nil rather than becoming the
+// all-zero uuid, which would be a row-identifying value invented out of
+// absence.
+func normalizeUUIDValue(value any) any {
+	switch v := value.(type) {
+	case [16]byte:
+		return uuidText(v)
+	case [][16]byte:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = uuidText(v[i])
+		}
+		return out
+	case []any:
+		for i := range v {
+			v[i] = normalizeUUIDValue(v[i])
+		}
+		return v
+	default:
+		return value
+	}
+}
+
+// uuidText renders the canonical lowercase 8-4-4-4-12 form — the same text
+// Postgres prints, the same text the JSON plane carries, and the same text a
+// consumer compares against an id it was given.
+func uuidText(b [16]byte) string {
+	const hexDigits = "0123456789abcdef"
+	out := make([]byte, 36)
+	at := 0
+	for i, octet := range b {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			out[at] = '-'
+			at++
+		}
+		out[at] = hexDigits[octet>>4]
+		out[at+1] = hexDigits[octet&0x0f]
+		at += 2
+	}
+	return string(out)
 }
