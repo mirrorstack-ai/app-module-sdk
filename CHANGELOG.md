@@ -5,6 +5,37 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.20] - 2026-09-17
+
+### Added
+
+- **`n.Optional()` — an optional dependency that is not event-scoped.** The
+  manifest already had the flag: `Dependency.Optional` serializes as
+  `"optional":true`. But `ms.DependsOn` always wrote `false`, and the only
+  thing that wrote `true` was `ms.OptionalDependOn`, which returns an
+  `OnEventOption`. So a module could declare an optional dep only through
+  `ms.OnEvent`. A request-path consumer, such as ad-core resolving member names
+  through user-core, could not say "install me without it."
+
+  ```go
+  ms.DependsOn("user-core@^1", func(n *ms.Need) {
+      n.Optional()
+  })
+  ```
+
+  This is an option on `Need`, not a new function next to `DependsOn`. A new
+  function would need a name one letter or suffix away from `OptionalDependOn`,
+  with a different return type. The merge rule is unchanged: if any declaration
+  of the same dep is required, the dep is required, in either order, and
+  tables and events are merged. The call-time check already reads optional
+  deps, so `ms.CallDependencyPost` and `ms.DependencyDB` accept the dep. The
+  caller handles the case where the dep is missing: when the app has not
+  installed it, those calls fail, and the caller should fall back instead of
+  failing its own request.
+
+  `ms.OptionalDependOn` behaves as before. Calling `n.Optional()` inside it
+  changes nothing.
+
 ## [v0.4.19] - 2026-09-16
 
 ### Fixed
