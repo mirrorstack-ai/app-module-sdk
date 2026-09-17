@@ -661,16 +661,18 @@ func WriteServerError(w http.ResponseWriter, r *http.Request, operation string, 
 
 // Need is the configuration handle passed to DependsOn /
 // OptionalDependOn callbacks. Use n.Table(name) to declare a SELECT
-// request, n.Event(name) to declare an event subscription.
+// request, n.Event(name) to declare an event subscription, and
+// n.Optional() to make a DependsOn dep optional.
 type Need = core.Need
 
 // OnEventOption configures an OnEvent registration.
 type OnEventOption = core.OnEventOption
 
-// DependsOn declares a REQUIRED dependency on the default module. The
-// optional configure callback names what the consumer wants from the
-// dep — relations (n.Table) and events (n.Event). See the core package
-// for the full spec syntax (id or id@constraint).
+// DependsOn declares a dependency on the default module — REQUIRED unless a
+// configure callback calls n.Optional(). The configure callback names what
+// the consumer wants from the dep — relations (n.Table) and events
+// (n.Event). See the core package for the full spec syntax (id or
+// id@constraint).
 func DependsOn(spec string, configure ...func(*Need)) {
 	core.DependsOn(spec, configure...)
 }
