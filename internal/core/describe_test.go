@@ -254,3 +254,78 @@ func TestParseDepSpec_SupportsCommonFormats(t *testing.T) {
 		})
 	}
 }
+
+// ---- Need.Optional: an optional dep that is NOT event-scoped ----
+
+func TestDependsOn_NeedOptional_RegistersOptionalDep(t *testing.T) {
+	t.Parallel()
+
+	// A request-path consumer (ad-core resolving member names through
+	// user-core) must install without the dep. Before Need.Optional the only
+	// way to write Optional:true was ms.OptionalDependOn, which returns an
+	// OnEventOption and so only works inside ms.OnEvent.
+	m, _ := New(Config{ID: "demo"})
+	m.DependsOn("user-core@^1", func(n *Need) {
+		n.Table("members")
+		n.Optional()
+	})
+	deps := m.registry.Dependencies()
+	if len(deps) != 1 {
+		t.Fatalf("len(deps) = %d, want 1", len(deps))
+	}
+	if !deps[0].Optional {
+		t.Error("expected Optional=true for DependsOn with n.Optional()")
+	}
+	if deps[0].ID != "user-core" || deps[0].Version != "^1" {
+		t.Errorf("deps[0] = %+v, want {user-core, ^1, optional}", deps[0])
+	}
+	if !slices.Equal(deps[0].Tables, []string{"members"}) {
+		t.Errorf("Tables = %+v, want [members]", deps[0].Tables)
+	}
+	// The call-time check reads the same declaration: an optional dep still
+	// authorizes ms.CallDependencyPost against it.
+	if !m.declaresDependencyRef("user-core") {
+		t.Error("declaresDependencyRef(user-core) = false for an optional DependsOn dep")
+	}
+}
+
+func TestDependsOn_NeedOptional_RequiredWinsInEitherOrder(t *testing.T) {
+	t.Parallel()
+
+	for _, optionalFirst := range []bool{true, false} {
+		m, _ := New(Config{ID: "demo"})
+		optional := func() { m.DependsOn("user-core", func(n *Need) { n.Optional(); n.Table("a") }) }
+		required := func() { m.DependsOn("user-core", func(n *Need) { n.Table("b") }) }
+		if optionalFirst {
+			optional()
+			required()
+		} else {
+			required()
+			optional()
+		}
+		deps := m.registry.Dependencies()
+		if len(deps) != 1 || deps[0].Optional {
+			t.Errorf("optionalFirst=%v: deps = %+v, want one required entry", optionalFirst, deps)
+			continue
+		}
+		if !slices.Contains(deps[0].Tables, "a") || !slices.Contains(deps[0].Tables, "b") {
+			t.Errorf("optionalFirst=%v: Tables = %+v, want a and b", optionalFirst, deps[0].Tables)
+		}
+	}
+}
+
+func TestOptionalDependOn_NeedOptionalIsANoOp(t *testing.T) {
+	resetDefault(t)
+	m := newTestModuleWithSecret(t, "demo")
+	defaultModule = m
+
+	OnEvent("payment", func(w http.ResponseWriter, r *http.Request) {},
+		OptionalDependOn("@anna/billing@^1", func(n *Need) { n.Optional() }))
+	OnEvent("refund", func(w http.ResponseWriter, r *http.Request) {},
+		OptionalDependOn("@anna/oauth@^1"))
+
+	deps := m.registry.Dependencies()
+	if len(deps) != 2 || !deps[0].Optional || !deps[1].Optional {
+		t.Errorf("deps = %+v, want two optional entries", deps)
+	}
+}
