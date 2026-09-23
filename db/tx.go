@@ -6,8 +6,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 )
 
 // safeRollback runs tx.Rollback with a background context (the request ctx
@@ -21,7 +19,6 @@ func safeRollback(tx pgx.Tx) {
 }
 
 // Tx runs fn inside a transaction. Commits on success, rolls back on error or panic.
-// In an import dry run (dataimport.DryRun) it rolls back on success too.
 //
 // Inside the transaction, search_path and ms.app_id are set transaction-local
 // (SET LOCAL / set_config is_local=true) so they are automatically cleared on
@@ -69,12 +66,6 @@ func Tx(ctx context.Context, pool *pgxpool.Pool, fn func(q Querier) error) error
 	if err := fn(tx); err != nil {
 		safeRollback(tx)
 		return err
-	}
-
-	// An import dry run computes exactly what an apply would, then writes
-	// nothing: the same fn, rolled back instead of committed.
-	if dataimport.DryRun(ctx) {
-		return tx.Rollback(context.Background())
 	}
 
 	// Background context: a canceled request ctx during commit causes Postgres
