@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 )
 
 // capture records what the dispatch usage ingress received for a Record POST.
@@ -774,4 +775,23 @@ func TestRecord_NeverLeaksCredentialIntoError(t *testing.T) {
 			t.Errorf("transport error leaks the module credential: %v", err)
 		}
 	})
+}
+
+// Import mode validates a Record call and then drops it: copying existing data
+// is not usage, so the ingress must never see it.
+func TestRecord_ImportModeNeverReachesIngress(t *testing.T) {
+	c, cap := newDispatchStub(t, http.StatusAccepted)
+	declareCounter(t, c, "transcode.minutes")
+
+	ctx := auth.Set(context.Background(), auth.Identity{AppID: "app_abc", AppRole: "admin"})
+	ctx = dataimport.With(ctx, dataimport.Mode{RunID: "run-1"})
+	if err := c.Record(ctx, "transcode.minutes", 12); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := c.Record(ctx, "not.declared", 1); err == nil {
+		t.Fatal("import mode must still validate the metric")
+	}
+	if got := cap.get().hits; got != 0 {
+		t.Fatalf("ingress hits in import mode = %d, want 0", got)
+	}
 }

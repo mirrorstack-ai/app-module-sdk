@@ -7,6 +7,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
+	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -107,5 +108,29 @@ func TestInjectResources_InvalidActorDelegation(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "contains whitespace") {
 		t.Errorf("error leaked actor delegation: %q", err)
+	}
+}
+
+func TestInjectResources_Import(t *testing.T) {
+	t.Parallel()
+
+	ctx, err := InjectResources(context.Background(), InjectParams{Import: &dataimport.Mode{RunID: "run-1", DryRun: true}})
+	if err != nil {
+		t.Fatalf("InjectResources: %v", err)
+	}
+	if m, ok := dataimport.From(ctx); !ok || m.RunID != "run-1" || !m.DryRun {
+		t.Fatalf("import mode = %+v, %v", m, ok)
+	}
+
+	plain, err := InjectResources(context.Background(), InjectParams{})
+	if err != nil {
+		t.Fatalf("InjectResources: %v", err)
+	}
+	if dataimport.Active(plain) {
+		t.Fatal("a request without Import must not be in import mode")
+	}
+
+	if _, err := InjectResources(context.Background(), InjectParams{Import: &dataimport.Mode{RunID: "bad id"}}); err == nil {
+		t.Fatal("a malformed import run id must be rejected")
 	}
 }
