@@ -79,7 +79,6 @@ func typedInjectParams(req LambdaRequest, trusted invocation.Context) InjectPara
 	return InjectParams{
 		Resources:       req.Resources,
 		Dependencies:    req.Dependencies,
-		Import:          req.Import,
 		UserID:          trusted.Identity.UserID,
 		AppID:           trusted.App.ID,
 		AppRole:         trusted.Identity.AppRole,
@@ -92,7 +91,6 @@ func legacyInjectParams(req LambdaRequest) InjectParams {
 	return InjectParams{
 		Resources:       req.Resources,
 		Dependencies:    req.Dependencies,
-		Import:          req.Import,
 		UserID:          req.UserID,
 		AppID:           req.AppID,
 		AppRole:         req.AppRole,

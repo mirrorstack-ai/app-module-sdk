@@ -6,7 +6,6 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
-	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
@@ -18,7 +17,6 @@ import (
 type InjectParams struct {
 	Resources       *Resources
 	Dependencies    []DependencyGrant
-	Import          *dataimport.Mode
 	UserID          string
 	AppID           string
 	AppRole         string
@@ -71,12 +69,6 @@ func InjectResources(ctx context.Context, p InjectParams) (context.Context, erro
 	// the deployed DependencyDB branch fails closed to its dev-plane-only error.
 	if len(p.Dependencies) > 0 {
 		ctx = db.WithDependencies(ctx, p.Dependencies)
-	}
-	if p.Import != nil {
-		if err := p.Import.Validate(); err != nil {
-			return ctx, err
-		}
-		ctx = dataimport.With(ctx, *p.Import)
 	}
 	if p.UserID != "" || p.AppID != "" || p.AppRole != "" {
 		ctx = auth.Set(ctx, auth.Identity{

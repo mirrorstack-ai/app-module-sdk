@@ -11,8 +11,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 )
 
 func testDB(t *testing.T) *DB {
@@ -494,63 +492,6 @@ func TestIntegration_TxRollback(t *testing.T) {
 	conn.QueryRow(schemaCtx, "SELECT title FROM items LIMIT 1").Scan(&title)
 	if title != "original" {
 		t.Errorf("expected 'original' after rollback, got %q", title)
-	}
-}
-
-// An import dry run runs fn to completion — its reads see its own writes — and
-// then rolls back, so the table is exactly as it was.
-func TestIntegration_TxImportDryRunRollsBack(t *testing.T) {
-	d := testDB(t)
-	ctx := context.Background()
-
-	mustExec(t, d, ctx, "DROP SCHEMA IF EXISTS test_tx_dry CASCADE")
-	mustExec(t, d, ctx, "CREATE SCHEMA test_tx_dry")
-	t.Cleanup(func() { d.Exec(ctx, "DROP SCHEMA IF EXISTS test_tx_dry CASCADE") })
-
-	schemaCtx := WithSchema(ctx, "test_tx_dry")
-	mustExec(t, d, schemaCtx, "CREATE TABLE items (id SERIAL, title TEXT)")
-	mustExec(t, d, schemaCtx, "INSERT INTO items (title) VALUES ('original')")
-
-	count := func(c context.Context) int {
-		conn, release, err := d.Conn(c)
-		if err != nil {
-			t.Fatalf("conn: %v", err)
-		}
-		defer release()
-		var n int
-		if err := conn.QueryRow(c, "SELECT count(*) FROM items").Scan(&n); err != nil {
-			t.Fatalf("count: %v", err)
-		}
-		return n
-	}
-
-	dryCtx := dataimport.With(schemaCtx, dataimport.Mode{RunID: "run-dry", DryRun: true})
-	var seen int
-	err := Tx(dryCtx, d.Pool(), func(q Querier) error {
-		if _, err := q.Exec(dryCtx, "INSERT INTO items (title) VALUES ('imported')"); err != nil {
-			return err
-		}
-		return q.QueryRow(dryCtx, "SELECT count(*) FROM items").Scan(&seen)
-	})
-	if err != nil {
-		t.Fatalf("dry-run Tx: %v", err)
-	}
-	if seen != 2 {
-		t.Fatalf("inside the dry run: %d rows, want 2", seen)
-	}
-	if got := count(schemaCtx); got != 1 {
-		t.Fatalf("after the dry run: %d rows, want 1", got)
-	}
-
-	applyCtx := dataimport.With(schemaCtx, dataimport.Mode{RunID: "run-apply"})
-	if err := Tx(applyCtx, d.Pool(), func(q Querier) error {
-		_, err := q.Exec(applyCtx, "INSERT INTO items (title) VALUES ('imported')")
-		return err
-	}); err != nil {
-		t.Fatalf("apply Tx: %v", err)
-	}
-	if got := count(schemaCtx); got != 2 {
-		t.Fatalf("after the apply: %d rows, want 2", got)
 	}
 }
 
