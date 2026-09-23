@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
+	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 	"github.com/mirrorstack-ai/app-module-sdk/i18n"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
@@ -638,7 +639,13 @@ func resolveUsageURLFor(ctx context.Context, appID string) string {
 // platform deduplicates rather than double-counts. A non-2xx response is an
 // error with the body truncated to ~2 KB; the non-fatal contract (log, don't
 // propagate) is the caller's responsibility.
+//
+// In import mode (dataimport.Active) the event is validated and then dropped:
+// copying existing data is not usage and must never bill.
 func (c *Client) dispatch(ctx context.Context, appID string, event any) error {
+	if dataimport.Active(ctx) {
+		return nil
+	}
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("mirrorstack/meter: marshal event: %w", err)

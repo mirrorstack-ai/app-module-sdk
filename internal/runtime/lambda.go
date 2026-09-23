@@ -15,6 +15,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/cache"
+	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
@@ -77,6 +78,10 @@ type LambdaRequest struct {
 	// backward-compat and old-platform absence (nil → deployed reads stay
 	// dev-plane-only, the rollout gate).
 	Dependencies []DependencyGrant `json:"dependencies,omitempty"`
+	// Import puts the request in data-import mode. The platform sets it only
+	// for a caller holding a short-lived import credential scoped to this app;
+	// omitempty keeps every other request, and old platforms, unchanged.
+	Import *dataimport.Mode `json:"import,omitempty"`
 	// Trusted fields — injected by platform, not from user headers
 	UserID    string `json:"userId,omitempty"`
 	AppID     string `json:"appId,omitempty"`

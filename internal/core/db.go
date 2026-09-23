@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mirrorstack-ai/app-module-sdk/audit"
+	"github.com/mirrorstack-ai/app-module-sdk/dataimport"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/auditstate"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
@@ -58,7 +59,8 @@ func (m *Module) Tx(ctx context.Context, fn func(q db.Querier) error) error {
 	if err != nil {
 		return err
 	}
-	if recordedAudit {
+	if recordedAudit && !dataimport.DryRun(ctx) {
+		// A dry run rolled its audit rows back with everything else.
 		// runAppTx has released the transaction connection and pool-cache
 		// reference. The best-effort drain is allowed to perform outbound HTTP,
 		// so no database mapping from the committed mutation may survive here.

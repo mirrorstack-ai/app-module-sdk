@@ -165,6 +165,29 @@ identity from the original signed invocation. Without one, `audit.Record`
 returns `audit.ErrProvenanceUnavailable` before SQL. See
 [Durable audit records](./concepts/audit.md).
 
+## Data import
+
+A bulk import reaches a module's own import handler with an import-mode flag in
+the context. The platform sets it from the trusted envelope, only for a caller
+holding a short-lived import credential for the app. The contract is
+source-agnostic: the module sees an opaque run id and each row's source key.
+
+| Function | Purpose |
+|---|---|
+| `dataimport.Active(ctx)` / `dataimport.DryRun(ctx)` | Is this request an import, and is it a dry run. An import handler refuses a request that is not `Active`. |
+| `dataimport.Suppressed(ctx, effect)` | Ask before each side effect of a live user action: `LifecycleOutbox`, `MeterOutbox`, `TranscodeMeterOutbox`, `SignupCreditGrant`, `DefaultRoleGrant`. All are suppressed in import mode. `ms.Record` already drops the event (validated, never sent). |
+| `ms.Tx` in a dry run | Runs the same `fn`, then rolls back instead of committing. A write outside `ms.Tx` is not rolled back, so an import write path uses `ms.Tx` only. |
+| `dataimport.NewRow(ctx, sourceKey, sourceHash)` | Start one row's result; then `.Inserted(id)`, `.Updated(id, prior)`, `.Unchanged(id)` or `.Rejected(code)`. Each carries provenance (run id, source key, source hash, dry run). A reason that is not a snake_case code becomes `invalid_reason`, so a row value never leaks into a report. |
+| `dataimport.NewReport(ctx, rows)` | The handler's response: run id, dry run, counts per outcome, rows. |
+
+```go
+if !dataimport.Suppressed(ctx, dataimport.LifecycleOutbox) {
+    if err := q.QueueLifecycleEvent(ctx, ev); err != nil {
+        return err
+    }
+}
+```
+
 ## Cache / Storage / Meter
 
 | Function | Purpose |
