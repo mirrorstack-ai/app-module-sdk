@@ -21,7 +21,7 @@ go test ./...
 
 Requires Go 1.26+.
 
-Questions? Join us on [Discord](https://discord.gg/2JRusWWFec).
+Questions? Join us on [Discord](https://discord.gg/QABqwGnXbc).
 
 ## Branch naming
 
