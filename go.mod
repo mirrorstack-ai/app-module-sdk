@@ -2,6 +2,8 @@ module github.com/mirrorstack-ai/app-module-sdk
 
 go 1.26
 
+toolchain go1.26.10
+
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/aws/aws-lambda-go v1.47.0
