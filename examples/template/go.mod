@@ -3,7 +3,7 @@ module github.com/mirrorstack-ai/app-module-sdk/examples/template
 go 1.26
 
 require (
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/mirrorstack-ai/app-module-sdk v0.0.0
 )
 
