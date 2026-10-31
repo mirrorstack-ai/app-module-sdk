@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/auditoutbox"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/invocationwire"
 )
 
@@ -150,7 +151,7 @@ func deliverAudit(ctx context.Context, delivery auditoutbox.Delivery) (auditDisp
 	deliveryCtx, cancel := context.WithTimeout(ctx, auditDeliveryTimeout)
 	defer cancel()
 	err = postDispatchJSON(deliveryCtx, "ms.Audit",
-		dispatchBaseFor(deliveryCtx)+"/apps/"+url.PathEscape(inv.App.ID)+"/audit",
+		dispatchpath.Join(dispatchBaseFor(deliveryCtx), "/apps/"+url.PathEscape(inv.App.ID)+"/audit"),
 		inv.App.ID,
 		auditIngressEnvelope{
 			V: 1, EventID: delivery.EventID, OccurredAt: delivery.OccurredAt.UTC(),

@@ -25,21 +25,21 @@ func TestResolveEventBusURL_Building(t *testing.T) {
 			dispatch: "",
 			appID:    "a-456",
 			event:    "user.created",
-			want:     devDispatchFallback + "/apps/a-456/events/user.created",
+			want:     devDispatchFallback + "/v1/dispatch/apps/a-456/events/user.created",
 		},
 		{
 			name:     "explicit base",
 			dispatch: "http://dispatch:8083",
 			appID:    "a-456",
 			event:    "user.created",
-			want:     "http://dispatch:8083/apps/a-456/events/user.created",
+			want:     "http://dispatch:8083/v1/dispatch/apps/a-456/events/user.created",
 		},
 		{
 			name:     "trailing slash on base is trimmed",
 			dispatch: "http://dispatch:8083/",
 			appID:    "a-456",
 			event:    "user.created",
-			want:     "http://dispatch:8083/apps/a-456/events/user.created",
+			want:     "http://dispatch:8083/v1/dispatch/apps/a-456/events/user.created",
 		},
 	}
 	for _, tc := range cases {
@@ -78,7 +78,7 @@ func TestEmit_PostsEnvelopeFromContextAppID(t *testing.T) {
 		t.Errorf("method = %q, want POST", gotMethod)
 	}
 	// appID is taken from ctx via auth.Set, encoded into both URL and header.
-	if gotPath != "/apps/a-456/events/payment.captured" {
+	if gotPath != "/v1/dispatch/apps/a-456/events/payment.captured" {
 		t.Errorf("path = %q, want /apps/a-456/events/payment.captured", gotPath)
 	}
 	if gotAppID != "a-456" {
@@ -183,7 +183,7 @@ func TestEmit_Non2xxReturnsErrorWithTruncatedBody(t *testing.T) {
 	if !strings.Contains(msg, "event bus unavailable") {
 		t.Errorf("error %q missing upstream body", msg)
 	}
-	if !strings.Contains(msg, "/apps/a-456/events/payment.captured") {
+	if !strings.Contains(msg, "/v1/dispatch/apps/a-456/events/payment.captured") {
 		t.Errorf("error %q missing request path", msg)
 	}
 }

@@ -35,6 +35,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/i18n"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
@@ -629,7 +630,7 @@ func resolveUsageURLFor(ctx context.Context, appID string) string {
 		base = devDispatchFallback
 	}
 	base = strings.TrimRight(base, "/")
-	return fmt.Sprintf("%s/apps/%s/usage", base, appID)
+	return dispatchpath.Join(base, fmt.Sprintf("/apps/%s/usage", appID))
 }
 
 // dispatch delivers an already-built v1 or v2 envelope to the platform usage
