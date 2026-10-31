@@ -199,6 +199,19 @@ func Lookup(key string) map[string]string {
 	return out
 }
 
+// LookupOr returns the locale map for key, or a single-entry map holding
+// fallback under DefaultLocale when the catalog has nothing. Unlike
+// Label.Resolve, the fallback is the SUPPLIED string, never the key —
+// contribution chrome that degrades to a raw i18n key is worse than one that
+// degrades to source English. The returned map is owned by the caller.
+func LookupOr(key, fallback string) map[string]string {
+	out := Lookup(key)
+	if len(out) == 0 {
+		return map[string]string{DefaultLocale: fallback}
+	}
+	return out
+}
+
 // LookupList resolves a catalog key whose per-locale value packs a LIST of
 // items into one delimited string, returning locale → []item. Each locale's
 // value is split on sep and every element is space-trimmed; empty elements are

@@ -82,6 +82,27 @@ func TestLabel_IsZero(t *testing.T) {
 	}
 }
 
+func TestLookupOr_ReturnsCatalogWhenPresent(t *testing.T) {
+	loadFixture(t)
+
+	got := LookupOr("permissions.users.read", "fallback")
+	if got["en-US"] != "View users" {
+		t.Errorf("en-US = %q, want %q", got["en-US"], "View users")
+	}
+	if got["zh-TW"] != "檢視使用者" {
+		t.Errorf("zh-TW = %q, want %q", got["zh-TW"], "檢視使用者")
+	}
+}
+
+func TestLookupOr_FallsBackToSuppliedStringNotKey(t *testing.T) {
+	loadFixture(t)
+
+	got := LookupOr("permissions.nope", "Fallback Text")
+	if len(got) != 1 || got[DefaultLocale] != "Fallback Text" {
+		t.Errorf("LookupOr(missing) = %v, want {%s: Fallback Text}", got, DefaultLocale)
+	}
+}
+
 func TestLookupList_SplitsTrimsAndDropsEmpties(t *testing.T) {
 	Reset()
 	t.Cleanup(Reset)
