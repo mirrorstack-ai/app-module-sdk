@@ -538,7 +538,7 @@ func assertNoDependencySentinel(t *testing.T, err error) {
 
 // TestDependencyLocal_AppScopeMismatchRefused is the TENANT-ISOLATION lock.
 //
-// app_a722a8a8_..., app_twkpa_edu and app_dev share one database under one
+// app_a722a8a8_..., app_example_edu and app_dev share one database under one
 // superuser role, with no per-app role, no RLS and no app_id column — verified
 // against the live dev Postgres. The schema bound into the read is therefore
 // the ENTIRE cross-app defense, and binding it from only one of the two app
