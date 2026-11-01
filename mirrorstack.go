@@ -22,6 +22,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/core"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
@@ -109,6 +110,25 @@ func Start() error { return core.Start() }
 // DefaultModule returns the default Module created by Init, or nil if Init
 // has not been called.
 func DefaultModule() *Module { return core.DefaultModule() }
+
+// IsDeployed reports whether the process is running on the platform (Lambda
+// request handler or managed task worker) rather than local dev. It is the
+// single source of truth for deployed-vs-local decisions that gate security
+// behavior — e.g. refusing to start without a secret that must be identical
+// across every concurrent deployed instance — so modules should call this
+// instead of re-reading the underlying environment variables themselves.
+//
+// The result is resolved once at process start and does not change for the
+// life of the process. It is always false under the local deploy-sim shim
+// (see internal/core/dependency_db.go): that shim serves deployed invokes
+// over HTTP to a process that is not itself deployed, and per-request
+// deployed decisions must key on the request's own signal, not this one.
+func IsDeployed() bool { return runtime.IsLambda() || runtime.IsOneShot() }
+
+// IsTaskWorker reports whether the process is running as a managed
+// background-task worker, as opposed to a Lambda request handler or local
+// dev. Same process-global caveats as IsDeployed apply.
+func IsTaskWorker() bool { return runtime.IsOneShot() }
 
 // --- HTTP scopes ---
 
