@@ -5,6 +5,14 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Updated the `storage` package's CDN host example comments and tests from
+  `https://media.mirrorstack.ai` to the deployed global CDN host
+  `https://cdn.mirrorstack.ai`. No code or behavior change.
+
 ## [v0.4.20] - 2026-09-17
 
 ### Added
