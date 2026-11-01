@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 )
@@ -356,6 +357,137 @@ func TestContributionStore_DevPlaneUnchanged_Integration(t *testing.T) {
 	}
 	if inSchema("public") {
 		t.Errorf("public.%s exists — a schema-less lifecycle call created a per-app table in the shared schema", table)
+	}
+}
+
+// TestContributionStore_DevPlaneAppScopeSeam_Integration is the SDK half of
+// the app-scope seam that SDK #113/#114 and the api-platform fix in
+// fix/contribution-app-scope (ARCHITECTURE-REVIEW-2026-06-10.md finding C3)
+// introduced. The platform side already asserts that X-MS-App-ID propagates
+// from manifest parse through host resolution to the wire; this test asserts
+// the OTHER end — that devAppSchemaMiddleware, fed nothing but that header,
+// provisions and scopes the real /contrib POST/DELETE routes to
+// app_<id>.<prefix>_contributions.
+//
+// Unlike postContribution/listContributions above (which inject the schema
+// directly via db.WithSchema, modeling the deployed Lambda shim), every
+// request here carries ONLY X-MS-Internal-Secret + X-MS-App-ID and goes
+// through the real mounted router — so a regression that scopes
+// devAppSchemaMiddleware to only some verbs (e.g. GET but not POST, or POST
+// but not DELETE) would leave the row in the wrong schema, or leave the
+// DELETE unable to find it, while both repos' header-propagation and
+// handler-level suites keep passing.
+func TestContributionStore_DevPlaneAppScopeSeam_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	resetDefault(t)
+	dsn, databaseRequired := provisionIntegrationDSN()
+	t.Setenv(devMigrateEnvVar, dsn)
+
+	const moduleID = "mseam00112233445566778899aabbccdd"
+	m := newTestModuleWithSecret(t, moduleID)
+	if !m.devMode {
+		t.Fatal("devMode is false — this test must exercise the dev plane")
+	}
+	m.ProvideSlot(NewContributionSlot[contribTestPayload]("auth-provider"))
+
+	ctx := context.Background()
+	pool, release, err := m.resolvePool(ctx)
+	requireProvisionPostgres(t, databaseRequired, err)
+	defer release()
+	requireProvisionPostgres(t, databaseRequired, pool.Ping(ctx))
+
+	const appID = "f1e2d3c4-b5a6-4788-9900-aabbccddeeff"
+	const otherAppID = "00112233-4455-4677-8899-aabbccddeeff"
+	schema, ok := devAppSchemaName(appID)
+	if !ok {
+		t.Fatalf("derive schema for %s", appID)
+	}
+	otherSchema, ok := devAppSchemaName(otherAppID)
+	if !ok {
+		t.Fatalf("derive schema for %s", otherAppID)
+	}
+	table := moduleID + "_contributions"
+	ident := func(s string) string { return pgx.Identifier{s}.Sanitize() }
+	cleanup := func() {
+		for _, s := range []string{schema, otherSchema} {
+			if _, err := pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+ident(s)+` CASCADE`); err != nil {
+				t.Logf("cleanup %s: %v", s, err)
+			}
+		}
+		if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS public.`+ident(table)); err != nil {
+			t.Logf("cleanup public leak check: %v", err)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	const contributorID = "dddddddd-5555-4555-a555-555555555555"
+	rowExists := func(schema string) bool {
+		t.Helper()
+		var tableExists bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.tables
+				WHERE table_schema = $1 AND table_name = $2
+			)`, schema, table).Scan(&tableExists); err != nil {
+			t.Fatalf("table lookup in %s: %v", schema, err)
+		}
+		if !tableExists {
+			return false
+		}
+		var rowFound bool
+		qualified := pgx.Identifier{schema, table}.Sanitize()
+		if err := pool.QueryRow(ctx, fmt.Sprintf(
+			`SELECT EXISTS (SELECT 1 FROM %s WHERE slot = $1 AND contribution_id = $2)`, qualified),
+			"auth-provider", contributorID).Scan(&rowFound); err != nil {
+			t.Fatalf("row lookup in %s: %v", qualified, err)
+		}
+		return rowFound
+	}
+
+	// devRequest drives the mounted router carrying ONLY the headers the dev
+	// tunnel actually sends: the internal secret (the route's auth gate) and
+	// X-MS-App-ID (what devAppSchemaMiddleware reads). No context injection —
+	// the middleware, and only the middleware, must resolve the schema.
+	devRequest := func(method, path, body string) (int, string) {
+		t.Helper()
+		var reader *strings.Reader
+		if body == "" {
+			reader = strings.NewReader("")
+		} else {
+			reader = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, reader)
+		req.Header.Set(auth.HeaderInternalSecret, "secret")
+		req.Header.Set(auth.HeaderAppID, appID)
+		rec := httptest.NewRecorder()
+		m.Router().ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	// --- POST, driven purely by X-MS-App-ID, must land the row in app_<id> ---
+	registerPath := "/__mirrorstack/contrib/auth-provider/" + contributorID
+	if code, body := devRequest(http.MethodPost, registerPath, `{"label":"Google"}`); code != http.StatusOK {
+		t.Fatalf("register status = %d, body = %s", code, body)
+	}
+	if !rowExists(schema) {
+		t.Fatalf("%s.%s missing contribution %s after POST — devAppSchemaMiddleware did not scope the register call", schema, table, contributorID)
+	}
+	if rowExists(otherSchema) {
+		t.Errorf("contribution %s landed in %s — the dev app-scope seam is not isolating apps on POST", contributorID, otherSchema)
+	}
+	if rowExists("public") {
+		t.Errorf("contribution %s landed in public — a PER-APP row leaked into the shared schema", contributorID)
+	}
+
+	// --- DELETE, same header, must remove the row from that same schema -----
+	if code, body := devRequest(http.MethodDelete, registerPath, ""); code != http.StatusNoContent {
+		t.Fatalf("unregister status = %d, body = %s", code, body)
+	}
+	if rowExists(schema) {
+		t.Errorf("%s.%s still has contribution %s after DELETE — devAppSchemaMiddleware did not scope the unregister call", schema, table, contributorID)
 	}
 }
 
