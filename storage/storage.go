@@ -89,7 +89,7 @@ type Client struct {
 	s3Client  *s3.Client
 	bucket    string
 	prefix    string // "apps/<app>/<module>/"; Credential.validate forbids empty
-	cdnBase   string // "https://media.mirrorstack.ai"
+	cdnBase   string // "https://cdn.mirrorstack.ai"
 	expiresAt time.Time
 	now       func() time.Time
 	provider  CredentialProvider
