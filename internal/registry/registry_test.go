@@ -1,6 +1,10 @@
 package registry
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mirrorstack-ai/app-module-sdk/internal/testutil"
+)
 
 func TestRequireStorageIsExplicitAndIdempotent(t *testing.T) {
 	r := New()
@@ -52,13 +56,10 @@ func TestAddRoute_DropsDuplicates(t *testing.T) {
 func TestAddRoute_PanicsOnUnknownScope(t *testing.T) {
 	t.Parallel()
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for unknown scope")
-		}
-	}()
 	r := New()
-	r.AddRoute(Scope("../etc/passwd"), "GET", "/x")
+	testutil.AssertPanics(t, func() {
+		r.AddRoute(Scope("../etc/passwd"), "GET", "/x")
+	}, "expected panic for unknown scope")
 }
 
 func TestScope_IsValid(t *testing.T) {
@@ -278,12 +279,9 @@ func TestValidateRegistrationName_Rejects(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := New()
-			defer func() {
-				if rec := recover(); rec == nil {
-					t.Errorf("expected panic for AddSubscribe(%q)", tc.bad)
-				}
-			}()
-			r.AddSubscribe(tc.bad, "/events/x")
+			testutil.AssertPanics(t, func() {
+				r.AddSubscribe(tc.bad, "/events/x")
+			}, "expected panic for AddSubscribe(%q)", tc.bad)
 		})
 	}
 }
@@ -424,12 +422,9 @@ func TestAddPermission_PanicsOnInvalidName(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := New()
-			defer func() {
-				if rec := recover(); rec == nil {
-					t.Errorf("expected panic for AddPermission(%q)", tc.bad)
-				}
-			}()
-			r.AddPermission(tc.bad, []string{"admin"})
+			testutil.AssertPanics(t, func() {
+				r.AddPermission(tc.bad, []string{"admin"})
+			}, "expected panic for AddPermission(%q)", tc.bad)
 		})
 	}
 }
@@ -568,12 +563,9 @@ func TestDependencies_ValidateNameRejectsBad(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := New()
-			defer func() {
-				if rec := recover(); rec == nil {
-					t.Errorf("expected panic for AddDependency(%q)", tc.bad)
-				}
-			}()
-			r.AddDependency(Dependency{ID: tc.bad})
+			testutil.AssertPanics(t, func() {
+				r.AddDependency(Dependency{ID: tc.bad})
+			}, "expected panic for AddDependency(%q)", tc.bad)
 		})
 	}
 }
@@ -639,12 +631,9 @@ func TestMCPTool_ValidateNameRejectsBad(t *testing.T) {
 	bad := []string{"", "../etc", "foo/bar", "foo\x00bar"}
 	for _, b := range bad {
 		t.Run(b, func(t *testing.T) {
-			defer func() {
-				if rec := recover(); rec == nil {
-					t.Errorf("expected panic for AddMCPTool name=%q", b)
-				}
-			}()
-			New().AddMCPTool(MCPToolDecl{Name: b})
+			testutil.AssertPanics(t, func() {
+				New().AddMCPTool(MCPToolDecl{Name: b})
+			}, "expected panic for AddMCPTool name=%q", b)
 		})
 	}
 }
