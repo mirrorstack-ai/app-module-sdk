@@ -213,3 +213,33 @@ The SDK mounts these under `/__mirrorstack/` automatically:
 - MCP routes listed above
 
 You don't register these; they come free with `ms.Start()`.
+
+## Testing
+
+`sdktest` (v0.4.8+) is a contract-test helper package for first-party module
+tests. It drives a module's own router through `httptest` so a manifest
+mistake fails a unit test instead of a deploy.
+
+| Function | Purpose |
+|---|---|
+| `sdktest.Manifest(t, handler, internalSecret)` | Requests `GET /__mirrorstack/platform/manifest` against `handler` with the internal-secret header, decodes it into a `system.ManifestPayload`, and fails the test on a non-200 or an undecodable body. |
+| `sdktest.ValidateContributionPayload(host, outbound)` | Checks one contributor manifest entry (`OutboundContribution`) against the exact JSON Schema the host manifest advertises for that slot. |
+| `sdktest.ValidateContributionsToHost(host, contributor, hostReferences...)` | Checks every entry in a contributor manifest that targets `host`, by manifest ID, slug, or an explicit catalog reference (e.g. `@owner/user-core`) passed in `hostReferences`. |
+
+```go
+func TestManifest(t *testing.T) {
+    t.Setenv("MS_INTERNAL_SECRET", "secret")
+    i18n.Reset()
+    t.Cleanup(i18n.Reset)
+
+    ms.Init(ms.Config{ID: "media", Name: "Media", Icon: "perm_media"})
+    ms.RegisterMessages(i18nFS, "i18n")
+    declare.Permissions()
+    routes.Register()
+
+    manifest := sdktest.Manifest(t, ms.DefaultModule().Router(), "secret")
+    if manifest.Defaults.Name != "Media" {
+        t.Fatalf("manifest name = %q", manifest.Defaults.Name)
+    }
+}
+```
