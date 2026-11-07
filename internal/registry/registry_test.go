@@ -7,10 +7,21 @@ func TestRequireStorageIsExplicitAndIdempotent(t *testing.T) {
 	if r.StorageRequired() {
 		t.Fatal("new registry unexpectedly requires storage")
 	}
-	r.RequireStorage()
-	r.RequireStorage()
+	r.RequireStorage(0)
+	r.RequireStorage(0)
 	if !r.StorageRequired() {
 		t.Fatal("RequireStorage did not persist the declaration")
+	}
+	if got := r.StorageMaxUploadBytes(); got != 0 {
+		t.Fatalf("StorageMaxUploadBytes = %d, want 0 (no declaration)", got)
+	}
+}
+
+func TestRequireStorageRecordsMaxUploadBytes(t *testing.T) {
+	r := New()
+	r.RequireStorage(2 << 20)
+	if got := r.StorageMaxUploadBytes(); got != 2<<20 {
+		t.Fatalf("StorageMaxUploadBytes = %d, want %d", got, 2<<20)
 	}
 }
 

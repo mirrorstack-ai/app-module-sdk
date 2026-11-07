@@ -242,13 +242,14 @@ type Registry struct {
 	metrics               []MetricDecl
 	exposedTables         []string
 	description           string
-	readme           map[string]string
+	readme                map[string]string
 	descriptionLabel      i18n.Label // per-locale description (ms.T/ms.Text), resolved at manifest build
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution
 	mcpTools              []MCPToolDecl
 	mcpResources          []MCPResourceDecl
 	storageRequired       bool
+	storageMaxUploadBytes int64
 	absorbInfra           bool
 	ui                    *ModuleUI
 }
@@ -264,10 +265,17 @@ func New() *Registry {
 // namespace. The platform uses this manifest bit as the authorization gate for
 // vending a temporary S3 credential; modules that do not opt in receive no S3
 // access at all.
-func (r *Registry) RequireStorage() {
+//
+// maxUploadBytes is the resolved value of a ms.MaxUpload declaration, or 0 if
+// the module declared none — absent declaration = platform default. It is a
+// plain int64 rather than a storage.RequireOption so this package does not
+// need to depend on the storage package; internal/core resolves the options
+// before calling in.
+func (r *Registry) RequireStorage(maxUploadBytes int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.storageRequired = true
+	r.storageMaxUploadBytes = maxUploadBytes
 }
 
 // AbsorbInfra declares that this module passes EVERY platform infrastructure
@@ -302,6 +310,14 @@ func (r *Registry) StorageRequired() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.storageRequired
+}
+
+// StorageMaxUploadBytes returns the declared ms.MaxUpload ceiling, or 0 if the
+// module declared none.
+func (r *Registry) StorageMaxUploadBytes() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.storageMaxUploadBytes
 }
 
 // SetDescription sets the module's human-readable description. Last-write-wins;

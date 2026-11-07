@@ -728,6 +728,58 @@ a minor because an exported constructor's signature changed.
 
 ## [Unreleased]
 
+### Added
+
+- **`PresignPut` can sign `Content-Length`, and a module can declare its own
+  upload ceiling.** `storage.WithMaxBytes(n)` is a new option —
+  `PresignPut(ctx, key, contentType, expires, storage.WithMaxBytes(n))` — not a
+  positional argument, so this is the dimension that does NOT reshuffle every
+  call site; `PresignPut` has already changed shape twice in a fortnight
+  (expires, then content type) and this is meant to be the last one that does.
+
+  The caller MUST pass the real file size: it is signed as Content-Length the
+  same way content type is signed (mirrorstack-ai/mirrorstack-core-v2#1469's
+  fix, for size instead of type), so a minted URL cannot be used to PUT a
+  different number of bytes than the module asked for. `n <= 0` is refused
+  (`storage.ErrInvalidMaxBytes`).
+
+  `Credential` gains `MaxUploadBytes`, the per-module ceiling the platform
+  vends alongside Bucket/Prefix/CDNBase — env is the wrong home for it because
+  a module Lambda's env is a provision-time snapshot and would need a redeploy
+  to change, while this is resolved from the manifest at publish. A declared
+  size above that ceiling is refused (`storage.ErrUploadTooLarge`), checked via
+  the new `Client.MaxUploadBytes()`. Like `ExpiresAt`, an older platform
+  envelope may omit `MaxUploadBytes`; PresignPut still signs whatever
+  `WithMaxBytes` declares in that case, it just cannot bound it against a
+  ceiling the SDK was never told.
+
+  The module side of the declaration is `ms.RequireStorage(ms.MaxUpload(n))`.
+  Absent declaration = platform default. `MaxUpload` panics on `n <= 0`, like
+  the SDK's other declare-time option validation (`ms.Meter`'s kind rules) —
+  module startup code, not runtime input.
+
+  `CreateMultipart` also accepts `WithMaxBytes` for a declared total, but this
+  is a stated-intent check only, not a cryptographic one: it refuses to START
+  an upload whose declared total already exceeds the ceiling, but each part is
+  an independently signed `UploadPart` request and nothing in S3's API lets one
+  signature bound the SUM of several others, so a multipart upload's actual
+  total bytes remain genuinely unenforced at the signature level. Closing that
+  for real means either a part-count × max-part-size budget enforced by the
+  caller, or moving multipart to a presigned POST policy with
+  `content-length-range` — a bigger, separate change.
+
+  🔴 **Not independently measured against a live bucket for this change.** The
+  issue calls for signing N bytes, then PUTting a different declared length
+  against a dev R2 bucket (expect `SignatureDoesNotMatch`) before relying on
+  this. This SDK's test suite has no dev bucket credentials to run that
+  against; the mechanism here is verified by inspecting `X-Amz-SignedHeaders`
+  (`TestPresignPutSignsContentLengthWhenMaxBytesGiven`) and by reading
+  aws-sdk-go-v2's v4 signer source, which signs Content-Length from
+  `http.Request.ContentLength` rather than from a header — unlike Content-Type,
+  which is why `signContentLength` sets that field directly instead of calling
+  `Header.Set` the way `signContentType` does. Run the two-request experiment
+  against a real dev bucket before depending on this in production.
+
 ### Changed — BREAKING
 
 - **`PresignPut` now takes the content type, and signs it.** The signature is

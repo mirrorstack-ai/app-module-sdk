@@ -27,6 +27,21 @@ func TestStorageRequiresDeclarationBeforeResolving(t *testing.T) {
 	}
 }
 
+func TestRequireStorageRecordsMaxUploadDeclaration(t *testing.T) {
+	m := &Module{config: Config{ID: "media"}, registry: registry.New()}
+
+	m.RequireStorage()
+	if got := m.registry.StorageMaxUploadBytes(); got != 0 {
+		t.Fatalf("no ms.MaxUpload declared: StorageMaxUploadBytes() = %d, want 0", got)
+	}
+
+	m2 := &Module{config: Config{ID: "media"}, registry: registry.New()}
+	m2.RequireStorage(storage.MaxUpload(2 << 20))
+	if got := m2.registry.StorageMaxUploadBytes(); got != 2<<20 {
+		t.Fatalf("StorageMaxUploadBytes() = %d, want %d", got, 2<<20)
+	}
+}
+
 func TestResolveStorageUnderLambdaWithoutCredential(t *testing.T) {
 	t.Setenv(lambdaenv.VarName, "test-function")
 	m := &Module{config: Config{ID: "media"}}

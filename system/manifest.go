@@ -113,6 +113,10 @@ type ClientSpec struct {
 // encoded as {} so old modules remain explicitly resource-free.
 type ManifestResources struct {
 	Storage bool `json:"storage,omitempty"`
+	// MaxUploadBytes is the module's declared ms.MaxUpload ceiling. Omitted
+	// when the module declared none — absent declaration = platform default,
+	// not zero.
+	MaxUploadBytes int64 `json:"maxUploadBytes,omitempty"`
 }
 
 // ManifestMCP declares the MCP tool and resource surface of the module. The
@@ -349,7 +353,7 @@ func BuildManifest(id, slug, name, icon string, tags []string, sqlFS fs.FS, vers
 		Schedules:         reg.Schedules(),
 		Tasks:             reg.Tasks(),
 		Permissions:       reg.Permissions(),
-		Resources:         ManifestResources{Storage: reg.StorageRequired()},
+		Resources:         ManifestResources{Storage: reg.StorageRequired(), MaxUploadBytes: reg.StorageMaxUploadBytes()},
 		Metrics:           reg.Metrics(),
 		AbsorbInfra:       reg.AbsorbsInfra(),
 		MCP:               buildManifestMCP(reg),

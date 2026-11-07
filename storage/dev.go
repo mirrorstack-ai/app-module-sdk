@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,7 +50,17 @@ type DevConfig struct {
 	RoleARN         string // S3_STS_ROLE_ARN
 	AccessKeyID     string // AWS_ACCESS_KEY_ID
 	SecretAccessKey string // AWS_SECRET_ACCESS_KEY
+	// MaxUploadBytes stands in for api-platform's per-module ms.MaxUpload
+	// declaration, which dev has no publish step to resolve. S3_MAX_UPLOAD_BYTES
+	// overrides it; otherwise defaultDevMaxUploadBytes applies so dev exercises
+	// the same ceiling-checking code path as production.
+	MaxUploadBytes int64
 }
+
+// defaultDevMaxUploadBytes is the dev-only stand-in ceiling. It is not the
+// platform default — it exists only so `mirrorstack dev` presigns carry a
+// ceiling without a real publish step.
+const defaultDevMaxUploadBytes = 100 << 20
 
 // DevConfigFromEnv reads the explicitly configured local plane. Decision 03
 // forbids an AWS fallback: that fallback previously waited on EC2 IMDS and
@@ -93,6 +104,14 @@ func DevConfigFromEnv() (DevConfig, error) {
 	}
 	if cfg.CDNBase == "" {
 		cfg.CDNBase = strings.TrimRight(cfg.PublicEndpoint, "/") + "/" + cfg.Bucket
+	}
+	cfg.MaxUploadBytes = defaultDevMaxUploadBytes
+	if raw := os.Getenv("S3_MAX_UPLOAD_BYTES"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			return DevConfig{}, fmt.Errorf("mirrorstack/storage: S3_MAX_UPLOAD_BYTES must be a positive integer, got %q", raw)
+		}
+		cfg.MaxUploadBytes = n
 	}
 	return cfg, nil
 }
@@ -208,7 +227,8 @@ func (m *DevMinter) mint(ctx context.Context, cacheKey, appID, moduleID string) 
 		return Credential{}, fmt.Errorf("mirrorstack/storage: dev STS returned incomplete credentials")
 	}
 	cred := Credential{Bucket: m.cfg.Bucket, Region: m.cfg.Region, Prefix: prefix, CDNBase: m.cfg.CDNBase,
-		AccessKeyID: *out.Credentials.AccessKeyId, SecretAccessKey: *out.Credentials.SecretAccessKey,
+		MaxUploadBytes: m.cfg.MaxUploadBytes,
+		AccessKeyID:    *out.Credentials.AccessKeyId, SecretAccessKey: *out.Credentials.SecretAccessKey,
 		ExpiresAt: *out.Credentials.Expiration}
 	if out.Credentials.SessionToken != nil {
 		cred.SessionToken = *out.Credentials.SessionToken
