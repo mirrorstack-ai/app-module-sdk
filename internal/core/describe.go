@@ -37,19 +37,14 @@ import (
 // Panics on an invalid SemVer constraint — programmer error, not
 // runtime input.
 //
-// For OPTIONAL deps (the consumer's handler only runs when the dep is
-// installed — typically an event subscription), use ms.OptionalDependOn
-// inside the handler-registration call.
+// For OPTIONAL deps there are two shapes. When the code that uses the dep
+// is an event subscription, use ms.OptionalDependOn inside the ms.OnEvent
+// call. When it is an ordinary call or read that must degrade without the
+// dep, call n.Optional() in the configure callback:
+//
+//	ms.DependsOn("user-core@^1", func(n *ms.Need) { n.Optional() })
 func (m *Module) DependsOn(spec string, configure ...func(*Need)) {
-	id, constraint := parseDepSpec(spec)
-	tables, events := configureNeed(configure)
-	m.registry.AddDependency(registry.Dependency{
-		ID:       id,
-		Version:  constraint,
-		Optional: false,
-		Tables:   tables,
-		Events:   events,
-	})
+	m.registry.AddDependency(newDependency(spec, configure))
 }
 
 // OptionalDependOn declares an OPTIONAL dependency. Returns an
@@ -70,17 +65,30 @@ func (m *Module) DependsOn(spec string, configure ...func(*Need)) {
 // required via DependsOn elsewhere, required wins for the optional
 // flag, but Tables/Events still merge.
 func OptionalDependOn(spec string, configure ...func(*Need)) OnEventOption {
-	id, constraint := parseDepSpec(spec)
-	tables, events := configureNeed(configure)
-	dep := registry.Dependency{
-		ID:       id,
-		Version:  constraint,
-		Optional: true,
-		Tables:   tables,
-		Events:   events,
-	}
+	dep := newDependency(spec, configure)
+	dep.Optional = true
 	return func(o *onEventOptions) {
 		o.optionalDeps = append(o.optionalDeps, dep)
+	}
+}
+
+// newDependency parses spec, runs each configure callback against a fresh
+// Need, and returns the registry entry shared by DependsOn and
+// OptionalDependOn.
+func newDependency(spec string, configure []func(*Need)) registry.Dependency {
+	id, constraint := parseDepSpec(spec)
+	n := &Need{}
+	for _, fn := range configure {
+		if fn != nil {
+			fn(n)
+		}
+	}
+	return registry.Dependency{
+		ID:       id,
+		Version:  constraint,
+		Optional: n.optional,
+		Tables:   n.tables,
+		Events:   n.events,
 	}
 }
 

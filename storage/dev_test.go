@@ -288,7 +288,7 @@ func TestPresignUsesPublicEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := c.PresignPut(context.Background(), "video.mp4", time.Minute)
+	raw, err := c.PresignPut(context.Background(), "video.mp4", "video/mp4", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

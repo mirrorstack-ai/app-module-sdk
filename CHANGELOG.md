@@ -5,6 +5,95 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.20] - 2026-09-17
+
+### Added
+
+- **`n.Optional()` — an optional dependency that is not event-scoped.** The
+  manifest already had the flag: `Dependency.Optional` serializes as
+  `"optional":true`. But `ms.DependsOn` always wrote `false`, and the only
+  thing that wrote `true` was `ms.OptionalDependOn`, which returns an
+  `OnEventOption`. So a module could declare an optional dep only through
+  `ms.OnEvent`. A request-path consumer, such as ad-core resolving member names
+  through user-core, could not say "install me without it."
+
+  ```go
+  ms.DependsOn("user-core@^1", func(n *ms.Need) {
+      n.Optional()
+  })
+  ```
+
+  This is an option on `Need`, not a new function next to `DependsOn`. A new
+  function would need a name one letter or suffix away from `OptionalDependOn`,
+  with a different return type. The merge rule is unchanged: if any declaration
+  of the same dep is required, the dep is required, in either order, and
+  tables and events are merged. The call-time check already reads optional
+  deps, so `ms.CallDependencyPost` and `ms.DependencyDB` accept the dep. The
+  caller handles the case where the dep is missing: when the app has not
+  installed it, those calls fail, and the caller should fall back instead of
+  failing its own request.
+
+  `ms.OptionalDependOn` behaves as before. Calling `n.Optional()` inside it
+  changes nothing.
+
+## [v0.4.19] - 2026-09-16
+
+### Fixed
+
+- **A binary response body now survives the envelope.** `runtime.LambdaResponse`
+  carries the body as a Go string, and `encoding/json` substitutes U+FFFD for
+  every invalid UTF-8 sequence — silently, without error. So every binary a
+  module has ever served arrived at the caller with the right shape and the
+  wrong bytes.
+
+  Measured in production on 2026-09-16: video-core's 16-byte AES playback key
+  reached the browser as 28 bytes (six invalid bytes, each replaced by the
+  three-byte replacement rune, `10 + 18`), and the player decrypted every
+  segment to noise. It took three days to find because nothing was wrong at any
+  single layer — the module wrote the right bytes, the platform relayed what it
+  was handed, the CDN served what it was asked for, and every log was green.
+
+  A body that is not valid UTF-8 now travels base64 with `isBase64Encoded` set;
+  a body that IS valid UTF-8 travels exactly as before, unflagged and
+  byte-identical, so nothing that already worked changes. The test is the bytes
+  rather than the Content-Type: a module may serve binary under any type, and a
+  `text/*` body holding invalid UTF-8 is equally corruptible.
+
+  Requires a platform that understands the flag: api-platform's invoker
+  (`moduleinvoke`) was deployed first, on purpose. Reversed, a base64 body
+  would have reached browsers as base64 text.
+
+## [v0.4.18] - 2026-09-16
+
+### Fixed
+
+- **A `uuid` column reaches the consumer as text, not `[16]byte`.** A deployed
+  cross-module read decodes rows with `pgx.RowToMap`, and pgx's default type map
+  has no Go string for OID 2950 — so a `uuid` column arrived as `[16]byte`,
+  every consumer's `row["id"].(string)` yielded `""`, and the zero value
+  travelled as data instead of surfacing as an error.
+
+  Measured in production: a module reading video ids this way served an empty
+  catalogue (every row skipped on the empty id) and reported a fully transcoded
+  video as having no duration, because its facts map keyed itself under `""`
+  while the title from the same row decoded fine.
+
+  Nothing caught it before, because the two planes disagreed: a dev/tunnel read
+  travels as JSON, where a uuid is always a quoted string, so fixtures, local
+  runs and every proxy-path test saw the shape the consumer expects. The
+  normalisation is applied at the one point both planes converge; `uuid[]` is
+  converted element-wise, a NULL uuid stays `nil` rather than becoming the
+  all-zero uuid, and a value that is already text passes through untouched.
+
+## [v0.4.17] - 2026-09-12
+
+### Changed
+
+- **License: FSL-1.1-ALv2 → Apache-2.0.** The SDK is now open source under the
+  Apache License 2.0, so pkg.go.dev can display its documentation. Earlier
+  releases remain under FSL-1.1-ALv2. (`v0.4.16` was tagged by hand without a
+  VERSION bump, so this release skips to `v0.4.17`.)
+
 ## [v0.4.15] - 2026-09-08
 
 A dev-mounted module can now ship its own README. It is a **PATCH**.
@@ -636,6 +725,33 @@ a minor because an exported constructor's signature changed.
   those veto classification, which silently dropped the actor delegation header
   on `ms.Call` and hard-rejected `ms.CallDependency` — it hit the OAuth
   authorize-url hop, whose query is an encoded redirect URI, every time.
+
+## [Unreleased]
+
+### Changed — BREAKING
+
+- **`PresignPut` now takes the content type, and signs it.** The signature is
+  `PresignPut(ctx, key, contentType string, expires time.Duration)`, and
+  `storage.Storer` changes with it, so every caller is found by the compiler.
+
+  🔴 **The old form could not enforce anything.** The type was absent from the
+  signed request, so a module's allow-list — every first-party module has one —
+  decided the *extension of the key* and nothing about the bytes or the type the
+  object would be served with. An uploader could name a `.png` key and store
+  `image/svg+xml` on it, and the CDN replayed that stored type cross-origin from
+  an origin that also serves module JS bundles
+  (mirrorstack-ai/mirrorstack-core-v2#1469).
+
+  Setting `PutObjectInput.ContentType` alone is NOT enough and the tests say so:
+  measured against this SDK, it yields `X-Amz-SignedHeaders=host` — the field is
+  dropped from the presigned URL. A Build-phase middleware puts the header on the
+  request before the signer runs, which is what lands it in the signature.
+
+  **Migration**: pass the type you already validated. An empty content type is
+  refused with `storage.ErrContentTypeRequired` rather than defaulted — a caller
+  that does not know what it is accepting cannot make this decision safely, and
+  "whatever the client says" is the state this change ends. The uploading client
+  must send the same `Content-Type` header on its PUT; browsers already do.
 
 ## [v0.4.0] - 2026-08-06
 

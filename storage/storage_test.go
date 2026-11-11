@@ -307,3 +307,59 @@ func TestCredential_Validate(t *testing.T) {
 		})
 	}
 }
+
+// 🔴 THE CONTENT TYPE MUST BE IN THE SIGNATURE, NOT JUST IN THE REQUEST.
+//
+// A presigned PUT enforces exactly the headers it signed. While the type was
+// absent from PutObjectInput, the client chose it: a module allow-list that
+// "only accepts png, jpeg, webp" decided the extension of the KEY and nothing
+// about the bytes, so an uploader could store image/svg+xml on a .png key and
+// have the CDN replay it cross-origin (core-v2#1469).
+//
+// The assertion is on X-Amz-SignedHeaders because that is what S3 will check.
+// A test that only inspected PutObjectInput would pass against a client that
+// built the field and never signed it.
+func TestPresignPutSignsTheContentType(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute)
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := u.Query().Get("X-Amz-SignedHeaders")
+	if !strings.Contains(signed, "content-type") {
+		t.Fatalf("X-Amz-SignedHeaders = %q, want it to include content-type — without it S3 accepts "+
+			"a PUT declaring any type at all, and the caller's allow-list decides nothing", signed)
+	}
+}
+
+// A caller that does not know what it is accepting cannot make this decision
+// safely, and a default — octet-stream, or "whatever the client says" — is the
+// state the parameter exists to end. So an empty type is refused.
+func TestPresignPutRefusesAnEmptyContentType(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, contentType := range []string{"", "   "} {
+		if _, err := c.PresignPut(context.Background(), "icon.png", contentType, time.Minute); !errors.Is(err, ErrContentTypeRequired) {
+			t.Errorf("PresignPut(%q) error = %v, want ErrContentTypeRequired", contentType, err)
+		}
+	}
+}

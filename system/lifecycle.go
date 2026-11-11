@@ -172,11 +172,16 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 	ctx := r.Context()
 	var req InstallRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if errors.Is(err, io.EOF) {
-			return ctx, true
+		if !errors.Is(err, io.EOF) {
+			writeBodyDecodeError(w, err)
+			return ctx, false
 		}
-		writeBodyDecodeError(w, err)
-		return ctx, false
+		// An empty body is the dev path's legitimate shape, and it falls
+		// THROUGH to the shared folder rather than returning here: an absent
+		// body and a body with no schema are the same request as far as
+		// search_path is concerned, so they must meet the same gate. Returning
+		// early let the emptiest body of all skip the check below.
+		req = InstallRequest{}
 	}
 	return injectLifecycleContext(w, ctx, req)
 }
@@ -189,6 +194,34 @@ func injectInstallContext(w http.ResponseWriter, r *http.Request) (context.Conte
 // Returns ok=false after writing a 500 when the env DB base cannot be
 // resolved; callers must return without touching w again.
 func injectLifecycleContext(w http.ResponseWriter, ctx context.Context, req InstallRequest) (context.Context, bool) {
+	// 🔴 A DEPLOYED lifecycle call with no schema is refused, never run.
+	//
+	// Schema is optional because the dev/tunnel path legitimately omits it: the
+	// module owns its DATABASE_URL there and ensureSchemaMigrated creates the
+	// per-app schema itself. On Lambda neither is true. Nothing sets
+	// search_path, so the migrations run against whatever the connection's
+	// default resolves to — and the failure mode is not a clean error but a
+	// question of luck: Postgres answers 3F000 "no schema has been selected to
+	// create in" when it resolves to nothing, and CREATES THE TABLES IN THE
+	// WRONG SCHEMA when it happens to resolve to something.
+	//
+	// The platform cannot send this body today — ModuleLifecycleClient.Install
+	// refuses an empty p.Schema, and the deployed branch of deliverLifecycle
+	// calls payload("") precisely to attach schema + credential. That is the
+	// argument for the guard rather than against it: this is the shape that
+	// should be impossible, so the honest response to receiving it is to refuse
+	// and say so, not to migrate something and report success. A module that
+	// answers 200 here has told the platform its schema is at version N, and
+	// the platform pins that watermark without ever checking which database
+	// answered (mirrorstack-core-v2#1609).
+	if refuseDeployedWithoutSchema(onLambda(), req.Schema) {
+		httputil.JSON(w, http.StatusBadRequest, httputil.ErrorResponse{
+			Error: "lifecycle: refusing a deployed migration with no schema in the request body — " +
+				"the app schema is not optional off the dev path, and running the migrations " +
+				"without one would apply them to whatever search_path resolves to",
+		})
+		return ctx, false
+	}
 	if req.Schema != "" {
 		ctx = db.WithSchema(ctx, req.Schema)
 	}
@@ -208,6 +241,20 @@ func injectLifecycleContext(w http.ResponseWriter, ctx context.Context, req Inst
 		ctx = db.WithCredential(ctx, base)
 	}
 	return ctx, true
+}
+
+// onLambda is runtime.IsLambda behind one indirection, and it exists for a
+// reason worth stating: runtime.IsLambda is resolved ONCE at process start from
+// the runtime's own environment variable, so nothing in a test can move it. The
+// guard below would therefore only ever be observable in its OFF position —
+// and a gate nobody has seen refuse is a gate that ships inert. Swapped by the
+// tests, never by production code.
+var onLambda = runtime.IsLambda
+
+// refuseDeployedWithoutSchema reports whether a lifecycle body must be refused
+// rather than run: on Lambda, with no schema to put on search_path.
+func refuseDeployedWithoutSchema(deployed bool, schema string) bool {
+	return deployed && schema == ""
 }
 
 // writeBodyDecodeError maps a JSON body decode failure onto the lifecycle

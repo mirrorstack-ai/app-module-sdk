@@ -2,6 +2,8 @@ module github.com/mirrorstack-ai/app-module-sdk
 
 go 1.26
 
+toolchain go1.26.10
+
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/aws/aws-lambda-go v1.47.0
@@ -9,7 +11,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.98.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/aws/smithy-go v1.24.2
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/invopop/jsonschema v0.13.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/redis/go-redis/v9 v9.18.0
@@ -26,7 +29,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.21 // indirect
-	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

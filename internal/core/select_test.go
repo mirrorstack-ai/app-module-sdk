@@ -116,3 +116,52 @@ func TestBuildDynamicSelect_RequiresColumnsAndFilterValues(t *testing.T) {
 		t.Errorf("empty filter values: err = nil, want error")
 	}
 }
+
+// TestNormalizeUUIDValues_DecodedShape asserts on the shape pgx ACTUALLY
+// returns for a uuid column, not on a shape a fixture invented.
+//
+// The control is the second row: a uuid that already arrived as text (the
+// JSON/dev-proxy plane) must pass through untouched, so the two planes agree
+// rather than one of them being rewritten twice.
+func TestNormalizeUUIDValues_DecodedShape(t *testing.T) {
+	raw := [16]byte{0x3b, 0xc6, 0xdb, 0xe1, 0xc5, 0xb8, 0x4d, 0x77, 0x9d, 0xa5, 0x2d, 0xeb, 0x1c, 0xcc, 0xcf, 0x4e}
+	const want = "3bc6dbe1-c5b8-4d77-9da5-2deb1ccccf4e"
+
+	rows := []map[string]any{
+		{"id": raw, "title": "a video", "duration_sec": 154.2, "deleted_at": nil},
+		{"id": "already-text", "tags": [][16]byte{raw}},
+	}
+	normalizeUUIDValues(rows)
+
+	if got, ok := rows[0]["id"].(string); !ok || got != want {
+		t.Errorf("id = %#v (%T), want the canonical text %q", rows[0]["id"], rows[0]["id"], want)
+	}
+	if rows[0]["title"] != "a video" || rows[0]["duration_sec"] != 154.2 || rows[0]["deleted_at"] != nil {
+		t.Errorf("non-uuid columns were rewritten: %#v", rows[0])
+	}
+	if rows[1]["id"] != "already-text" {
+		t.Errorf("a value that is already text must pass through, got %#v", rows[1]["id"])
+	}
+	tags, ok := rows[1]["tags"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != want {
+		t.Errorf("uuid[] = %#v, want []any{%q}", rows[1]["tags"], want)
+	}
+}
+
+// TestUUIDText_CanonicalForm locks the rendering: lowercase hex in the
+// 8-4-4-4-12 grouping Postgres prints, including the leading zeros a %x drops.
+func TestUUIDText_CanonicalForm(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   [16]byte
+		want string
+	}{
+		{"zero", [16]byte{}, "00000000-0000-0000-0000-000000000000"},
+		{"leading zero octets", [16]byte{0x00, 0x0f, 0x00, 0x01}, "000f0001-0000-0000-0000-000000000000"},
+		{"all set", [16]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, "ffffffff-ffff-ffff-ffff-ffffffffffff"},
+	} {
+		if got := uuidText(tc.in); got != tc.want {
+			t.Errorf("%s: uuidText = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
