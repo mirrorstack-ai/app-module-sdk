@@ -202,7 +202,20 @@ func Storage(ctx context.Context) (storage.Storer, error) { return core.Storage(
 // RequireStorage declares that this module needs its per-app object-storage
 // namespace. Call it during startup before Start; the platform vends storage
 // credentials only to modules whose manifest contains this declaration.
-func RequireStorage() { core.RequireStorage() }
+//
+//	ms.RequireStorage()                      // platform default ceiling
+//	ms.RequireStorage(ms.MaxUpload(2 << 20)) // this module caps uploads at 2 MiB
+func RequireStorage(opts ...RequireOption) { core.RequireStorage(opts...) }
+
+// RequireOption configures ms.RequireStorage.
+type RequireOption = storage.RequireOption
+
+// MaxUpload declares the largest file this module will ever ask a presigned
+// PUT (ms.Storage's PresignPut, with storage.WithMaxBytes) to accept. Recorded
+// in the manifest at publish and vended back as the per-module ceiling that
+// WithMaxBytes checks declared sizes against. Absent declaration = platform
+// default.
+func MaxUpload(n int64) RequireOption { return storage.MaxUpload(n) }
 
 // --- Gated CDN delivery ---
 

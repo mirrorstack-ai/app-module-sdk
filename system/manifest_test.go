@@ -106,13 +106,27 @@ func TestManifest_StorageDeclarationIsExplicit(t *testing.T) {
 	}
 
 	withStorage := registry.New()
-	withStorage.RequireStorage()
+	withStorage.RequireStorage(0)
 	storageRec := manifestResponse(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withStorage, nil))
 	if !decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withStorage, nil)).Resources.Storage {
 		t.Fatal("storage declaration missing from manifest")
 	}
 	if baseRec.Header().Get("X-MS-Manifest-Hash") == storageRec.Header().Get("X-MS-Manifest-Hash") {
 		t.Fatal("manifest hash did not change after declaring storage")
+	}
+}
+
+func TestManifest_StorageMaxUploadBytesIsVendorOptIn(t *testing.T) {
+	noCeiling := registry.New()
+	noCeiling.RequireStorage(0)
+	if got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, noCeiling, nil)).Resources.MaxUploadBytes; got != 0 {
+		t.Fatalf("Resources.MaxUploadBytes = %d, want 0 (no ms.MaxUpload declared)", got)
+	}
+
+	withCeiling := registry.New()
+	withCeiling.RequireStorage(2 << 20)
+	if got := decodeManifest(t, ManifestHandler("media", "", "Media", "perm_media", nil, nil, nil, withCeiling, nil)).Resources.MaxUploadBytes; got != 2<<20 {
+		t.Fatalf("Resources.MaxUploadBytes = %d, want %d", got, 2<<20)
 	}
 }
 

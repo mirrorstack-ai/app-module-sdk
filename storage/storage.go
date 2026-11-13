@@ -37,14 +37,14 @@ import (
 // so a module should not need a type assertion to do it. Pre-1.0, and *Client is
 // the only implementation in the workspace.
 type Storer interface {
-	PresignPut(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
+	PresignPut(ctx context.Context, key, contentType string, expires time.Duration, opts ...PutOption) (string, error)
 	PresignGet(ctx context.Context, key string, expires time.Duration) (string, error)
 	// Get reads an object the MODULE needs, over the S3 API. Distinct from
 	// PresignGet, which builds a URL for a VIEWER against the client-facing
 	// endpoint — an address the module itself may not be able to reach.
 	Get(ctx context.Context, key string) ([]byte, error)
 	URL(key string) (string, error)
-	CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error)
+	CreateMultipart(ctx context.Context, key, contentType string, opts ...PutOption) (*MultipartUpload, error)
 }
 
 // validateKey is hygiene for CDN URL normalization. Browsers normalize paths
@@ -85,32 +85,42 @@ func (c *Client) requireCredential() error {
 
 // Client wraps an S3 presigner with app-scoped key prefix and CDN base URL.
 type Client struct {
-	presigner *s3.PresignClient
-	s3Client  *s3.Client
-	bucket    string
-	prefix    string // "apps/<app>/<module>/"; Credential.validate forbids empty
-	cdnBase   string // "https://media.mirrorstack.ai"
-	expiresAt time.Time
-	now       func() time.Time
-	provider  CredentialProvider
-	scope     renewableScope
-	mu        sync.Mutex
+	presigner      *s3.PresignClient
+	s3Client       *s3.Client
+	bucket         string
+	prefix         string // "apps/<app>/<module>/"; Credential.validate forbids empty
+	cdnBase        string // "https://media.mirrorstack.ai"
+	maxUploadBytes int64  // per-module ceiling from the vend; 0 = unknown (older platform envelope)
+	expiresAt      time.Time
+	now            func() time.Time
+	provider       CredentialProvider
+	scope          renewableScope
+	mu             sync.Mutex
 }
+
+// MaxUploadBytes returns the per-module upload ceiling carried by the vended
+// credential, or 0 if the platform did not vend one (an older envelope, or a
+// module that declared no ms.MaxUpload and received no platform default). A
+// module can use this to show its own limit in its UI before the user even
+// picks a file.
+func (c *Client) MaxUploadBytes() int64 { return c.maxUploadBytes }
 
 // renewableScope retains only immutable resource coordinates. Temporary AWS
 // key material must live solely in the AWS credential callback, not in a
 // long-lived client field copied by ForApp.
 type renewableScope struct {
-	bucket  string
-	region  string
-	prefix  string
-	cdnBase string
+	bucket         string
+	region         string
+	prefix         string
+	cdnBase        string
+	maxUploadBytes int64
 }
 
 func scopeFromCredential(credential Credential) renewableScope {
 	return renewableScope{
 		bucket: credential.Bucket, region: credential.Region,
 		prefix: credential.Prefix, cdnBase: credential.CDNBase,
+		maxUploadBytes: credential.MaxUploadBytes,
 	}
 }
 
@@ -180,13 +190,14 @@ func newClient(cred Credential, internalEndpoint, publicEndpoint string) (*Clien
 		presignClient = makeS3(publicEndpoint)
 	}
 	return &Client{
-		presigner: s3.NewPresignClient(presignClient),
-		s3Client:  s3Client,
-		bucket:    cred.Bucket,
-		prefix:    cred.Prefix,
-		cdnBase:   cred.CDNBase,
-		expiresAt: cred.ExpiresAt,
-		now:       time.Now,
+		presigner:      s3.NewPresignClient(presignClient),
+		s3Client:       s3Client,
+		bucket:         cred.Bucket,
+		prefix:         cred.Prefix,
+		cdnBase:        cred.CDNBase,
+		maxUploadBytes: cred.MaxUploadBytes,
+		expiresAt:      cred.ExpiresAt,
+		now:            time.Now,
 	}, nil
 }
 
@@ -204,7 +215,7 @@ func (p *awsRenewableProvider) Retrieve(ctx context.Context) (aws.Credentials, e
 	if err := current.validate(); err != nil {
 		return aws.Credentials{}, err
 	}
-	if current.Bucket != p.scope.bucket || current.Region != p.scope.region || current.Prefix != p.scope.prefix || current.CDNBase != p.scope.cdnBase {
+	if current.Bucket != p.scope.bucket || current.Region != p.scope.region || current.Prefix != p.scope.prefix || current.CDNBase != p.scope.cdnBase || current.MaxUploadBytes != p.scope.maxUploadBytes {
 		return aws.Credentials{}, fmt.Errorf("mirrorstack/storage: renewable credential changed storage scope")
 	}
 	if p.client != nil {
@@ -221,7 +232,7 @@ func (p *awsRenewableProvider) Retrieve(ctx context.Context) (aws.Credentials, e
 
 func newClientWithAWSProvider(initial Credential, provider CredentialProvider) (*Client, error) {
 	scope := scopeFromCredential(initial)
-	c := &Client{bucket: initial.Bucket, prefix: initial.Prefix, cdnBase: initial.CDNBase, expiresAt: initial.ExpiresAt, now: time.Now, provider: provider, scope: scope}
+	c := &Client{bucket: initial.Bucket, prefix: initial.Prefix, cdnBase: initial.CDNBase, maxUploadBytes: initial.MaxUploadBytes, expiresAt: initial.ExpiresAt, now: time.Now, provider: provider, scope: scope}
 	awsProvider := &awsRenewableProvider{provider: provider, scope: scope, client: c}
 	cfg := aws.Config{Region: initial.Region, Credentials: awsProvider}
 	c.s3Client = s3.NewFromConfig(cfg)
@@ -239,15 +250,16 @@ func (c *Client) ForApp(_, _ string) *Client {
 	expiresAt := c.expiresAt
 	c.mu.Unlock()
 	return &Client{
-		presigner: c.presigner,
-		s3Client:  c.s3Client,
-		bucket:    c.bucket,
-		prefix:    c.prefix,
-		cdnBase:   c.cdnBase,
-		expiresAt: expiresAt,
-		now:       c.now,
-		provider:  c.provider,
-		scope:     c.scope,
+		presigner:      c.presigner,
+		s3Client:       c.s3Client,
+		bucket:         c.bucket,
+		prefix:         c.prefix,
+		cdnBase:        c.cdnBase,
+		maxUploadBytes: c.maxUploadBytes,
+		expiresAt:      expiresAt,
+		now:            c.now,
+		provider:       c.provider,
+		scope:          c.scope,
 	}
 }
 
@@ -272,6 +284,49 @@ var ErrNotVended = errors.New("mirrorstack/storage: the platform did not vend st
 // ErrCredentialExpired is returned when a vended STS credential has no safe
 // lifetime left for a new presigned URL.
 var ErrCredentialExpired = errors.New("mirrorstack/storage: storage credential expired before a safe presigned URL could be created")
+
+// ErrInvalidMaxBytes is returned when WithMaxBytes is called with n <= 0. A
+// declared size must be a real, positive byte count — it is signed into the
+// URL, not a hint.
+var ErrInvalidMaxBytes = errors.New("mirrorstack/storage: WithMaxBytes requires a positive byte count")
+
+// ErrUploadTooLarge is returned when a declared WithMaxBytes exceeds the
+// per-module ceiling the platform vended for this credential.
+var ErrUploadTooLarge = errors.New("mirrorstack/storage: declared size exceeds the module's vended upload ceiling")
+
+// putOptions accumulates PresignPut / CreateMultipart options.
+type putOptions struct {
+	maxBytes int64
+}
+
+// PutOption configures PresignPut (and CreateMultipart's declared total). It
+// is a function type, not positional arguments, so the NEXT dimension this
+// signature grows — and there will be one — is additive: a new WithX does not
+// reshuffle every existing call site. PresignPut has already changed shape
+// twice in a fortnight (expires, then content type); this stops that pattern.
+type PutOption func(*putOptions) error
+
+// WithMaxBytes declares the exact size, in bytes, of the file this presigned
+// URL is for. It is signed as Content-Length, so S3 refuses a PUT that
+// declares a different size — the same enforcement PresignPut already gives
+// Content-Type. The caller MUST pass the real file size: this is not an
+// upper bound the browser can undercut, it is what gets signed.
+//
+// n <= 0 is refused outright (ErrInvalidMaxBytes). n above the per-module
+// ceiling the platform vended for this credential (Client.MaxUploadBytes) is
+// also refused (ErrUploadTooLarge) — but only when that ceiling is known: an
+// older platform envelope that predates MaxUploadBytes leaves it at 0, and a
+// declared size is still signed in that case, just not bounded against a
+// ceiling the SDK was never told.
+func WithMaxBytes(n int64) PutOption {
+	return func(o *putOptions) error {
+		if n <= 0 {
+			return fmt.Errorf("%w: got %d", ErrInvalidMaxBytes, n)
+		}
+		o.maxBytes = n
+		return nil
+	}
+}
 
 // UnderLambda reports whether the process is running under AWS Lambda.
 func UnderLambda() bool { return lambdaenv.IsSet() }
@@ -330,8 +385,12 @@ func (c *Client) presignTTL(ctx context.Context, requested time.Duration) (time.
 // know what it is accepting cannot make this decision safely, and a default
 // (octet-stream, or "whatever the client says") is exactly the state this
 // parameter exists to end.
+//
+// Pass storage.WithMaxBytes(n) to also sign Content-Length as n, so a minted
+// URL cannot be used to store a different number of bytes than the module
+// asked for. See WithMaxBytes for what gets validated and when.
 // Requires storage credentials in context (Platform/Internal routes only).
-func (c *Client) PresignPut(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
+func (c *Client) PresignPut(ctx context.Context, key, contentType string, expires time.Duration, opts ...PutOption) (string, error) {
 	if err := c.requireCredential(); err != nil {
 		return "", err
 	}
@@ -340,6 +399,15 @@ func (c *Client) PresignPut(ctx context.Context, key, contentType string, expire
 	}
 	if strings.TrimSpace(contentType) == "" {
 		return "", ErrContentTypeRequired
+	}
+	var po putOptions
+	for _, opt := range opts {
+		if err := opt(&po); err != nil {
+			return "", err
+		}
+	}
+	if po.maxBytes > 0 && c.maxUploadBytes > 0 && po.maxBytes > c.maxUploadBytes {
+		return "", fmt.Errorf("%w: declared %d bytes, ceiling is %d bytes", ErrUploadTooLarge, po.maxBytes, c.maxUploadBytes)
 	}
 	expires, err := c.presignTTL(ctx, expires)
 	if err != nil {
@@ -353,12 +421,23 @@ func (c *Client) PresignPut(ctx context.Context, key, contentType string, expire
 	// decoration again. The field stays (it is what S3 records on the object);
 	// the middleware below is what puts the header on the request BEFORE the
 	// signer runs, which is what lands it in SignedHeaders.
-	req, err := c.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),
 		Key:         aws.String(fullKey),
 		ContentType: aws.String(contentType),
-	}, s3.WithPresignExpires(expires), func(o *s3.PresignOptions) {
-		o.ClientOptions = append(o.ClientOptions, s3.WithAPIOptions(signContentType(contentType)))
+	}
+	apiOptions := []func(*middleware.Stack) error{signContentType(contentType)}
+	if po.maxBytes > 0 {
+		input.ContentLength = aws.Int64(po.maxBytes)
+		// Content-Length is signed from the HTTP request's ContentLength field,
+		// not from a header — the v4 signer special-cases it (it builds the
+		// canonical "content-length" entry from http.Request.ContentLength and
+		// explicitly skips any same-named header). So this middleware sets that
+		// field directly rather than following the signContentType pattern.
+		apiOptions = append(apiOptions, signContentLength(po.maxBytes))
+	}
+	req, err := c.presigner.PresignPutObject(ctx, input, s3.WithPresignExpires(expires), func(o *s3.PresignOptions) {
+		o.ClientOptions = append(o.ClientOptions, s3.WithAPIOptions(apiOptions...))
 	})
 	if err != nil {
 		return "", fmt.Errorf("mirrorstack/storage: presign put failed: %w", err)
@@ -449,6 +528,31 @@ func signContentType(contentType string) func(*middleware.Stack) error {
 			) {
 				if req, ok := in.Request.(*smithyhttp.Request); ok {
 					req.Header.Set("Content-Type", contentType)
+				}
+				return next.HandleBuild(ctx, in)
+			},
+		), middleware.After)
+	}
+}
+
+// signContentLength binds Content-Length into the signature the same way
+// signContentType binds Content-Type, but through a different mechanism: the
+// v4 signer does not read Content-Length from the header map at all — it
+// builds that canonical header from http.Request.ContentLength directly and
+// explicitly ignores a same-named header (see aws-sdk-go-v2's
+// httpSigner.buildCanonicalHeaders). So this middleware sets the request's
+// ContentLength field rather than calling Header.Set, which is what
+// signContentType does. Same Build-phase placement, same reason: it must run
+// before the signer, while the request is still open to mutation.
+func signContentLength(n int64) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Build.Add(middleware.BuildMiddlewareFunc(
+			"MirrorStackSignContentLength",
+			func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (
+				middleware.BuildOutput, middleware.Metadata, error,
+			) {
+				if req, ok := in.Request.(*smithyhttp.Request); ok {
+					req.ContentLength = n
 				}
 				return next.HandleBuild(ctx, in)
 			},

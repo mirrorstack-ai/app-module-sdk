@@ -74,8 +74,16 @@ func (m *Module) Storage(ctx context.Context) (storage.Storer, error) {
 // RequireStorage opts this module into its per-app storage namespace. Call it
 // once during startup before Start. The declaration is emitted in the manifest
 // and is the platform's gate for vending temporary storage credentials.
-func (m *Module) RequireStorage() {
-	m.registry.RequireStorage()
+//
+// storage.MaxUpload(n) declares the largest file this module will ever ask a
+// presigned PUT to accept; it is recorded at publish and vended back as the
+// credential's per-module ceiling. Absent declaration = platform default.
+func (m *Module) RequireStorage(opts ...storage.RequireOption) {
+	var settings storage.RequireSettings
+	for _, opt := range opts {
+		opt(&settings)
+	}
+	m.registry.RequireStorage(settings.MaxUploadBytes)
 }
 
 func (m *Module) resolveStorage(ctx context.Context) (*storage.Client, error) {
@@ -234,7 +242,9 @@ func Storage(ctx context.Context) (storage.Storer, error) {
 }
 
 // RequireStorage declares storage on the default module created by Init.
-func RequireStorage() { mustDefault("RequireStorage").RequireStorage() }
+func RequireStorage(opts ...storage.RequireOption) {
+	mustDefault("RequireStorage").RequireStorage(opts...)
+}
 
 // AbsorbInfra declares that this module passes EVERY platform infrastructure
 // metric through to the app owner at 0. See Module.AbsorbInfra.

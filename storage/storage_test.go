@@ -308,6 +308,29 @@ func TestCredential_Validate(t *testing.T) {
 	}
 }
 
+func TestMaxUploadPanicsOnNonPositive(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int64{0, -1} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("MaxUpload(%d) did not panic", n)
+				}
+			}()
+			MaxUpload(n)
+		}()
+	}
+}
+
+func TestMaxUploadSetsRequireSettings(t *testing.T) {
+	t.Parallel()
+	var s RequireSettings
+	MaxUpload(2 << 20)(&s)
+	if s.MaxUploadBytes != 2<<20 {
+		t.Fatalf("RequireSettings.MaxUploadBytes = %d, want %d", s.MaxUploadBytes, 2<<20)
+	}
+}
+
 // 🔴 THE CONTENT TYPE MUST BE IN THE SIGNATURE, NOT JUST IN THE REQUEST.
 //
 // A presigned PUT enforces exactly the headers it signed. While the type was
@@ -361,5 +384,152 @@ func TestPresignPutRefusesAnEmptyContentType(t *testing.T) {
 		if _, err := c.PresignPut(context.Background(), "icon.png", contentType, time.Minute); !errors.Is(err, ErrContentTypeRequired) {
 			t.Errorf("PresignPut(%q) error = %v, want ErrContentTypeRequired", contentType, err)
 		}
+	}
+}
+
+// 🔴 WithMaxBytes MUST LAND Content-Length IN THE SIGNATURE, THE SAME WAY
+// contentType DOES, OR IT ENFORCES NOTHING.
+//
+// The v4 signer does not read Content-Length from a header at all — it reads
+// http.Request.ContentLength directly (aws-sdk-go-v2's
+// httpSigner.buildCanonicalHeaders takes it as a separate parameter and skips
+// any same-named header in the header map). So PresignPut's Content-Length
+// middleware sets that field rather than calling Header.Set, unlike
+// signContentType. This test is the proxy for the "sign for N bytes, PUT a
+// different declared length against a dev bucket" experiment the issue calls
+// for — this SDK's test suite has no dev R2 bucket to run that against, so it
+// asserts the one thing fully within its control: that the byte count reaches
+// X-Amz-SignedHeaders at all.
+func TestPresignPutSignsContentLengthWhenMaxBytesGiven(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute, WithMaxBytes(1234))
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := u.Query().Get("X-Amz-SignedHeaders")
+	if !strings.Contains(signed, "content-length") {
+		t.Fatalf("X-Amz-SignedHeaders = %q, want it to include content-length — without it a presigned URL "+
+			"accepts a PUT declaring any size at all", signed)
+	}
+}
+
+// Without WithMaxBytes, nothing about size is signed — this is the baseline
+// that the test above is a delta against.
+func TestPresignPutDoesNotSignContentLengthByDefault(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute)
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed := u.Query().Get("X-Amz-SignedHeaders"); strings.Contains(signed, "content-length") {
+		t.Fatalf("X-Amz-SignedHeaders = %q, did not expect content-length without WithMaxBytes", signed)
+	}
+}
+
+func TestWithMaxBytesRefusesNonPositive(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, n := range []int64{0, -1} {
+		if _, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute, WithMaxBytes(n)); !errors.Is(err, ErrInvalidMaxBytes) {
+			t.Errorf("PresignPut with WithMaxBytes(%d) error = %v, want ErrInvalidMaxBytes", n, err)
+		}
+	}
+}
+
+// The vended per-module ceiling is a real bound: a module cannot mint a URL
+// for more bytes than the platform told the SDK it may ever accept.
+func TestPresignPutRefusesDeclaredSizeAboveVendedCeiling(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+		MaxUploadBytes: 1000,
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute, WithMaxBytes(1001)); !errors.Is(err, ErrUploadTooLarge) {
+		t.Fatalf("PresignPut above ceiling error = %v, want ErrUploadTooLarge", err)
+	}
+	if _, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute, WithMaxBytes(1000)); err != nil {
+		t.Fatalf("PresignPut at ceiling should succeed, got %v", err)
+	}
+	if got := c.MaxUploadBytes(); got != 1000 {
+		t.Fatalf("Client.MaxUploadBytes() = %d, want 1000", got)
+	}
+}
+
+// An older platform envelope that predates MaxUploadBytes leaves it at 0.
+// WithMaxBytes must still sign the declared size — the caller's size control
+// does not depend on the platform having adopted the ceiling yet — it just
+// cannot be checked against a limit the SDK was never given.
+func TestPresignPutSignsSizeEvenWithoutAVendedCeiling(t *testing.T) {
+	cred := Credential{
+		Bucket: "bucket", Region: "region", Prefix: "apps/app/mod/",
+		CDNBase: "https://cdn.example", AccessKeyID: "key", SecretAccessKey: "secret",
+	}
+	c, err := newClient(cred, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.MaxUploadBytes(); got != 0 {
+		t.Fatalf("Client.MaxUploadBytes() = %d, want 0 (no vended ceiling)", got)
+	}
+
+	raw, err := c.PresignPut(context.Background(), "icon.png", "image/png", time.Minute, WithMaxBytes(1<<40))
+	if err != nil {
+		t.Fatalf("PresignPut: %v", err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed := u.Query().Get("X-Amz-SignedHeaders"); !strings.Contains(signed, "content-length") {
+		t.Fatalf("X-Amz-SignedHeaders = %q, want content-length signed regardless of a known ceiling", signed)
+	}
+}
+
+// CreateMultipart cannot sign a total across independently-signed parts (see
+// its doc comment), but it can refuse to even START an upload whose declared
+// total already exceeds the vended ceiling — the same stated-intent check
+// PresignPut makes. The check must happen before any S3 call, which is what
+// lets this test run without a real S3 client.
+func TestCreateMultipartRefusesDeclaredTotalAboveVendedCeiling(t *testing.T) {
+	c := &Client{presigner: &s3.PresignClient{}, s3Client: &s3.Client{}, prefix: "apps/app/mod/", maxUploadBytes: 1000}
+
+	if _, err := c.CreateMultipart(context.Background(), "video.mp4", "video/mp4", WithMaxBytes(1001)); !errors.Is(err, ErrUploadTooLarge) {
+		t.Fatalf("CreateMultipart above ceiling error = %v, want ErrUploadTooLarge", err)
 	}
 }

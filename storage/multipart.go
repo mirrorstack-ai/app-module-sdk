@@ -32,17 +32,38 @@ type CompletedPart struct {
 // CreateMultipart starts a multipart upload and returns a MultipartUpload handle.
 // Use this for files larger than ~100MB.
 //
-//	upload, err := s.CreateMultipart(ctx, "video.mp4", "video/mp4")
+//	upload, err := s.CreateMultipart(ctx, "video.mp4", "video/mp4", storage.WithMaxBytes(totalSize))
 //	part1URL, _ := upload.PresignPart(ctx, 1, 15*time.Minute)
 //	part2URL, _ := upload.PresignPart(ctx, 2, 15*time.Minute)
 //	// browser uploads parts in parallel
 //	upload.Complete(ctx, []CompletedPart{{1, etag1}, {2, etag2}})
-func (c *Client) CreateMultipart(ctx context.Context, key, contentType string) (*MultipartUpload, error) {
+//
+// 🔴 PresignPart SIGNS NO LENGTH, AND THAT IS NOT FIXED BY WithMaxBytes HERE.
+// Each part is an independent presigned UploadPart request; nothing in S3's
+// API lets one signature bound the SUM of several other requests, so a
+// multipart upload's total bytes stay UNENFORCED at the signature level no
+// matter what this method is given. WithMaxBytes(totalSize) only refuses to
+// START an upload whose declared total already exceeds the module's vended
+// ceiling (the same check PresignPut makes) — it is a stated-intent check, not
+// a cryptographic one. Closing that gap for real means either a part-count ×
+// max-part-size budget enforced by the caller, or moving multipart to a
+// presigned POST policy with content-length-range, which is a bigger, separate
+// change (see the issue's "measure before building" note on R2 POST support).
+func (c *Client) CreateMultipart(ctx context.Context, key, contentType string, opts ...PutOption) (*MultipartUpload, error) {
 	if err := c.requireCredential(); err != nil {
 		return nil, err
 	}
 	if err := validateKey(key); err != nil {
 		return nil, err
+	}
+	var po putOptions
+	for _, opt := range opts {
+		if err := opt(&po); err != nil {
+			return nil, err
+		}
+	}
+	if po.maxBytes > 0 && c.maxUploadBytes > 0 && po.maxBytes > c.maxUploadBytes {
+		return nil, fmt.Errorf("%w: declared total %d bytes, ceiling is %d bytes", ErrUploadTooLarge, po.maxBytes, c.maxUploadBytes)
 	}
 	fullKey := c.prefix + key
 	out, err := c.s3Client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
