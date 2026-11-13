@@ -21,6 +21,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/httpx"
 	"github.com/mirrorstack-ai/app-module-sdk/ids"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 )
 
 // devDispatchFallback is used when MS_DISPATCH_URL is unset. Modules run inside
@@ -131,7 +132,7 @@ func resolveCallURL(targetModuleID, path string) string {
 }
 
 func resolveCallURLFor(ctx context.Context, targetModuleID, path string) string {
-	return fmt.Sprintf("%s/v1/dispatch/apps/module/%s%s", dispatchBaseFor(ctx), targetModuleID, path)
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf("/apps/module/%s%s", targetModuleID, path))
 }
 
 func resolveDependencyCallURL(appRef, consumerRef, producerRef, path string) string {
@@ -139,14 +140,13 @@ func resolveDependencyCallURL(appRef, consumerRef, producerRef, path string) str
 }
 
 func resolveDependencyCallURLFor(ctx context.Context, appRef, consumerRef, producerRef, path string) string {
-	return fmt.Sprintf(
-		"%s/internal/apps/%s/module-calls/%s/%s%s",
-		dispatchBaseFor(ctx),
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf(
+		"/internal/apps/%s/module-calls/%s/%s%s",
 		url.PathEscape(appRef),
 		url.PathEscape(consumerRef),
 		url.PathEscape(producerRef),
 		path,
-	)
+	))
 }
 
 func resolveDevModuleURL(slug, path string) string {

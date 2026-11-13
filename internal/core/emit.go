@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
@@ -38,7 +39,7 @@ func resolveEventBusURL(appID, name string) string {
 }
 
 func resolveEventBusURLFor(ctx context.Context, appID, name string) string {
-	return fmt.Sprintf("%s/apps/%s/events/%s", dispatchBaseFor(ctx), appID, name)
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf("/apps/%s/events/%s", appID, name))
 }
 
 // Emit publishes an event to every LIVE module that subscribes to name within
