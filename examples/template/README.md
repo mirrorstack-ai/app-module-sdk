@@ -88,6 +88,13 @@ The `replace` directive in `go.mod` points at the parent SDK so the template
 stays in lockstep with local SDK changes. The CLI strips this directive when
 copying into a user-facing repo.
 
+## Testing
+
+Use [`sdktest`](../../docs/api-reference.md#testing) to assert on the manifest
+your module serves (e.g. that a permission or a route registered correctly)
+without a real deploy. See the [API reference](../../docs/api-reference.md#testing)
+for the three exported functions and a worked example.
+
 ## Removing a feature
 
 Delete the file. That's it. No edits to `main.go`. `go build` still succeeds.
