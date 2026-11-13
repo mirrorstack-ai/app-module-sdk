@@ -116,7 +116,7 @@ field is `omitempty`, so its payload is byte-identical to v0.4.14.
 
 A module's README is recorded on a published VERSION. A module served from a dev
 tunnel has no such version, so the console showed whatever its last release
-captured. Measured on twkpa-edu: user-core's v1.0.0 was recorded 13 July and its
+captured. Measured on example-edu: user-core's v1.0.0 was recorded 13 July and its
 `README.zh-TW.md` arrived 7 September, so a zh-TW console rendered two-month-old
 ENGLISH — and an operator could not tell that from the module simply having no
 Chinese README.
