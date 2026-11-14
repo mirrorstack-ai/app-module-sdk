@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,7 @@ type mcpToolConfig struct {
 	destructive *bool
 	idempotent  *bool
 	digest      registry.MCPDigestFunc
+	personal    []string
 }
 
 // ToolPermission gates the tool on a module permission, looked up by SHORT
@@ -74,6 +76,25 @@ func ToolDestructive() MCPToolOption {
 // has the same effect as calling it once — which is what makes a retry safe.
 func ToolIdempotent() MCPToolOption {
 	return func(c *mcpToolConfig) { t := true; c.idempotent = &t }
+}
+
+// ToolPersonalData declares which categories of personal data the tool reads
+// or returns (identity, contact, content, usage, financial, location,
+// sensitive; "none" for a tool that touches none). The platform shows them next
+// to the tool, and every category must also appear in Config.DataUse.Categories.
+// An unknown category panics at registration: a typo would otherwise read as an
+// undeclared category, the exact thing this exists to prevent.
+func ToolPersonalData(categories ...string) MCPToolOption {
+	for _, c := range categories {
+		if err := registry.ValidateDataCategory(c); err != nil {
+			panic("mirrorstack: ToolPersonalData: " + err.Error())
+		}
+	}
+	return func(c *mcpToolConfig) {
+		c.personal = append(c.personal, categories...)
+		sort.Strings(c.personal)
+		c.personal = slices.Compact(c.personal)
+	}
 }
 
 // buildAnnotations renders the declared hints as the MCP spec's annotations
@@ -227,6 +248,7 @@ func MCPTool[In, Out any](name, description string, handler func(ctx context.Con
 	}
 	decl.Annotations = cfg.buildAnnotations()
 	decl.Digest = cfg.digest
+	decl.PersonalData = cfg.personal
 	m.warnUndocumentedFields(name, inputSchema)
 	m.registry.AddMCPTool(decl)
 }

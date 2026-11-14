@@ -32,6 +32,9 @@ import (
 // Split out of a single 1069-line module.go — the SDK's own version of the
 // catch-all this codebase tells module authors not to write.
 
+// DataUse is the declaration Config.DataUse carries; see registry.DataUse.
+type DataUse = registry.DataUse
+
 // Config holds the module identity. Passed to Init() or New().
 type Config struct {
 	ID string // Immutable module identifier (required). Minted once by the
@@ -77,6 +80,13 @@ type Config struct {
 	// since. Shipping it in the manifest lets the console read the running
 	// module, exactly as it already does for the description.
 	Readme fs.FS
+
+	// DataUse declares the personal-data categories the module handles, how
+	// long it keeps them, and the outside hosts it sends data to. It ships in
+	// the manifest as "dataUse". Optional here so existing modules keep
+	// building, but the platform and CLI refuse to publish a module without it.
+	// An invalid declaration panics at Init, like every other identity error.
+	DataUse *DataUse
 
 	// Versions optionally maps semver release tags to per-scope migration
 	// numbers, e.g.:
