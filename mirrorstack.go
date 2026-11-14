@@ -29,6 +29,11 @@ import (
 // Config holds the module identity. Passed to Init() or New().
 type Config = core.Config
 
+// DataUse is the module's declaration of the personal-data categories it
+// handles, its retention and the outside hosts it sends data to
+// (Config.DataUse).
+type DataUse = core.DataUse
+
 // Module is the core SDK instance. Methods on *Module live in internal/core;
 // the type alias makes them callable through this package.
 type Module = core.Module
@@ -875,6 +880,15 @@ func ToolDestructive() MCPToolOption { return core.ToolDestructive() }
 // ToolIdempotent declares that calling the tool twice with the same arguments
 // has the same effect as calling it once — which is what makes a retry safe.
 func ToolIdempotent() MCPToolOption { return core.ToolIdempotent() }
+
+// ToolPersonalData declares which categories of personal data the tool reads
+// or returns: identity, contact, content, usage, financial, location,
+// sensitive, or none. Each must also be listed in Config.DataUse.Categories.
+//
+//	ms.MCPTool("find-user", "Find a user", findUser, ms.ToolPersonalData("identity", "contact"))
+func ToolPersonalData(categories ...string) MCPToolOption {
+	return core.ToolPersonalData(categories...)
+}
 
 // ToolDigest declares how this tool's result compresses, for replay on later
 // turns.

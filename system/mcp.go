@@ -30,7 +30,7 @@ func toolEntries(decls []registry.MCPToolDecl) []MCPToolEntry {
 		out[i] = MCPToolEntry{
 			Name: t.Name, Description: t.Description,
 			InputSchema: t.InputSchema, OutputSchema: t.OutputSchema,
-			Permission: t.Permission, Annotations: t.Annotations,
+			Permission: t.Permission, Annotations: t.Annotations, PersonalData: t.PersonalData,
 		}
 	}
 	return out
@@ -193,6 +193,9 @@ type MCPToolEntry struct {
 	// whole and the agent renders the actionable hints into the tool
 	// description the model reads.
 	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// PersonalData mirrors MCPToolDecl.PersonalData: the data categories the
+	// tool reads or returns; absent when the module declared none.
+	PersonalData []string `json:"personalData,omitempty"`
 }
 
 // MCPResourceEntry is the JSON wire shape for a resource.

@@ -210,7 +210,10 @@ type MCPToolDecl struct {
 	// Tool* options. Absent when the module declared none — which means
 	// UNKNOWN to every reader, never "safe".
 	Annotations json.RawMessage `json:"annotations,omitempty"`
-	Handler     MCPToolHandler  `json:"-"`
+	// PersonalData lists the data categories the tool reads or returns
+	// (ms.ToolPersonalData). Absent means the module said nothing.
+	PersonalData []string       `json:"personalData,omitempty"`
+	Handler      MCPToolHandler `json:"-"`
 	// Digest compresses THIS tool's result for replay on later turns. nil when
 	// the module declared none, in which case a caller that needs to shrink the
 	// result has to truncate it blindly.
@@ -242,13 +245,14 @@ type Registry struct {
 	metrics               []MetricDecl
 	exposedTables         []string
 	description           string
-	readme           map[string]string
+	readme                map[string]string
 	descriptionLabel      i18n.Label // per-locale description (ms.T/ms.Text), resolved at manifest build
 	dependencies          []Dependency
 	outboundContributions []OutboundContribution
 	mcpTools              []MCPToolDecl
 	mcpResources          []MCPResourceDecl
 	storageRequired       bool
+	dataUse               *DataUse
 	absorbInfra           bool
 	ui                    *ModuleUI
 }
