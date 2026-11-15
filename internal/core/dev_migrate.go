@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -172,12 +175,20 @@ func (m *Module) ensureSchemaMigrated(ctx context.Context, scope migration.Scope
 // re-apply into the schema (cleanly, because module migrations use CREATE
 // TABLE IF NOT EXISTS). This is how the recorded-but-never-applied schemas
 // self-heal — see applyDevScope.
+//
+// Legacy rows (and any row recorded before this column existed) are backfilled
+// with checksum set to the empty string — the "unknown digest" marker, never
+// produced by checksumMigration. applyDevScope treats "" as "nothing to
+// compare against" rather than a mismatch, so upgrading the SDK never floods
+// existing dev databases with false drift warnings for migrations recorded
+// under the old, uncheckummed rows.
 func ensureTrackingTable(ctx context.Context, pool *pgxpool.Pool, trackingTable string) error {
 	if _, err := pool.Exec(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			module_id  text NOT NULL DEFAULT '',
 			scope      text NOT NULL,
 			version    text NOT NULL,
+			checksum   text NOT NULL DEFAULT '',
 			applied_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (module_id, scope, version)
 		)`, trackingTable)); err != nil {
@@ -188,6 +199,12 @@ func ensureTrackingTable(ctx context.Context, pool *pgxpool.Pool, trackingTable 
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS module_id text NOT NULL DEFAULT ''`,
 		trackingTable)); err != nil {
 		return fmt.Errorf("add module_id column: %w", err)
+	}
+	// Upgrade a table that predates the checksum column (see doc comment above).
+	if _, err := pool.Exec(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS checksum text NOT NULL DEFAULT ''`,
+		trackingTable)); err != nil {
+		return fmt.Errorf("add checksum column: %w", err)
 	}
 	// Rebuild the PK to include module_id when the table predates it. The
 	// constraint name is schema-local and stable, so DROP-then-ADD is safe and
@@ -251,13 +268,36 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 			if err := m.clearAppliedVersions(ctx, pool, trackingTable, scope); err != nil {
 				return fmt.Errorf("dev migrate %s: clear drift: %w", scope, err)
 			}
-			applied = map[string]bool{}
+			applied = map[string]string{}
+		}
+	}
+
+	// Checksum drift: a migration already recorded as applied whose file no
+	// longer hashes to the digest recorded at apply time was edited in place
+	// after release — the exact "released migration silently diverges from the
+	// deployed schema" failure this table exists to catch. An empty recorded
+	// checksum means the row predates this column (see ensureTrackingTable) and
+	// is never treated as a mismatch. Loud warning, not a hard failure: the SDK
+	// is a stateless executor here too, and refusing to boot a developer's
+	// module over an already-applied version would block local dev on a
+	// mistake that CI/review should have caught in the first place.
+	for _, mig := range all {
+		recordedSum, ok := applied[mig.Version]
+		if !ok || recordedSum == "" {
+			continue
+		}
+		curSum, err := checksumMigration(m.config.SQL, mig.UpFile)
+		if err != nil {
+			return fmt.Errorf("dev migrate %s: checksum %s: %w", scope, mig.UpFile, err)
+		}
+		if curSum != recordedSum {
+			m.logger.Printf("dev: WARNING %s migration %s (%s) was edited after it was applied — recorded checksum %s, file now hashes to %s. A released migration must never be edited; add a new migration instead.", scope, mig.Version, mig.UpFile, recordedSum, curSum)
 		}
 	}
 
 	pending := make([]migration.Migration, 0, len(all))
 	for _, mig := range all {
-		if !applied[mig.Version] {
+		if _, ok := applied[mig.Version]; !ok {
 			pending = append(pending, mig)
 		}
 	}
@@ -275,7 +315,15 @@ func (m *Module) applyDevScope(ctx context.Context, pool *pgxpool.Pool, tracking
 	runTx := pinnedRunTx(m.lifecycleTxRunner(scope), schema)
 	ran, err := migration.Apply(migrateCtx, runTx, m.config.SQL, pending)
 	// Record whatever ran before the failure (if any) so retries skip them.
-	if recErr := m.recordAppliedVersions(ctx, pool, trackingTable, scope, ran); recErr != nil && err == nil {
+	// Look up each ran version's UpFile from pending (Apply only returns
+	// versions, not the Migration records) so the checksum is computed from
+	// the exact file this run applied.
+	byVersion := make(map[string]migration.Migration, len(pending))
+	for _, mig := range pending {
+		byVersion[mig.Version] = mig
+	}
+	recErr := m.recordAppliedVersions(ctx, pool, trackingTable, scope, ran, byVersion)
+	if recErr != nil && err == nil {
 		return fmt.Errorf("dev migrate %s: record applied: %w", scope, recErr)
 	}
 	if err != nil {
@@ -321,35 +369,62 @@ func (m *Module) moduleHasTables(ctx context.Context, pool *pgxpool.Pool, schema
 	return exists, err
 }
 
-func (m *Module) loadAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) (map[string]bool, error) {
+// loadAppliedVersions returns this module's recorded versions for scope,
+// keyed to the checksum recorded at apply time ("" for a row written before
+// the checksum column existed — see ensureTrackingTable).
+func (m *Module) loadAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope) (map[string]string, error) {
 	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT version FROM %s WHERE module_id = $1 AND scope = $2`, trackingTable),
+		fmt.Sprintf(`SELECT version, checksum FROM %s WHERE module_id = $1 AND scope = $2`, trackingTable),
 		m.config.ID, string(scope))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	out := map[string]string{}
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
+		var v, sum string
+		if err := rows.Scan(&v, &sum); err != nil {
 			return nil, err
 		}
-		out[v] = true
+		out[v] = sum
 	}
 	return out, rows.Err()
 }
 
-func (m *Module) recordAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope, versions []string) error {
+// recordAppliedVersions inserts one row per applied version, each stamped with
+// the SHA-256 of the exact migration file that ran (looked up in byVersion) so
+// a later run can detect the file being edited after release.
+func (m *Module) recordAppliedVersions(ctx context.Context, pool *pgxpool.Pool, trackingTable string, scope migration.Scope, versions []string, byVersion map[string]migration.Migration) error {
 	for _, v := range versions {
+		mig, ok := byVersion[v]
+		if !ok {
+			return fmt.Errorf("record applied %s: no migration record for version %s", scope, v)
+		}
+		sum, err := checksumMigration(m.config.SQL, mig.UpFile)
+		if err != nil {
+			return fmt.Errorf("record applied %s: checksum %s: %w", scope, mig.UpFile, err)
+		}
 		if _, err := pool.Exec(ctx,
-			fmt.Sprintf(`INSERT INTO %s (module_id, scope, version) VALUES ($1, $2, $3)
+			fmt.Sprintf(`INSERT INTO %s (module_id, scope, version, checksum) VALUES ($1, $2, $3, $4)
 			 ON CONFLICT DO NOTHING`, trackingTable),
-			m.config.ID, string(scope), v); err != nil {
+			m.config.ID, string(scope), v, sum); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// checksumMigration returns the hex-encoded SHA-256 of the migration file at
+// path within fsys — the digest recorded alongside a version at apply time and
+// compared against the file on every later run to catch an edited-in-place
+// migration (see the checksum drift check in applyDevScope).
+func checksumMigration(fsys fs.FS, path string) (string, error) {
+	content, err := fs.ReadFile(fsys, path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // clearAppliedVersions removes this module's recorded rows for the scope. Used
