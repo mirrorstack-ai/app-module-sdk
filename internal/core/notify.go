@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/ids"
 )
 
@@ -64,7 +65,7 @@ func resolveNotifyURL(appID string) string {
 }
 
 func resolveNotifyURLFor(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/notifications", dispatchBaseFor(ctx), appID)
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf("/apps/%s/notifications", appID))
 }
 
 // Notify sends an in-app notification to the current app's members. It

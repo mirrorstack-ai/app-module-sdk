@@ -19,6 +19,7 @@ import (
 
 	"github.com/mirrorstack-ai/app-module-sdk/auth"
 	"github.com/mirrorstack-ai/app-module-sdk/db"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 )
 
 // ms.DependencyDB — the RESTRICTED consumer accessor for reading a producer
@@ -438,7 +439,7 @@ func (q *DependencyQuery) result(ctx context.Context, deployed bool) (*Dependenc
 
 	// Same dispatch base + HTTP client every module->dispatch surface uses
 	// (ms.Call / ms.Emit / meter) — one transport config, no second seam.
-	u := fmt.Sprintf("%s/internal/apps/%s/read-exposed", dispatchBase(), url.PathEscape(q.dep.appID))
+	u := dispatchpath.Join(dispatchBase(), fmt.Sprintf("/internal/apps/%s/read-exposed", url.PathEscape(q.dep.appID)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
 	if err != nil {
 		return nil, err

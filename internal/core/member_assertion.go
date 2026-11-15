@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mirrorstack-ai/app-module-sdk/internal/actor"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/dispatchpath"
 )
 
 // Member identity assertions — the module-facing half of #518.
@@ -120,7 +121,7 @@ type memberAssertionResponse struct {
 // dispatchBaseFor so a task attempt's broker-attested routing wins over process
 // state.
 func resolveMemberAssertionURL(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/member-assertions", dispatchBaseFor(ctx), appID)
+	return dispatchpath.Join(dispatchBaseFor(ctx), fmt.Sprintf("/apps/%s/member-assertions", appID))
 }
 
 // MintMemberAssertion exchanges a decision this module already made — "this
