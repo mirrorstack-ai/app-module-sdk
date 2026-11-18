@@ -55,7 +55,12 @@ type ManifestPayload struct {
 	// Client declares the module-local source and build-output directories for
 	// the optional custom-app client. The CLI consumes these paths during local
 	// development; package identity and versioning remain platform-owned.
-	Client       *ClientSpec                         `json:"client,omitempty"`
+	Client *ClientSpec `json:"client,omitempty"`
+	// DataUse is the module's declaration of the personal-data categories it
+	// handles, its retention and the outside hosts it sends data to
+	// (Config.DataUse). Omitted when the module declared none; the platform and
+	// `mirrorstack` CLI refuse such a module (ValidateManifestDataUse).
+	DataUse      *registry.DataUse                   `json:"dataUse,omitempty"`
 	Dependencies []registry.Dependency               `json:"dependencies"`
 	Migration    MigrationVersions                   `json:"migration"`
 	Versions     map[string]MigrationVersions        `json:"versions"`
@@ -340,6 +345,7 @@ func BuildManifest(id, slug, name, icon string, tags []string, sqlFS fs.FS, vers
 		DescriptionLabels: reg.DescriptionLabels(),
 		Readme:            reg.Readme(),
 		Client:            client,
+		DataUse:           reg.DataUse(),
 		Dependencies:      reg.Dependencies(),
 		Migration:         MigrationVersions{App: appVersion, Module: moduleVersion},
 		Versions:          versions,
