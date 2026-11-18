@@ -135,6 +135,13 @@ func New(cfg Config) (*Module, error) {
 		m.registry.SetReadme(readme)
 	}
 
+	if cfg.DataUse != nil {
+		if err := cfg.DataUse.Validate(); err != nil {
+			panic("mirrorstack: Config.DataUse: " + err.Error())
+		}
+		m.registry.SetDataUse(*cfg.DataUse)
+	}
+
 	// The local dependency plane's directory seams. Bound to the real
 	// Postgres-backed implementations here so they are never nil in production
 	// code; tests overwrite them with in-memory fakes to exercise resultLocal

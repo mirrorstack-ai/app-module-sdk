@@ -5,6 +5,23 @@ All notable changes to the MirrorStack Module SDK.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Manifest `dataUse` and `ms.ToolPersonalData` (PV15, #264).** `Config.DataUse`
+  declares the personal-data categories a module handles (`identity`, `contact`,
+  `content`, `usage`, `financial`, `location`, `sensitive`, or `none`), its
+  retention (`none`, `until-deleted`, `30d`, `6m`, `1y`) and the outside hosts it
+  sends data to. It ships in the manifest as `dataUse`; `ManifestPayload.DataUse`
+  carries it. `ms.ToolPersonalData(...)` marks the categories one MCP tool reads
+  or returns (`personalData` on the tool entry). An invalid declaration panics at
+  `Init`. `system.ValidateManifestDataUse(manifestJSON)` is the one rule set for
+  the CLI and the platform gate: it returns `ErrNoDataUse` for a manifest with no
+  `dataUse`, and a summary (`String()` prints categories, retention and hosts) for
+  a valid one. Existing modules still build; the field is optional in the SDK and
+  required by the gate.
+
 ## [v0.4.20] - 2026-09-17
 
 ### Added
