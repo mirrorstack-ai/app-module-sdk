@@ -50,8 +50,9 @@ func newTestModuleWithSecret(t *testing.T, id string) *Module {
 
 // assertPanics runs fn and fails the test if fn does not panic. msg is the
 // error message used when no panic occurred. Mirrors the recover-pattern
-// previously duplicated across event_test.go, cron_test.go,
-// permission_test.go, and registry_test.go.
+// previously duplicated across cron_test.go, event_test.go, expose_test.go,
+// meter_test.go, and task_test.go within this package. Packages outside
+// core should use testutil.AssertPanics instead.
 func assertPanics(t *testing.T, msg string, fn func()) {
 	t.Helper()
 	defer func() {
