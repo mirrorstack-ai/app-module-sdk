@@ -2,7 +2,7 @@ module github.com/mirrorstack-ai/app-module-sdk
 
 go 1.26
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
