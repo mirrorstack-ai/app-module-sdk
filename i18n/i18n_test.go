@@ -130,3 +130,27 @@ func TestRegisterMessages_MissingDirErrors(t *testing.T) {
 		t.Error("expected error for missing dir")
 	}
 }
+
+func TestLookupOr_ReturnsCatalogWhenPresent(t *testing.T) {
+	loadFixture(t)
+	got := LookupOr("permissions.users.read", "View users (source)")
+	if got["en-US"] != "View users" || got["zh-TW"] != "檢視使用者" || len(got) != 2 {
+		t.Fatalf("LookupOr = %v, want the two catalog locales", got)
+	}
+}
+
+func TestLookupOr_FallsBackToSuppliedStringNotKey(t *testing.T) {
+	loadFixture(t)
+	got := LookupOr("contributions.missing.label", "Credit")
+	if len(got) != 1 || got[DefaultLocale] != "Credit" {
+		t.Fatalf("LookupOr = %v, want {%s: Credit} — never the raw key", got, DefaultLocale)
+	}
+}
+
+func TestLookupOr_EmptyCatalog(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	if got := LookupOr("a.b", "Source"); got[DefaultLocale] != "Source" {
+		t.Fatalf("LookupOr on empty catalog = %v", got)
+	}
+}

@@ -149,9 +149,9 @@ func TestURL(t *testing.T) {
 		{
 			name:    "production",
 			prefix:  "apps/app_abc/mod_media/",
-			cdnBase: "https://media.mirrorstack.ai",
+			cdnBase: "https://cdn.mirrorstack.ai",
 			key:     "photos/avatar.jpg",
-			want:    "https://media.mirrorstack.ai/apps/app_abc/mod_media/photos/avatar.jpg",
+			want:    "https://cdn.mirrorstack.ai/apps/app_abc/mod_media/photos/avatar.jpg",
 		},
 		{
 			name:    "beta subdomain",
@@ -163,9 +163,9 @@ func TestURL(t *testing.T) {
 		{
 			name:    "trailing slash",
 			prefix:  "apps/app_abc/mod_media/",
-			cdnBase: "https://media.mirrorstack.ai/",
+			cdnBase: "https://cdn.mirrorstack.ai/",
 			key:     "photos/avatar.jpg",
-			want:    "https://media.mirrorstack.ai/apps/app_abc/mod_media/photos/avatar.jpg",
+			want:    "https://cdn.mirrorstack.ai/apps/app_abc/mod_media/photos/avatar.jpg",
 		},
 		{
 			name:    "dev scoped",
@@ -221,7 +221,7 @@ func TestValidateKey_Rejects(t *testing.T) {
 
 func TestURL_RejectsTraversal(t *testing.T) {
 	t.Parallel()
-	c := &Client{prefix: "apps/app_abc/mod_media/", cdnBase: "https://media.mirrorstack.ai"}
+	c := &Client{prefix: "apps/app_abc/mod_media/", cdnBase: "https://cdn.mirrorstack.ai"}
 	if _, err := c.URL("../../other_app/secret.jpg"); err == nil {
 		t.Error("URL should reject path traversal")
 	}
@@ -275,7 +275,7 @@ func TestCredential_Validate(t *testing.T) {
 		Bucket:          "mirrorstack-media",
 		Region:          "ap-northeast-1",
 		Prefix:          "apps/app_abc/mod_media/",
-		CDNBase:         "https://media.mirrorstack.ai",
+		CDNBase:         "https://cdn.mirrorstack.ai",
 		AccessKeyID:     secret,
 		SecretAccessKey: "secret",
 	}

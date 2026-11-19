@@ -7,8 +7,24 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.4.21] - 2026-11-19
+
 ### Added
 
+- **`ms.IsDeployed()` and `ms.IsTaskWorker()` (#159).** The deployed-vs-local
+  signal now has one exported owner instead of every module re-reading
+  `AWS_LAMBDA_FUNCTION_NAME` / `MS_TASK_WORKER_MODE`. `IsDeployed` is true on
+  Lambda and on a managed one-shot task attempt; `IsTaskWorker` only on the
+  latter. Both are process-global, fixed at start, and false under `go run`,
+  tests and the local deploy-sim shim. Use them for fail-closed guards (refuse
+  to start deployed without `MS_INTERNAL_SECRET`).
+- **`i18n.LookupOr(key, fallback)` (#178).** Like `Lookup`, but when no loaded
+  locale carries the key it returns `{DefaultLocale: fallback}` — the supplied
+  source text, never the raw key (which is what `Label.Resolve` falls back to).
+  Replaces the per-module `contributionText` copies.
+- **`sdktest.ValidateTablePrefix` / `sdktest.TablesMissingPrefix` (#91).** An
+  integration-test helper that fails when any table in a module's app schema
+  does not start with `<module_id>_` (`schema_migrations` is exempt).
 - **Manifest `dataUse` and `ms.ToolPersonalData` (PV15, #264).** `Config.DataUse`
   declares the personal-data categories a module handles (`identity`, `contact`,
   `content`, `usage`, `financial`, `location`, `sensitive`, or `none`), its
@@ -21,6 +37,20 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `dataUse`, and a summary (`String()` prints categories, retention and hosts) for
   a valid one. Existing modules still build; the field is optional in the SDK and
   required by the gate.
+
+### Documentation
+
+- The CDN host example is `https://cdn.mirrorstack.ai` (was
+  `media.mirrorstack.ai`) in the `storage` comments and test fixtures (#92).
+  No behaviour change.
+
+### Internal
+
+- `internal/testutil.AssertPanics` replaces the inline `recover()` blocks in the
+  registry tests; `internal/core`'s `assertPanics` now delegates to it (#90).
+- New integration test: a contribution POST/DELETE carrying only `X-MS-App-ID`
+  lands in, and is removed from, `app_<id>.<prefix>_contributions` and no other
+  schema (#116).
 
 ## [v0.4.20] - 2026-09-17
 

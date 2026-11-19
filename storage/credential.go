@@ -22,7 +22,7 @@ type Credential struct {
 	// platform-minted Config.ID in the module segment because no installed
 	// module UUID exists in a local tunnel session.
 	Prefix          string `json:"prefix"`
-	CDNBase         string `json:"cdnBase"` // "https://media.mirrorstack.ai"
+	CDNBase         string `json:"cdnBase"` // "https://cdn.mirrorstack.ai"
 	AccessKeyID     string `json:"accessKeyId"`
 	SecretAccessKey string `json:"secretAccessKey"`
 	SessionToken    string `json:"sessionToken"`
