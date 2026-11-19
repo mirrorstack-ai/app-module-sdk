@@ -16,6 +16,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/db"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/migration"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/registry"
+	"github.com/mirrorstack-ai/app-module-sdk/internal/testutil"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	p "github.com/mirrorstack-ai/app-module-sdk/roles"
 	"github.com/mirrorstack-ai/app-module-sdk/system"
@@ -48,18 +49,12 @@ func newTestModuleWithSecret(t *testing.T, id string) *Module {
 	return m
 }
 
-// assertPanics runs fn and fails the test if fn does not panic. msg is the
-// error message used when no panic occurred. Mirrors the recover-pattern
-// previously duplicated across event_test.go, cron_test.go,
-// permission_test.go, and registry_test.go.
+// assertPanics runs fn and fails the test with msg if fn does not panic. It is
+// a thin wrapper over testutil.AssertPanics kept for this package's existing
+// call sites (msg-first argument order).
 func assertPanics(t *testing.T, msg string, fn func()) {
 	t.Helper()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error(msg)
-		}
-	}()
-	fn()
+	testutil.AssertPanics(t, fn, "%s", msg)
 }
 
 func doRequest(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {

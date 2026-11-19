@@ -22,6 +22,7 @@ import (
 	"github.com/mirrorstack-ai/app-module-sdk/internal/contributions"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/core"
 	"github.com/mirrorstack-ai/app-module-sdk/internal/httputil"
+	msruntime "github.com/mirrorstack-ai/app-module-sdk/internal/runtime"
 	"github.com/mirrorstack-ai/app-module-sdk/meter"
 	"github.com/mirrorstack-ai/app-module-sdk/storage"
 )
@@ -1040,3 +1041,21 @@ type Contribution = contributions.Contribution
 func StoredContributions(ctx context.Context, slot string) ([]Contribution, error) {
 	return core.StoredContributions(ctx, slot)
 }
+
+// IsDeployed reports whether the process is running on the deployed plane: a
+// Lambda function or a managed one-shot task attempt. It is false for a local
+// `go run`, for tests, and for the local deploy-sim shim, which serves the
+// deployed shape from an ordinary process.
+//
+// The value is process-global and fixed at process start, like the environment
+// signals it is derived from. A module that must fail closed when deployed
+// (for example, refusing to start without MS_INTERNAL_SECRET) should branch on
+// this rather than re-reading the underlying environment variables: the SDK
+// owns how "deployed" is signalled and updates this in one place when it
+// changes.
+func IsDeployed() bool { return msruntime.IsLambda() || msruntime.IsOneShot() }
+
+// IsTaskWorker reports whether the process is a managed one-shot task attempt
+// (a task worker), as opposed to a request-serving Lambda or a local process.
+// Every task worker is also IsDeployed. Process-global, fixed at start.
+func IsTaskWorker() bool { return msruntime.IsOneShot() }

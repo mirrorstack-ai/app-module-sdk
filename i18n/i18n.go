@@ -246,3 +246,17 @@ func Locales() []string {
 	sort.Strings(out)
 	return out
 }
+
+// LookupOr is Lookup with a source-text fallback. It returns the locale →
+// message map for a catalog key, or — when no loaded locale carries the key —
+// a single-entry map holding fallback under DefaultLocale. The fallback is the
+// SUPPLIED string, never the key: contribution chrome that degrades to a raw
+// i18n key is worse than one that degrades to source English. (Label.Resolve
+// is not a substitute; it falls back to the key.) The returned map is owned by
+// the caller.
+func LookupOr(key, fallback string) map[string]string {
+	if out := Lookup(key); len(out) > 0 {
+		return out
+	}
+	return map[string]string{DefaultLocale: fallback}
+}
