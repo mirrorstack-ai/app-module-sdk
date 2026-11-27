@@ -127,7 +127,7 @@ func TestOneShotModuleCapabilityAuthenticatesDependencyCallAndChildTask(t *testi
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"v":1,"cancelled":false,"resources":{"moduleCalls":{"token":"task-service-cap","expiresAt":%q}}}`, time.Now().Add(time.Minute).Format(time.RFC3339Nano))
-		case r.URL.Path == "/internal/apps/app_ref/module-calls/"+oneShotTestModuleID+"/video-core/internal/source":
+		case r.URL.Path == "/v1/dispatch/internal/apps/app_ref/module-calls/"+oneShotTestModuleID+"/video-core/internal/source":
 			dependencyCalls.Add(1)
 			if r.Header.Get("X-MS-Service-Secret") != "task-service-cap" {
 				t.Errorf("dependency capability=%q", r.Header.Get("X-MS-Service-Secret"))
@@ -140,7 +140,7 @@ func TestOneShotModuleCapabilityAuthenticatesDependencyCallAndChildTask(t *testi
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"v":1,"jobId":%q,"status":"queued","deduplicated":false}`, childJobID)
-		case r.URL.Path == "/apps/app_id/usage":
+		case r.URL.Path == "/v1/dispatch/apps/app_id/usage":
 			if r.Header.Get("X-MS-Service-Secret") != "task-service-cap" {
 				t.Errorf("meter capability=%q", r.Header.Get("X-MS-Service-Secret"))
 			}

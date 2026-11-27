@@ -78,9 +78,9 @@ func TestResolveMemberAssertionURL_Building(t *testing.T) {
 		dispatch string
 		want     string
 	}{
-		{"dev fallback when unset", "", devDispatchFallback + "/apps/a-456/member-assertions"},
-		{"explicit base", "http://dispatch:8083", "http://dispatch:8083/apps/a-456/member-assertions"},
-		{"trailing slash trimmed", "http://dispatch:8083/", "http://dispatch:8083/apps/a-456/member-assertions"},
+		{"dev fallback when unset", "", devDispatchFallback + "/v1/dispatch/apps/a-456/member-assertions"},
+		{"explicit base", "http://dispatch:8083", "http://dispatch:8083/v1/dispatch/apps/a-456/member-assertions"},
+		{"trailing slash trimmed", "http://dispatch:8083/", "http://dispatch:8083/v1/dispatch/apps/a-456/member-assertions"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestResolveMemberAssertionURL_TaskRoutingBeatsProcessState(t *testing.T) {
 	t.Setenv("MS_DISPATCH_URL", "http://process-global:8083")
 	ctx := runtime.WithTaskDispatchURL(context.Background(), "http://attempt-scoped:9090/")
 
-	want := "http://attempt-scoped:9090/apps/" + testAssertionAppID + "/member-assertions"
+	want := "http://attempt-scoped:9090/v1/dispatch/apps/" + testAssertionAppID + "/member-assertions"
 	if got := resolveMemberAssertionURL(ctx, testAssertionAppID); got != want {
 		t.Errorf("resolveMemberAssertionURL = %q, want %q", got, want)
 	}
@@ -138,7 +138,7 @@ func TestMintMemberAssertion_MintsAndSendsAnIdentityFreeEnvelope(t *testing.T) {
 	if rec.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", rec.method)
 	}
-	if rec.path != "/apps/"+testAssertionAppID+"/member-assertions" {
+	if rec.path != "/v1/dispatch/apps/"+testAssertionAppID+"/member-assertions" {
 		t.Errorf("path = %q, want /apps/%s/member-assertions", rec.path, testAssertionAppID)
 	}
 	if rec.appID != testAssertionAppID {
