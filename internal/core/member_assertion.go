@@ -120,7 +120,7 @@ type memberAssertionResponse struct {
 // dispatchBaseFor so a task attempt's broker-attested routing wins over process
 // state.
 func resolveMemberAssertionURL(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/member-assertions", dispatchBaseFor(ctx), appID)
+	return fmt.Sprintf("%s"+dispatchIngressPrefix+"/apps/%s/member-assertions", dispatchBaseFor(ctx), appID)
 }
 
 // MintMemberAssertion exchanges a decision this module already made — "this

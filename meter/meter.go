@@ -629,7 +629,7 @@ func resolveUsageURLFor(ctx context.Context, appID string) string {
 		base = devDispatchFallback
 	}
 	base = strings.TrimRight(base, "/")
-	return fmt.Sprintf("%s/apps/%s/usage", base, appID)
+	return fmt.Sprintf("%s/v1/dispatch/apps/%s/usage", base, appID)
 }
 
 // dispatch delivers an already-built v1 or v2 envelope to the platform usage

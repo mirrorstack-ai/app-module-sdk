@@ -377,7 +377,7 @@ func TestRunTask_ManagedTransportContractAndRetry(t *testing.T) {
 	canonicalPayload := json.RawMessage(`{"videoId":"v1"}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.URL.Path != "/internal/apps/app_ref/modules/test/tasks/transcode" {
+		if r.URL.Path != "/v1/dispatch/internal/apps/app_ref/modules/test/tasks/transcode" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		if got := r.Header.Get("X-MS-Service-Secret"); got != "module-secret" {
@@ -883,7 +883,7 @@ func TestTaskStatusManagedContract(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s", r.Method)
 		}
-		if r.URL.Path != "/internal/apps/app_ref/modules/test/task-jobs/"+jobID {
+		if r.URL.Path != "/v1/dispatch/internal/apps/app_ref/modules/test/task-jobs/"+jobID {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		if got := r.Header.Get("X-MS-Service-Secret"); got != "module-secret" {
@@ -914,7 +914,7 @@ func TestCancelTaskManagedContractRetriesWithStableKey(t *testing.T) {
 	var idempotencyKey string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.Method != http.MethodPost || r.URL.Path != "/internal/apps/app_ref/modules/test/task-jobs/"+jobID+"/cancel" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/dispatch/internal/apps/app_ref/modules/test/task-jobs/"+jobID+"/cancel" {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("X-MS-Service-Secret"); got != "module-secret" {

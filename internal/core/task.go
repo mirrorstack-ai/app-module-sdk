@@ -424,7 +424,7 @@ func (m *Module) managedTaskJobEndpoint(ctx context.Context, jobID, operation st
 	if secret == "" {
 		return "", "", fmt.Errorf("mirrorstack: %s: MS_INTERNAL_SECRET module credential is required", operation)
 	}
-	endpoint := base + "/internal/apps/" + url.PathEscape(appRef) +
+	endpoint := base + dispatchIngressPrefix + "/internal/apps/" + url.PathEscape(appRef) +
 		"/modules/" + url.PathEscape(m.config.ID) + "/task-jobs/" + url.PathEscape(jobID)
 	return endpoint, secret, nil
 }
@@ -512,7 +512,7 @@ func (m *Module) runManagedTask(ctx context.Context, name string, payload json.R
 	p = append(p, `{"payload":`...)
 	p = append(p, payload...)
 	p = append(p, '}')
-	endpoint := base + "/internal/apps/" + url.PathEscape(appRef) +
+	endpoint := base + dispatchIngressPrefix + "/internal/apps/" + url.PathEscape(appRef) +
 		"/modules/" + url.PathEscape(m.config.ID) + "/tasks/" + url.PathEscape(name)
 	body, err := m.doManagedTaskRequest(ctx, http.MethodPost, endpoint, secret, idempotencyKey, p, "RunTask("+name+")")
 	if err != nil {

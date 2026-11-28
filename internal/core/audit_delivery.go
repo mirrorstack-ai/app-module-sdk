@@ -150,7 +150,7 @@ func deliverAudit(ctx context.Context, delivery auditoutbox.Delivery) (auditDisp
 	deliveryCtx, cancel := context.WithTimeout(ctx, auditDeliveryTimeout)
 	defer cancel()
 	err = postDispatchJSON(deliveryCtx, "ms.Audit",
-		dispatchBaseFor(deliveryCtx)+"/apps/"+url.PathEscape(inv.App.ID)+"/audit",
+		dispatchBaseFor(deliveryCtx)+dispatchIngressPrefix+"/apps/"+url.PathEscape(inv.App.ID)+"/audit",
 		inv.App.ID,
 		auditIngressEnvelope{
 			V: 1, EventID: delivery.EventID, OccurredAt: delivery.OccurredAt.UTC(),

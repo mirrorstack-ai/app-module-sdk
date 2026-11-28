@@ -156,7 +156,7 @@ type deliveryMintResponse struct {
 // unset — the same resolution Call, Emit and Notify use. DEV/DISPATCH
 // TRANSPORT: this resolver is the #146 seam, mirroring resolveEventBusURL.
 func resolveDeliveryMintURL(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/cdn-tokens", dispatchBaseFor(ctx), appID)
+	return fmt.Sprintf("%s"+dispatchIngressPrefix+"/apps/%s/cdn-tokens", dispatchBaseFor(ctx), appID)
 }
 
 // Delivery mints ONE delivery credential covering every object under prefix.
