@@ -28,6 +28,13 @@ import (
 // whole seconds, absent when unset" is one wire convention shared by every mint
 // surface (Delivery, MintMemberAssertion), not a fact about any one of them.
 
+// dispatchIngressPrefix is the address every module->dispatch ingress route
+// answers on regardless of the base: a path route on the bare api host, and
+// still correct behind the legacy `/dispatch` API-mapping key (which strips its
+// own prefix). The bare `/apps/...` and `/internal/apps/...` forms resolve only
+// behind that key, so the SDK composes this twin instead.
+const dispatchIngressPrefix = "/v1/dispatch"
+
 // dispatchFallbackWarn keeps the unset-MS_DISPATCH_URL warning to one line per
 // process, so a module that makes many calls does not spam its log.
 var dispatchFallbackWarn sync.Once

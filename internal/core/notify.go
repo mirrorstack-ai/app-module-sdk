@@ -64,7 +64,7 @@ func resolveNotifyURL(appID string) string {
 }
 
 func resolveNotifyURLFor(ctx context.Context, appID string) string {
-	return fmt.Sprintf("%s/apps/%s/notifications", dispatchBaseFor(ctx), appID)
+	return fmt.Sprintf("%s"+dispatchIngressPrefix+"/apps/%s/notifications", dispatchBaseFor(ctx), appID)
 }
 
 // Notify sends an in-app notification to the current app's members. It

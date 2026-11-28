@@ -140,7 +140,7 @@ func resolveDependencyCallURL(appRef, consumerRef, producerRef, path string) str
 
 func resolveDependencyCallURLFor(ctx context.Context, appRef, consumerRef, producerRef, path string) string {
 	return fmt.Sprintf(
-		"%s/internal/apps/%s/module-calls/%s/%s%s",
+		"%s"+dispatchIngressPrefix+"/internal/apps/%s/module-calls/%s/%s%s",
 		dispatchBaseFor(ctx),
 		url.PathEscape(appRef),
 		url.PathEscape(consumerRef),

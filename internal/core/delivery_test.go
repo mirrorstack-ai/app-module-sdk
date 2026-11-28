@@ -81,9 +81,9 @@ func TestResolveDeliveryMintURL_Building(t *testing.T) {
 		dispatch string
 		want     string
 	}{
-		{"dev fallback when unset", "", devDispatchFallback + "/apps/a-456/cdn-tokens"},
-		{"explicit base", "http://dispatch:8083", "http://dispatch:8083/apps/a-456/cdn-tokens"},
-		{"trailing slash trimmed", "http://dispatch:8083/", "http://dispatch:8083/apps/a-456/cdn-tokens"},
+		{"dev fallback when unset", "", devDispatchFallback + "/v1/dispatch/apps/a-456/cdn-tokens"},
+		{"explicit base", "http://dispatch:8083", "http://dispatch:8083/v1/dispatch/apps/a-456/cdn-tokens"},
+		{"trailing slash trimmed", "http://dispatch:8083/", "http://dispatch:8083/v1/dispatch/apps/a-456/cdn-tokens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,8 +116,8 @@ func TestDeliveryURL_MintsAndAttachesTheCredential(t *testing.T) {
 	if rec.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", rec.method)
 	}
-	if rec.path != "/apps/"+testDeliveryAppID+"/cdn-tokens" {
-		t.Errorf("path = %q, want /apps/%s/cdn-tokens", rec.path, testDeliveryAppID)
+	if rec.path != "/v1/dispatch/apps/"+testDeliveryAppID+"/cdn-tokens" {
+		t.Errorf("path = %q, want /v1/dispatch/apps/%s/cdn-tokens", rec.path, testDeliveryAppID)
 	}
 	if rec.appID != testDeliveryAppID {
 		t.Errorf("X-MS-App-ID = %q, want %q", rec.appID, testDeliveryAppID)
