@@ -7,6 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- **Every module->dispatch ingress call now composes its `/v1/dispatch/...` twin.** `ms.Emit`, `ms.Notify`, `ms.Record`, audit delivery, cdn-token and member-assertion mints, the dependency read-exposed and `ms.CallDependency` ingress, and `RunTask`/task-job calls previously joined `MS_DISPATCH_URL` with a bare `/apps/...` or `/internal/apps/...` path, which resolves only behind the legacy `/dispatch` API-mapping key. The `/v1/dispatch` twin resolves on the bare `https://api.<domain>` host AND behind that key, so a module carrying either `MS_DISPATCH_URL` value reaches the ingress (api-v1 path normalization, part A.1). Additive on the platform side: api-platform already serves both addresses; no env change is needed.
+
 ## [v0.4.21] - 2026-11-19
 
 ### Added
