@@ -206,3 +206,71 @@ func TestDevAppSchema_DriftSelfHeal_Integration(t *testing.T) {
 		t.Errorf("after self-heal, mheal_items is missing from %s", schema)
 	}
 }
+
+// TestDevAppSchema_ChecksumDrift_Integration is the regression guard for
+// issue #1605: editing an already-applied migration file must be detectable,
+// not silently invisible. It proves the checksum recorded at apply time
+// changes when the file's bytes change on disk, which is the signal the
+// checksum-drift warning in applyDevScope keys off.
+func TestDevAppSchema_ChecksumDrift_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	resetDefault(t)
+	t.Setenv(devMigrateEnvVar, driftTestDBURL())
+
+	sqlFS := fstest.MapFS{
+		"sql/app/0001_init.up.sql": &fstest.MapFile{
+			Data: []byte(`CREATE TABLE IF NOT EXISTS mcksum_items (id text PRIMARY KEY)`),
+		},
+	}
+	m, err := New(Config{ID: "mcksum", Name: "Cksum", SQL: sqlFS})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	pool, release, err := m.resolvePool(ctx)
+	if err != nil {
+		t.Skipf("skipping (no dev postgres): %v", err)
+	}
+	defer release()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping (no dev postgres): %v", err)
+	}
+
+	schema, _ := devAppSchemaName("cccccccc-0000-0000-0000-000000000003")
+	ident := func(s string) string { return pgx.Identifier{s}.Sanitize() }
+	cleanup := func() { pool.Exec(ctx, `DROP SCHEMA IF EXISTS `+ident(schema)+` CASCADE`) }
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if err := m.ensureDevAppSchema(ctx, schema); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	var recorded string
+	if err := pool.QueryRow(ctx, fmt.Sprintf(
+		`SELECT checksum FROM %s.schema_migrations WHERE module_id='mcksum' AND scope='app' AND version='0001'`,
+		ident(schema))).Scan(&recorded); err != nil {
+		t.Fatalf("read recorded checksum: %v", err)
+	}
+	if recorded == "" {
+		t.Fatal("checksum was not recorded at apply time")
+	}
+
+	editedFS := fstest.MapFS{
+		"sql/app/0001_init.up.sql": &fstest.MapFile{
+			// Same version, different bytes — models editing a released
+			// migration in place instead of adding 0002.
+			Data: []byte(`CREATE TABLE IF NOT EXISTS mcksum_items (id text PRIMARY KEY, extra text)`),
+		},
+	}
+	editedSum, err := checksumMigration(editedFS, "sql/app/0001_init.up.sql")
+	if err != nil {
+		t.Fatalf("checksum edited file: %v", err)
+	}
+	if editedSum == recorded {
+		t.Fatal("test fixture is broken: edited file hashes the same as the original")
+	}
+}
