@@ -57,6 +57,17 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
+      # Vulnerability scan (govulncheck). Owner decision D410: free scanner, no
+      # paid Code Security. Exit 3 means the code CALLS a vulnerable symbol.
+      # examples/template is its own module, so it is scanned separately.
+      - name: Vulnerability scan (govulncheck)
+        run: |
+          set -uo pipefail
+          GOBIN="$RUNNER_TEMP/govulncheck-bin" go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 || exit 1
+          status=0
+          "$RUNNER_TEMP/govulncheck-bin/govulncheck" ./... || status=1
+          ( cd examples/template && "$RUNNER_TEMP/govulncheck-bin/govulncheck" ./... ) || status=1
+          exit "$status"
       - run: go test -race ./...
       - run: go test -race -tags integration ./...
         env:
