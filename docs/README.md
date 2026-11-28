@@ -21,6 +21,7 @@ Reference + conceptual guides for building MirrorStack modules in Go.
 ## Reference
 
 - [API reference](./api-reference.md) — every `ms.*` function with one-line examples.
+- [Testing](./api-reference.md#testing) — `sdktest`, the contract-test package first-party modules use to catch manifest mistakes in a unit test instead of a deploy.
 
 ## Related
 
