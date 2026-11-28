@@ -175,7 +175,7 @@ func (q *DependencyQuery) resultLocal(ctx context.Context) (*DependencyResult, b
 	}
 
 	// THE SAFETY-CRITICAL LINE. app_a722a8a8_d413_435b_b21b_f4cbacb5ef73,
-	// app_twkpa_edu and app_dev share ONE database under ONE superuser, so this
+	// app_example_edu and app_dev share ONE database under ONE superuser, so this
 	// schema binding is the ENTIRE tenant-isolation story locally. It must come
 	// from db.SchemaFrom(ctx) — injected by devAppSchemaMiddleware
 	// (module.go) from the trusted X-MS-App-ID header — and from nothing
